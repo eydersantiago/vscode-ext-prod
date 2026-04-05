@@ -2,13 +2,21 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.1",
-  "publisher": "1",
+  "version": "0.0.4",
+  "publisher": "adaceen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eydersantiago/vscode-ext-prod.git"
+  },
   "engines": {
     "vscode": "^1.96.0"
   },
   "categories": [
     "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "browser": "./dist/web/extension.js",
@@ -65,6 +73,27 @@
           "minimum": 1,
           "default": 300,
           "description": "Tamaño máximo por archivo en KB."
+        },
+        "adaceen.backend.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3000",
+          "description": "URL base del backend ADACEEN para coordinar escaneos."
+        },
+        "adaceen.backend.scanWorkerKey": {
+          "type": "string",
+          "default": "",
+          "description": "Clave compartida (opcional) para autenticar el worker de escaneo."
+        },
+        "adaceen.backend.autoWorkerEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Si está activo, la extensión atiende automáticamente solicitudes de escaneo del dashboard."
+        },
+        "adaceen.backend.workerPollMs": {
+          "type": "number",
+          "minimum": 2000,
+          "default": 8000,
+          "description": "Intervalo en milisegundos para consultar solicitudes pendientes de escaneo."
         }
       }
     }

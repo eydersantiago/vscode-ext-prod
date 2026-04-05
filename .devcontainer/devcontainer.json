@@ -1,0 +1,26 @@
+{
+  "name": "adaceen-codespace",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "extensions": [
+    "adaceen.adaceen"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "adaceen.adaceen",
+        "dbaeumer.vscode-eslint",
+        "amodio.tsl-problem-matcher",
+        "ms-vscode.extension-test-runner"
+      ],
+      "settings": {
+        "remote.extensionKind": {
+          "adaceen.adaceen": [
+            "workspace",
+            "ui"
+          ]
+        }
+      }
+    }
+  },
+  "postAttachCommand": "bash .devcontainer/install-extensions.sh"
+}
