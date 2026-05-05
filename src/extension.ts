@@ -456,9 +456,18 @@ async function fetchJsonWithTimeout(
       signal: controller.signal,
     });
     const text = await response.text();
-    const data = text ? JSON.parse(text) : {};
+    let data: unknown = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = {};
+      }
+    }
     if (!response.ok) {
-      throw new Error(String(asRecord(data).error || `HTTP ${response.status}`));
+      const structuredError = toOptionalString(asRecord(data).error);
+      const rawError = toOptionalString(text);
+      throw new Error(structuredError || rawError || `HTTP ${response.status}`);
     }
     return data;
   } finally {
