@@ -16,7 +16,11 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:pdcCoach.ask",
+    "onCommand:pdcCoach.openPanel",
+    "onCommand:pdcCoach.saveProjectMemory",
+    "onView:pdcCoach.recommendations"
   ],
   "main": "./dist/extension.js",
   "browser": "./dist/web/extension.js",
@@ -36,11 +40,106 @@
       {
         "command": "adaceen.scanWorkspace",
         "title": "ADACEEN: Escanear workspace"
+      },
+      {
+        "command": "pdcCoach.ask",
+        "title": "ADACEEN: pedir recomendacion contextual",
+        "category": "ADACEEN"
+      },
+      {
+        "command": "pdcCoach.openPanel",
+        "title": "ADACEEN: abrir recomendaciones",
+        "category": "ADACEEN"
+      },
+      {
+        "command": "pdcCoach.saveProjectMemory",
+        "title": "ADACEEN: guardar memoria del proyecto",
+        "category": "ADACEEN"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "adaceenCoach",
+          "title": "ADACEEN",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "adaceenCoach": [
+        {
+          "type": "webview",
+          "id": "pdcCoach.recommendations",
+          "name": "Recomendaciones"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "pdcCoach.ask",
+          "when": "editorTextFocus",
+          "group": "navigation@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "adaceen.scanWorkspace"
+        },
+        {
+          "command": "pdcCoach.ask"
+        },
+        {
+          "command": "pdcCoach.openPanel"
+        },
+        {
+          "command": "pdcCoach.saveProjectMemory"
+        }
+      ]
+    },
     "configuration": {
       "title": "ADACEEN",
       "properties": {
+        "pdcCoach.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3000",
+          "description": "URL base del backend PDC. Si esta vacia se usa adaceen.backend.baseUrl."
+        },
+        "pdcCoach.sessionId": {
+          "type": "string",
+          "default": "",
+          "description": "x-session-id entregado por /api/auth/login para aplicar politica y guardar memoria."
+        },
+        "pdcCoach.idleThresholdMs": {
+          "type": "number",
+          "minimum": 5000,
+          "default": 45000,
+          "description": "Tiempo sin edicion/seleccion para detectar posible estancamiento."
+        },
+        "pdcCoach.backendTimeoutMs": {
+          "type": "number",
+          "minimum": 1000,
+          "default": 12000,
+          "description": "Timeout maximo por solicitud a /github-mentor o /api/projects/save."
+        },
+        "pdcCoach.showQuickPickOnSignal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Muestra QuickPick cuando se detecta inactividad, diagnostic repetido o tarea fallida."
+        },
+        "pdcCoach.maxCodeChars": {
+          "type": "number",
+          "minimum": 500,
+          "default": 6000,
+          "description": "Maximo de caracteres de codigo enviados en context.codeSnippet o selection."
+        },
+        "pdcCoach.maxProjectFiles": {
+          "type": "number",
+          "minimum": 1,
+          "default": 80,
+          "description": "Maximo de archivos capturados al guardar memoria del proyecto."
+        },
         "adaceen.scan.mode": {
           "type": "string",
           "enum": [

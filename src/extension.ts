@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { activateCoach } from './coach';
 
 const DEFAULT_INCLUDE_GLOB =
   '**/*.{ts,tsx,js,jsx,mjs,cjs,py,java,cpp,c,h,hpp,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}';
@@ -132,11 +133,11 @@ function toPositiveInt(value: unknown): number | undefined {
 }
 
 function toBoolean(value: unknown): boolean | undefined {
-  if (typeof value === 'boolean') return value;
-  if (typeof value !== 'string') return undefined;
+  if (typeof value === 'boolean') {return value;}
+  if (typeof value !== 'string') {return undefined;}
   const clean = value.trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(clean)) return true;
-  if (['0', 'false', 'no', 'off'].includes(clean)) return false;
+  if (['1', 'true', 'yes', 'on'].includes(clean)) {return true;}
+  if (['0', 'false', 'no', 'off'].includes(clean)) {return false;}
   return undefined;
 }
 
@@ -170,7 +171,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 function normalizeBackendBaseUrl(value: string | undefined): string {
   const fallback = DEFAULT_BACKEND_BASE_URL;
   const clean = toOptionalString(value);
-  if (!clean) return fallback;
+  if (!clean) {return fallback;}
   return clean.replace(/\/+$/, '');
 }
 
@@ -498,7 +499,7 @@ function extractRepoFromGitUrl(url: string): string | undefined {
 
   for (const pattern of patterns) {
     const match = clean.match(pattern);
-    if (!match) continue;
+    if (!match) {continue;}
     return `${match[1]}/${match[2]}`.toLowerCase();
   }
 
@@ -509,20 +510,20 @@ function parseRepoFromGitConfig(raw: string): string | undefined {
   const originSection = raw.match(/\[remote\s+"origin"\]([\s\S]*?)(?:\n\[|$)/i)?.[1] || '';
   const originUrl = originSection.match(/^\s*url\s*=\s*(.+)\s*$/im)?.[1];
   const fromOrigin = originUrl ? extractRepoFromGitUrl(originUrl) : undefined;
-  if (fromOrigin) return fromOrigin;
+  if (fromOrigin) {return fromOrigin;}
 
   const allUrls = raw.match(/^\s*url\s*=\s*(.+)\s*$/gim) || [];
   for (const line of allUrls) {
     const value = line.replace(/^\s*url\s*=\s*/i, '').trim();
     const parsed = extractRepoFromGitUrl(value);
-    if (parsed) return parsed;
+    if (parsed) {return parsed;}
   }
   return undefined;
 }
 
 function resolveGitDirUri(baseUri: vscode.Uri, gitDirRaw: string): vscode.Uri | undefined {
   const clean = gitDirRaw.trim().replace(/^"+|"+$/g, '');
-  if (!clean) return undefined;
+  if (!clean) {return undefined;}
 
   if (/^[a-z]+:\/\//i.test(clean)) {
     try {
@@ -560,10 +561,10 @@ async function readGitConfigText(folder: vscode.WorkspaceFolder): Promise<string
     const gitEntryUri = vscode.Uri.joinPath(folder.uri, '.git');
     const gitEntryDoc = await vscode.workspace.openTextDocument(gitEntryUri);
     const gitDirRaw = gitEntryDoc.getText().match(/^\s*gitdir:\s*(.+)\s*$/im)?.[1];
-    if (!gitDirRaw) return undefined;
+    if (!gitDirRaw) {return undefined;}
 
     const gitDirUri = resolveGitDirUri(folder.uri, gitDirRaw);
-    if (!gitDirUri) return undefined;
+    if (!gitDirUri) {return undefined;}
 
     const pointedConfigUri = vscode.Uri.joinPath(gitDirUri, 'config');
     const pointedConfigDoc = await vscode.workspace.openTextDocument(pointedConfigUri);
@@ -578,12 +579,12 @@ async function detectRepoFromGitExtension(
 ): Promise<string | undefined> {
   try {
     const gitExtension = vscode.extensions.getExtension<GitExtensionExports>('vscode.git');
-    if (!gitExtension) return undefined;
+    if (!gitExtension) {return undefined;}
 
     const gitExports = (gitExtension.isActive
       ? gitExtension.exports
       : await gitExtension.activate()) as GitExtensionExports | undefined;
-    if (!gitExports || typeof gitExports.getAPI !== 'function') return undefined;
+    if (!gitExports || typeof gitExports.getAPI !== 'function') {return undefined;}
 
     const api = gitExports.getAPI(1);
     const repositories = Array.isArray(api.repositories) ? api.repositories : [];
@@ -591,27 +592,27 @@ async function detectRepoFromGitExtension(
 
     for (const repo of repositories) {
       const rootUri = repo.rootUri;
-      if (!rootUri) continue;
+      if (!rootUri) {continue;}
 
       const rootRef = rootUri.toString().toLowerCase();
       const belongsToWorkspace = workspaceUris.some(
         (workspaceUri) => rootRef.startsWith(workspaceUri) || workspaceUri.startsWith(rootRef),
       );
-      if (!belongsToWorkspace) continue;
+      if (!belongsToWorkspace) {continue;}
 
       const remotes = Array.isArray(repo.state?.remotes) ? [...repo.state.remotes] : [];
       remotes.sort((a, b) => {
         const aIsOrigin = (a.name || '').toLowerCase() === 'origin';
         const bIsOrigin = (b.name || '').toLowerCase() === 'origin';
-        if (aIsOrigin === bIsOrigin) return 0;
+        if (aIsOrigin === bIsOrigin) {return 0;}
         return aIsOrigin ? -1 : 1;
       });
 
       for (const remote of remotes) {
         const candidate = remote.fetchUrl || remote.pushUrl;
-        if (!candidate) continue;
+        if (!candidate) {continue;}
         const parsed = extractRepoFromGitUrl(candidate);
-        if (parsed) return parsed;
+        if (parsed) {return parsed;}
       }
     }
   } catch {
@@ -624,9 +625,9 @@ async function detectRepoFromGitExtension(
 async function detectRepoFullName(workspaceFolders: readonly vscode.WorkspaceFolder[]): Promise<string | undefined> {
   for (const folder of workspaceFolders) {
     const gitConfigText = await readGitConfigText(folder);
-    if (!gitConfigText) continue;
+    if (!gitConfigText) {continue;}
     const parsed = parseRepoFromGitConfig(gitConfigText);
-    if (parsed) return parsed;
+    if (parsed) {return parsed;}
   }
   return detectRepoFromGitExtension(workspaceFolders);
 }
@@ -649,7 +650,7 @@ async function claimNextScanRequest(
   const request = asRecord(data.request);
   const id = toOptionalString(request.id);
   const repo = toOptionalString(request.repoFullName);
-  if (!id || !repo) return null;
+  if (!id || !repo) {return null;}
   return {
     id,
     repoFullName: repo.toLowerCase(),
@@ -693,6 +694,8 @@ async function sendScanFailure(
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  activateCoach(context);
+
   const output = vscode.window.createOutputChannel('ADACEEN');
   const startupSettings = resolveBackendSettings();
   output.appendLine(

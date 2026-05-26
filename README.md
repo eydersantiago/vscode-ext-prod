@@ -5,6 +5,15 @@ ADACEEN escanea archivos del workspace en VS Code (local o Codespaces), genera u
 ## Caracteristicas
 
 - Escaneo de archivos por `glob` con exclusiones.
+- Coach contextual para VS Code/Codespaces usando APIs nativas:
+- Code Actions cerca del cursor, seleccion o diagnostic.
+- Hover contextual con acceso rapido a ADACEEN.
+- QuickPick con opciones accionables.
+- Webview lateral persistente en la actividad ADACEEN.
+- StatusBar discreto para pedir ayuda manual.
+- Deteccion de inactividad, diagnostic repetido y tareas fallidas.
+- Llamadas a `POST /github-mentor` con contexto del editor activo.
+- Guardado de memoria del proyecto con `POST /api/projects/save`.
 - Soporte para entornos:
 - `local` (carpetas con `scheme=file`)
 - `codespace` (carpetas remotas)
@@ -20,6 +29,9 @@ ADACEEN escanea archivos del workspace en VS Code (local o Codespaces), genera u
 ## Comando
 
 - `ADACEEN: Escanear workspace`
+- `ADACEEN: pedir recomendacion contextual`
+- `ADACEEN: abrir recomendaciones`
+- `ADACEEN: guardar memoria del proyecto`
 
 Ejecutalo desde la paleta de comandos (`Ctrl+Shift+P`).
 
@@ -27,6 +39,13 @@ Ejecutalo desde la paleta de comandos (`Ctrl+Shift+P`).
 
 La extension expone estas opciones:
 
+- `pdcCoach.backendUrl`: URL base del backend PDC.
+- `pdcCoach.sessionId`: `x-session-id` para politica, telemetria y memoria.
+- `pdcCoach.idleThresholdMs`: tiempo de inactividad para detectar bloqueo.
+- `pdcCoach.backendTimeoutMs`: timeout de llamadas a backend.
+- `pdcCoach.showQuickPickOnSignal`: muestra QuickPick ante senales automaticas.
+- `pdcCoach.maxCodeChars`: maximo de caracteres enviados como contexto.
+- `pdcCoach.maxProjectFiles`: maximo de archivos al guardar memoria.
 - `adaceen.scan.mode`: `auto | local | codespace | all`
 - `adaceen.scan.includeGlob`: glob de inclusion
 - `adaceen.scan.excludeGlob`: glob de exclusion
