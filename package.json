@@ -113,6 +113,11 @@
           "default": true,
           "description": "Intenta consultar el backend para enriquecer las sugerencias del archivo activo; si falla, usa reglas locales."
         },
+        "adaceen.suggestions.autoRevealPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Abre automaticamente el panel ADACEEN de sugerencias cuando cambia el archivo activo."
+        },
         "adaceen.suggestions.debounceMs": {
           "type": "number",
           "minimum": 250,
