@@ -24,9 +24,11 @@ const ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB = 96;
 const ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS = 220;
 const ACTIVE_SUGGESTION_PROMPT_CODE_CHARS = 7200;
 const ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS = 1400;
+const ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS = 2400;
 const ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES = 24;
 const ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS = 110;
-const ACTIVE_SUGGESTION_SELECTION_STABLE_MS = 2000;
+const ACTIVE_SUGGESTION_CURSOR_IDLE_MS = 5000;
+const ACTIVE_SUGGESTION_ACTION_IDLE_MS = 10000;
 const WORKER_TICK_MS = 4000;
 const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md', 'markdown', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff']);
 
@@ -129,7 +131,9 @@ type ActiveEditorSnapshot = {
   line: number;
   column: number;
   lineCount: number;
-  selectedText: string;
+  selectionText: string;
+  selectionStartLine: number;
+  selectionEndLine: number;
   visibleText: string;
   content: string;
   currentLineText: string;
@@ -154,6 +158,9 @@ type ActiveSuggestionModel = {
   updatedAt: string;
   line: number;
   column: number;
+  completionText: string;
+  triggerKind: 'file' | 'cursor';
+  actionsVisible?: boolean;
   loading?: boolean;
 };
 
@@ -180,11 +187,19 @@ type BackendSuggestionSections = {
   all: string[];
 };
 
-type BackendSuggestionScope = 'file' | 'selection';
+type BackendSuggestionScope = 'file' | 'cursor';
+type BackendSuggestionRequestScope = 'file_summary' | 'cursor';
 
 type BackendSuggestionInFlight = {
   key: string;
-  request: Promise<ActiveSuggestionModel | null>;
+  request: Promise<string>;
+};
+
+type CursorIdleAnchor = {
+  uriString: string;
+  version: number;
+  line: number;
+  column: number;
 };
 
 type PendingScanRequest = {
@@ -1395,7 +1410,7 @@ function buildLocalFileOverview(snapshot: ActiveEditorSnapshot, index: Workspace
 }
 
 function getBackendSuggestionScopeLabel(scope: BackendSuggestionScope) {
-  return scope === 'selection' ? 'seleccion' : 'archivo';
+  return scope === 'cursor' ? 'cursor' : 'archivo';
 }
 
 function cleanBackendSuggestionLine(value: string) {
@@ -1492,6 +1507,13 @@ function getVisibleEditorText(editor: vscode.TextEditor, maxChars: number) {
   return chunks.join('\n').slice(0, maxChars);
 }
 
+function getSelectedEditorText(editor: vscode.TextEditor, maxChars: number) {
+  if (editor.selection.isEmpty) {
+    return '';
+  }
+  return editor.document.getText(editor.selection).slice(0, maxChars);
+}
+
 async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Promise<ActiveEditorSnapshot | null> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || !isSupportedActiveDocument(editor.document)) {
@@ -1508,13 +1530,13 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
   const filePath = vscode.workspace.asRelativePath(document.uri, false).replace(/\\/g, '/');
   const fileName = pathBaseName(filePath);
   const content = document.getText().slice(0, settings.maxCodeChars);
-  const selectedText = editor.selection.isEmpty
-    ? ''
-    : document.getText(editor.selection).slice(0, Math.min(settings.maxCodeChars, 8000));
   const activeLine = editor.selection.active.line;
   const currentLineText = activeLine >= 0 && activeLine < document.lineCount
     ? document.lineAt(activeLine).text
     : '';
+  const selectionText = getSelectedEditorText(editor, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS);
+  const selectionStartLine = editor.selection.isEmpty ? 0 : editor.selection.start.line + 1;
+  const selectionEndLine = editor.selection.isEmpty ? 0 : editor.selection.end.line + 1;
   const visibleText = getVisibleEditorText(editor, Math.min(settings.maxCodeChars, 12000));
   const language = inferActiveLanguage(filePath, document.languageId);
   const generatedAt = new Date().toISOString();
@@ -1524,7 +1546,11 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
     repoFullName,
     filePath,
     language,
-    selectedText,
+    line,
+    column,
+    selectionStartLine,
+    selectionEndLine,
+    selectionText,
     content,
   ].join('\n---adaceen---\n'));
 
@@ -1538,7 +1564,9 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
     line,
     column,
     lineCount: document.lineCount,
-    selectedText,
+    selectionText,
+    selectionStartLine,
+    selectionEndLine,
     visibleText,
     content,
     currentLineText,
@@ -1553,20 +1581,140 @@ function isSnapshotStillActive(snapshot: ActiveEditorSnapshot, scope: BackendSug
     return false;
   }
 
-  if (scope !== 'selection') {
+  if (scope !== 'cursor') {
     return true;
   }
 
-  if (editor.selection.isEmpty) {
+  return editor.selection.active.line + 1 === snapshot.line
+    && editor.selection.active.character + 1 === snapshot.column;
+}
+
+function getCursorIdleAnchor(): CursorIdleAnchor | null {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !isSupportedActiveDocument(editor.document)) {
+    return null;
+  }
+
+  return {
+    uriString: editor.document.uri.toString(),
+    version: editor.document.version,
+    line: editor.selection.active.line,
+    column: editor.selection.active.character,
+  };
+}
+
+function isCursorIdleAnchorStillActive(anchor: CursorIdleAnchor | null) {
+  if (!anchor) {
+    return false;
+  }
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.toString() !== anchor.uriString) {
     return false;
   }
 
-  const selectedText = editor.document.getText(editor.selection).slice(0, 8000);
-  return selectedText.trim().length > 0 && selectedText === snapshot.selectedText;
+  return editor.document.version === anchor.version
+    && editor.selection.active.line === anchor.line
+    && editor.selection.active.character === anchor.column;
 }
 
 function countMatches(value: string, pattern: RegExp) {
   return (value.match(pattern) || []).length;
+}
+
+function lineIndent(value: string) {
+  return value.match(/^\s*/)?.[0] || '';
+}
+
+function commentPrefixForLanguage(language: string, filePath: string) {
+  const normalized = language.toLowerCase();
+  const lowerPath = filePath.toLowerCase();
+  if (normalized === 'html' || lowerPath.endsWith('.html') || lowerPath.endsWith('.xml')) {
+    return { open: '<!-- ', close: ' -->' };
+  }
+  if (normalized === 'css' || normalized === 'scss' || lowerPath.endsWith('.css') || lowerPath.endsWith('.scss')) {
+    return { open: '/* ', close: ' */' };
+  }
+  return { open: '// ', close: '' };
+}
+
+function normalizeSuggestionForCode(value: string) {
+  return truncateInline(value.replace(/\s+/g, ' ').replace(/[.;]\s*$/g, ''), 120);
+}
+
+function extractFirstCodeFence(value: string) {
+  const match = value.match(/```(?:[A-Za-z0-9_+-]+)?\s*\r?\n([\s\S]*?)```/);
+  return match?.[1]?.trimEnd() || '';
+}
+
+function buildSuggestedCompletion(snapshot: ActiveEditorSnapshot, suggestion = '', mode: 'insert' | 'replace' = 'insert') {
+  const currentLine = snapshot.currentLineText || '';
+  const indent = lineIndent(currentLine);
+  const nestedIndent = `${indent}  `;
+  const normalizedLanguage = snapshot.language.toLowerCase();
+  const lowerPath = snapshot.filePath.toLowerCase();
+  const cleanSuggestion = normalizeSuggestionForCode(suggestion || `continuar en ${snapshot.fileName}`);
+  const currentTrimmed = currentLine.trimEnd();
+
+  if ((normalizedLanguage === 'python' || lowerPath.endsWith('.py')) && currentTrimmed.endsWith(':')) {
+    return `${indent}    # TODO: ${cleanSuggestion}\n${indent}    pass`;
+  }
+
+  if (
+    (normalizedLanguage.includes('javascript') || normalizedLanguage.includes('typescript') || /\.(mjs|cjs|jsx|tsx?)$/i.test(lowerPath))
+    && /[{\[]\s*$/.test(currentTrimmed)
+  ) {
+    return `${nestedIndent}// TODO: ${cleanSuggestion}`;
+  }
+
+  if (normalizedLanguage === 'python' || lowerPath.endsWith('.py')) {
+    return `${indent}# TODO: ${cleanSuggestion}`;
+  }
+
+  const comment = commentPrefixForLanguage(snapshot.language, snapshot.filePath);
+  const prefix = mode === 'replace' ? indent : indent;
+  return `${prefix}${comment.open}TODO: ${cleanSuggestion}${comment.close}`;
+}
+
+function getDocumentEol(document: vscode.TextDocument) {
+  return document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+}
+
+function normalizeCompletionTextForEditor(rawText: string, indent: string, eol: string) {
+  const normalized = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd();
+  if (!normalized.trim()) {
+    return '';
+  }
+
+  const lines = normalized.split('\n');
+  const firstCodeLine = lines.find((line) => line.trim().length > 0) || '';
+  if (indent && firstCodeLine && !/^\s/.test(firstCodeLine)) {
+    return lines.map((line) => line.trim() ? `${indent}${line}` : '').join(eol);
+  }
+
+  return lines.join(eol);
+}
+
+function buildCompletionFallbackForModel(model: ActiveSuggestionModel, lineText: string) {
+  const indent = lineIndent(lineText);
+  const comment = commentPrefixForLanguage(model.language, model.filePath);
+  const suggestion = normalizeSuggestionForCode(
+    model.suggestions[0] || model.nextSteps[0] || `continuar en ${model.fileName}`,
+  );
+  return `${indent}${comment.open}TODO: ${suggestion}${comment.close}`;
+}
+
+function getSelectedFullLineRange(editor: vscode.TextEditor) {
+  const selection = editor.selection;
+  const startLine = Math.max(0, Math.min(selection.start.line, editor.document.lineCount - 1));
+  let endLine = Math.max(0, Math.min(selection.end.line, editor.document.lineCount - 1));
+  if (!selection.isEmpty && selection.end.character === 0 && endLine > startLine) {
+    endLine -= 1;
+  }
+
+  return new vscode.Range(
+    new vscode.Position(startLine, 0),
+    editor.document.lineAt(endLine).range.end,
+  );
 }
 
 function buildLocalActiveSuggestion(
@@ -1580,18 +1728,14 @@ function buildLocalActiveSuggestion(
   const nextSteps: string[] = [];
   const fileOverview = buildLocalFileOverview(snapshot, projectIndex);
 
-  if (snapshot.selectedText) {
-    suggestions.push('La seleccion actual ya da buen foco: trabaja solo ese bloque y valida el cambio antes de tocar el resto.');
-    nextSteps.push('Convierte la seleccion en una prueba mental: entrada, proceso esperado y salida.');
+  if (snapshot.currentLineText.trim()) {
+    suggestions.push(`El cursor quedo en la linea ${snapshot.line}; revisa ese punto como posible bloqueo antes de cambiar mas codigo.`);
+    nextSteps.push(`Trabaja desde la linea ${snapshot.line}: completa una intencion pequena y valida el resultado.`);
   }
 
   if (/\b(TODO|FIXME)\b/i.test(code)) {
     const todoCount = countMatches(code, /\b(TODO|FIXME)\b/gi);
     suggestions.push(`Hay ${todoCount} marcador(es) TODO/FIXME; conviertelos en pasos pequenos y verificables.`);
-  }
-
-  if (snapshot.currentLineText.trim()) {
-    nextSteps.push(`Revisa la linea ${snapshot.line}: confirma que su responsabilidad sea clara antes de continuar.`);
   }
 
   if (language === 'python' || lowerPath.endsWith('.py')) {
@@ -1652,9 +1796,10 @@ function buildLocalActiveSuggestion(
     snapshot.repoFullName ? `repo ${snapshot.repoFullName}` : snapshot.workspaceName || 'workspace',
     snapshot.language,
     `${snapshot.lineCount} lineas`,
-    snapshot.selectedText ? 'seleccion activa' : `linea ${snapshot.line}`,
+    `cursor linea ${snapshot.line}`,
     isCodespaceRuntime() ? 'Codespaces' : 'VS Code',
   ], 5);
+  const compactSuggestions = uniqueCompactStrings(suggestions, 4);
 
   return {
     uriString: snapshot.uriString,
@@ -1665,7 +1810,7 @@ function buildLocalActiveSuggestion(
     title: `Sugerencias para ${snapshot.fileName}`,
     summary: fileOverview || `Archivo activo: ${snapshot.filePath} (${snapshot.language}, linea ${snapshot.line}).`,
     fileOverview,
-    suggestions: uniqueCompactStrings(suggestions, 4),
+    suggestions: compactSuggestions,
     nextSteps: uniqueCompactStrings(nextSteps, 3),
     chips,
     source: 'local',
@@ -1673,23 +1818,33 @@ function buildLocalActiveSuggestion(
     updatedAt: new Date().toISOString(),
     line: snapshot.line,
     column: snapshot.column,
+    completionText: buildSuggestedCompletion(snapshot, compactSuggestions[0] || nextSteps[0] || ''),
+    triggerKind: 'cursor',
+    actionsVisible: false,
   };
 }
 
 function buildBackendSuggestionContent(
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null = null,
-  scope: BackendSuggestionScope = 'file',
+  scope: BackendSuggestionRequestScope = 'file_summary',
 ) {
-  const includeSelection = scope === 'selection' && snapshot.selectedText.trim();
+  const selectionBlock = snapshot.selectionText.trim()
+    ? [
+      `Seleccion actual: lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine}`,
+      snapshot.selectionText.slice(0, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS),
+    ].join('\n')
+    : '';
+
   return [
     `Repositorio: ${snapshot.repoFullName || '(sin repo detectado)'}`,
     `Workspace: ${snapshot.workspaceName || '(sin workspace)'}`,
     `Archivo activo: ${snapshot.filePath}`,
     `Lenguaje: ${snapshot.language}`,
     `Cursor: linea ${snapshot.line}, columna ${snapshot.column}`,
+    scope === 'cursor' ? 'Disparador: cursor quieto durante 5 segundos; posible bloqueo del estudiante.' : '',
+    selectionBlock,
     `Lineas del archivo: ${snapshot.lineCount}`,
-    includeSelection ? `Seleccion activa:\n${snapshot.selectedText.slice(0, 2200)}` : '',
     snapshot.currentLineText ? `Linea actual:\n${snapshot.currentLineText}` : '',
     snapshot.visibleText ? `Texto visible del editor:\n${snapshot.visibleText.slice(0, ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS)}` : '',
     `Codigo del archivo activo (recorte local):\n${snapshot.content.slice(0, ACTIVE_SUGGESTION_PROMPT_CODE_CHARS)}`,
@@ -1697,19 +1852,41 @@ function buildBackendSuggestionContent(
   ].filter(Boolean).join('\n\n');
 }
 
-async function requestBackendActiveSuggestion(
+function buildBackendSuggestionQuestion(snapshot: ActiveEditorSnapshot, scope: BackendSuggestionRequestScope) {
+  if (scope === 'file_summary') {
+    return [
+      'Describe en 1 a 3 bullets que hace el archivo activo y cual parece ser su papel dentro del proyecto usando el mapa local del workspace.',
+      'Despues da 3 sugerencias breves y accionables para continuar en ese archivo.',
+      'No des la solucion completa ni inventes datos que no esten en el contexto.',
+    ].join(' ');
+  }
+
+  if (snapshot.selectionText.trim()) {
+    return [
+      'El estudiante selecciono un bloque del editor; interpreta esa seleccion como el foco principal.',
+      'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa seleccion.',
+      'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
+      'No des la solucion completa ni inventes datos que no esten en el contexto.',
+    ].join(' ');
+  }
+
+  return [
+    'El cursor quedo quieto 5 segundos en la linea indicada; interpreta esto como posible bloqueo del estudiante.',
+    'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa linea.',
+    'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
+    'No des la solucion completa ni inventes datos que no esten en el contexto.',
+  ].join(' ');
+}
+
+async function fetchBackendSuggestionText(
   settings: ActiveSuggestionSettings,
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null = null,
-  scope: BackendSuggestionScope = 'file',
-): Promise<ActiveSuggestionModel | null> {
-  if (!settings.useBackend) {
-    return null;
-  }
-
+  scope: BackendSuggestionRequestScope,
+): Promise<string> {
   const backend = resolveBackendSettings();
   if (!backend.baseUrl) {
-    return null;
+    return '';
   }
 
   const response = await fetchJsonWithTimeout(
@@ -1719,19 +1896,10 @@ async function requestBackendActiveSuggestion(
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
       body: JSON.stringify({
         tab_content: buildBackendSuggestionContent(snapshot, projectIndex, scope),
-        question: scope === 'selection'
-          ? [
-            'Analiza solo la seleccion activa dentro del archivo y explica que hace ese fragmento en 1 a 2 bullets.',
-            'Despues da 2 o 3 sugerencias breves y accionables sobre ese fragmento.',
-            'No des la solucion completa ni inventes datos que no esten en el contexto.',
-          ].join(' ')
-          : [
-            'Describe en 1 a 3 bullets que hace el archivo activo y cual parece ser su papel dentro del proyecto usando el mapa local del workspace.',
-            'Despues da 3 sugerencias breves y accionables para continuar en ese archivo.',
-            'No des la solucion completa ni inventes datos que no esten en el contexto.',
-          ].join(' '),
+        question: buildBackendSuggestionQuestion(snapshot, scope),
         tab_title: snapshot.filePath,
         tab_url: `vscode://${snapshot.repoFullName || snapshot.workspaceName || 'workspace'}/${snapshot.filePath}`,
+        suggestion_scope: scope,
       }),
     },
     settings.backendTimeoutMs,
@@ -1739,30 +1907,57 @@ async function requestBackendActiveSuggestion(
 
   const data = asRecord(response);
   const outputText = toOptionalString(data.output_text) || toOptionalString(data.outputText) || '';
-  if (!outputText) {
+  return outputText;
+}
+
+function buildBackendActiveSuggestionModel(
+  snapshot: ActiveEditorSnapshot,
+  projectIndex: WorkspaceProjectIndex | null,
+  scope: BackendSuggestionScope,
+  focusOutputText: string,
+  fileSummaryOutputText = '',
+): ActiveSuggestionModel | null {
+  if (!focusOutputText) {
     return null;
   }
 
-  const sections = parseBackendSuggestionSections(outputText);
-  const lines = sections.sugerencias.length > 0 ? sections.sugerencias : sections.all;
+  const focusSections = parseBackendSuggestionSections(focusOutputText);
+  const fileSummarySections = fileSummaryOutputText
+    ? parseBackendSuggestionSections(fileSummaryOutputText)
+    : focusSections;
+  const lines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
   if (lines.length === 0) {
     return null;
   }
 
   const localFallback = buildLocalActiveSuggestion(snapshot, projectIndex);
-  const fileOverview = sections.resumen.length > 0
-    ? truncateInline(sections.resumen.join(' '), 420)
+  const fileOverview = fileSummarySections.resumen.length > 0
+    ? truncateInline(fileSummarySections.resumen.join(' '), 420)
     : localFallback.fileOverview;
+  const focusSummary = focusSections.resumen.length > 0
+    ? truncateInline(focusSections.resumen.join(' '), 420)
+    : '';
+  const completionText = extractFirstCodeFence(focusOutputText)
+    || buildSuggestedCompletion(snapshot, lines[0] || localFallback.suggestions[0] || '');
+  const combinedSuggestions = uniqueCompactStrings([
+    ...lines,
+    ...(scope === 'cursor' ? fileSummarySections.sugerencias.slice(0, 2) : []),
+  ], 4);
   return {
     ...localFallback,
     title: `ADACEEN en ${snapshot.fileName}`,
-    summary: fileOverview || truncateInline(outputText.replace(/\s+/g, ' '), 260),
+    summary: scope === 'cursor'
+      ? focusSummary || fileOverview || truncateInline(focusOutputText.replace(/\s+/g, ' '), 260)
+      : fileOverview || truncateInline(focusOutputText.replace(/\s+/g, ' '), 260),
     fileOverview,
-    suggestions: lines.slice(0, 4),
-    nextSteps: lines.slice(1, 4).length > 0 ? lines.slice(1, 4) : localFallback.nextSteps,
+    suggestions: combinedSuggestions,
+    nextSteps: combinedSuggestions.slice(1, 4).length > 0 ? combinedSuggestions.slice(1, 4) : localFallback.nextSteps,
     source: 'backend',
     backendError: '',
     updatedAt: new Date().toISOString(),
+    completionText,
+    triggerKind: scope === 'cursor' ? 'cursor' : 'file',
+    actionsVisible: false,
   };
 }
 
@@ -2037,16 +2232,32 @@ class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvider, vsco
     const headline = this.model.loading
       ? 'Cargando sugerencias...'
       : this.model.suggestions[0] || this.model.fileOverview || this.model.title;
-    const lineIndex = Math.max(0, (Number(this.model.line) || 1) - 1);
-    return [
+    const lineIndex = Math.max(0, (Number(this.model.line) || 1) - 2);
+    const range = new vscode.Range(lineIndex, 0, lineIndex, 0);
+    const lenses = [
       new vscode.CodeLens(
-        new vscode.Range(lineIndex, 0, lineIndex, 0),
+        range,
         {
           title: `ADACEEN: ${truncateInline(headline, 96)}`,
           command: 'adaceen.openAssistant',
         },
       ),
     ];
+    if (this.model.actionsVisible && !this.model.loading) {
+      lenses.push(
+        new vscode.CodeLens(range, {
+          title: '$(arrow-down) Pegar debajo',
+          command: 'adaceen.applySuggestionCompletion',
+          arguments: ['insert'],
+        }),
+        new vscode.CodeLens(range, {
+          title: '$(wand) Autocompletar linea',
+          command: 'adaceen.applySuggestionCompletion',
+          arguments: ['replace'],
+        }),
+      );
+    }
+    return lenses;
   }
 
   dispose() {
@@ -2099,48 +2310,7 @@ function applySuggestionDecoration(
   model: ActiveSuggestionModel | null,
 ) {
   clearSuggestionDecorations(decorationType);
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || !model || editor.document.uri.toString() !== model.uriString) {
-    return;
-  }
-
-  const lineIndex = Math.max(0, Math.min(editor.document.lineCount - 1, editor.selection.active.line));
-  const isLoading = !!model.loading;
-  const headline = isLoading
-    ? 'Cargando sugerencias...'
-    : model.suggestions[0] || model.fileOverview || model.title;
-  const hoverLines = isLoading
-    ? [
-      `**ADACEEN**`,
-      '',
-      `Cargando sugerencias para ${model.fileName}...`,
-      model.fileOverview ? `Descripcion: ${model.fileOverview}` : '',
-    ]
-    : [
-      `**ADACEEN**`,
-      '',
-      model.fileOverview ? `**Que hace este archivo:** ${model.fileOverview}` : '',
-      '',
-      ...(model.suggestions || []).map((item) => `- ${item}`),
-    ];
-  editor.setDecorations(decorationType, [
-    {
-      range: new vscode.Range(lineIndex, 0, lineIndex, 0),
-      hoverMessage: new vscode.MarkdownString(hoverLines.filter(Boolean).join('\n')),
-      renderOptions: {
-        before: {
-          contentText: ` ADACEEN: ${truncateInline(headline, 84)} `,
-          color: isLoading ? '#7c4d00' : '#123a35',
-          backgroundColor: isLoading ? 'rgba(255, 229, 191, 0.96)' : 'rgba(214, 248, 235, 0.96)',
-          border: isLoading ? '1px solid rgba(201, 95, 48, 0.55)' : '1px solid rgba(51, 199, 137, 0.55)',
-          fontStyle: 'normal',
-          fontWeight: '700',
-          margin: '0 0.75rem 0 0',
-          textDecoration: 'none; border-radius: 999px; padding: 2px 8px;',
-        },
-      },
-    },
-  ]);
+  void model;
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -2162,12 +2332,15 @@ export function activate(context: vscode.ExtensionContext) {
     },
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
   });
-  const backendSuggestionCache = new Map<string, ActiveSuggestionModel>();
-  const backendSuggestionInFlight = new Map<BackendSuggestionScope, BackendSuggestionInFlight>();
-  const backendSuggestionRetryScheduled = new Set<BackendSuggestionScope>();
+  const backendSuggestionCache: Record<BackendSuggestionRequestScope, Map<string, string>> = {
+    cursor: new Map(),
+    file_summary: new Map(),
+  };
+  const backendSuggestionInFlight = new Map<string, BackendSuggestionInFlight>();
   let activeSuggestionModel: ActiveSuggestionModel | null = null;
   let suggestionTimer: ReturnType<typeof setTimeout> | null = null;
-  let selectionSuggestionTimer: ReturnType<typeof setTimeout> | null = null;
+  let cursorIdleSuggestionTimer: ReturnType<typeof setTimeout> | null = null;
+  let cursorActionTimer: ReturnType<typeof setTimeout> | null = null;
   let autoRevealedSuggestionUri = '';
   let workspaceProjectIndexCache: {
     identity: string;
@@ -2187,6 +2360,61 @@ export function activate(context: vscode.ExtensionContext) {
   const clearWorkspaceProjectIndexCache = () => {
     workspaceProjectIndexCache = null;
     workspaceProjectIndexInFlight = null;
+  };
+
+  const clearBackendSuggestionCaches = () => {
+    backendSuggestionCache.cursor.clear();
+    backendSuggestionCache.file_summary.clear();
+    backendSuggestionInFlight.clear();
+  };
+
+  const buildBackendSuggestionTextCacheKey = (
+    snapshot: ActiveEditorSnapshot,
+    projectIndex: WorkspaceProjectIndex | null,
+    scope: BackendSuggestionRequestScope,
+  ) => {
+    const projectKey = projectIndex?.cacheKey || 'sin-mapa';
+    if (scope === 'file_summary') {
+      const fileKey = stableStringHash([
+        snapshot.repoFullName,
+        snapshot.filePath,
+        snapshot.language,
+        snapshot.content,
+      ].join('\n---adaceen-file-summary---\n'));
+      return `${fileKey}:${projectKey}`;
+    }
+    return `${snapshot.cacheKey}:${projectKey}`;
+  };
+
+  const getBackendSuggestionText = async (
+    settings: ActiveSuggestionSettings,
+    snapshot: ActiveEditorSnapshot,
+    projectIndex: WorkspaceProjectIndex | null,
+    scope: BackendSuggestionRequestScope,
+  ) => {
+    const cacheKey = buildBackendSuggestionTextCacheKey(snapshot, projectIndex, scope);
+    const cached = backendSuggestionCache[scope].get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const inFlightKey = `${scope}:${cacheKey}`;
+    let inFlight = backendSuggestionInFlight.get(inFlightKey);
+    if (!inFlight) {
+      const request = fetchBackendSuggestionText(settings, snapshot, projectIndex, scope);
+      inFlight = { key: cacheKey, request };
+      backendSuggestionInFlight.set(inFlightKey, inFlight);
+      request.then(
+        () => backendSuggestionInFlight.delete(inFlightKey),
+        () => backendSuggestionInFlight.delete(inFlightKey),
+      );
+    }
+
+    const outputText = await inFlight.request;
+    if (outputText) {
+      backendSuggestionCache[scope].set(cacheKey, outputText);
+    }
+    return outputText;
   };
 
   const getWorkspaceProjectIndex = async () => {
@@ -2227,7 +2455,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   const refreshActiveSuggestion = async (reason = 'auto') => {
     const settings = resolveActiveSuggestionSettings();
-    const backendScope: BackendSuggestionScope = reason === 'selection' ? 'selection' : 'file';
+    const backendScope: BackendSuggestionScope = reason === 'cursor-idle' ? 'cursor' : 'file';
 
     if (!settings.enabled) {
       publishSuggestionModel(null, false);
@@ -2240,12 +2468,8 @@ export function activate(context: vscode.ExtensionContext) {
       return null;
     }
 
-    if (backendScope === 'selection' && !snapshot.selectedText.trim()) {
-      applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
-      return activeSuggestionModel;
-    }
-
     let model = buildLocalActiveSuggestion(snapshot);
+    model = { ...model, triggerKind: backendScope === 'cursor' ? 'cursor' : 'file', actionsVisible: false };
     publishSuggestionModel(model, true);
     if (settings.autoRevealPanel && backendScope === 'file' && autoRevealedSuggestionUri !== snapshot.uriString) {
       suggestionPanel.reveal(model, true);
@@ -2258,104 +2482,62 @@ export function activate(context: vscode.ExtensionContext) {
       if (!isSnapshotStillActive(snapshot, backendScope)) {
         return activeSuggestionModel;
       }
-      model = buildLocalActiveSuggestion(snapshot, projectIndex);
+      model = {
+        ...buildLocalActiveSuggestion(snapshot, projectIndex),
+        triggerKind: backendScope === 'cursor' ? 'cursor' : 'file',
+        actionsVisible: false,
+      };
       publishSuggestionModel(model, true);
     }
 
     if (settings.useBackend) {
-      const fileCacheKey = stableStringHash([
-        snapshot.repoFullName,
-        snapshot.filePath,
-        snapshot.language,
-        snapshot.content,
-      ].join('\n---adaceen-file---\n'));
-      const backendSnapshotKey = backendScope === 'selection' ? snapshot.cacheKey : fileCacheKey;
-      const backendCacheKey = `${backendScope}:${backendSnapshotKey}:${projectIndex?.cacheKey || 'sin-mapa'}`;
-      const cached = backendSuggestionCache.get(backendCacheKey);
-      if (cached) {
-        model = {
-          ...cached,
-          line: snapshot.line,
-          column: snapshot.column,
-          loading: false,
-          updatedAt: new Date().toISOString(),
-        };
-      } else if (
-        backendSuggestionInFlight.has(backendScope) &&
-        backendSuggestionInFlight.get(backendScope)?.key !== backendCacheKey
-      ) {
+      try {
+        const fileSummaryRequest = getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary');
+        const [focusOutputText, fileSummaryOutputText] = backendScope === 'cursor'
+          ? await Promise.all([
+            getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor'),
+            fileSummaryRequest,
+          ])
+          : [await fileSummaryRequest, ''];
+        const backendModel = buildBackendActiveSuggestionModel(
+          snapshot,
+          projectIndex,
+          backendScope,
+          focusOutputText,
+          fileSummaryOutputText,
+        );
+        if (backendModel) {
+          model = backendModel;
+        }
+      } catch (error) {
         model = {
           ...model,
           source: 'local-fallback',
-          backendError: `Ya hay una solicitud de ${getBackendSuggestionScopeLabel(backendScope)} en curso; se enviara la siguiente cuando termine.`,
+          backendError: truncateInline(String(error), 180),
           loading: false,
         };
-        if (!backendSuggestionRetryScheduled.has(backendScope)) {
-          backendSuggestionRetryScheduled.add(backendScope);
-          backendSuggestionInFlight.get(backendScope)?.request.then(
-            () => {
-              backendSuggestionRetryScheduled.delete(backendScope);
-              if (backendScope === 'selection') {
-                scheduleSelectionSuggestionRefresh();
-              } else {
-                scheduleActiveSuggestionRefresh('backend-drain');
-              }
-            },
-            () => {
-              backendSuggestionRetryScheduled.delete(backendScope);
-              if (backendScope === 'selection') {
-                scheduleSelectionSuggestionRefresh();
-              } else {
-                scheduleActiveSuggestionRefresh('backend-drain');
-              }
-            },
-          );
-        }
-      } else {
-        try {
-          let backendRequest = backendSuggestionInFlight.get(backendScope)?.request || null;
-          if (!backendRequest) {
-            backendRequest = requestBackendActiveSuggestion(settings, snapshot, projectIndex, backendScope);
-            backendSuggestionInFlight.set(backendScope, {
-              key: backendCacheKey,
-              request: backendRequest,
-            });
-            backendRequest.then(
-              () => {
-                backendSuggestionInFlight.delete(backendScope);
-              },
-              () => {
-                backendSuggestionInFlight.delete(backendScope);
-              },
-            );
-          }
-          const backendModel = await backendRequest;
-          if (backendModel) {
-            model = backendModel;
-            backendSuggestionCache.set(backendCacheKey, backendModel);
-          }
-        } catch (error) {
-          model = {
-            ...model,
-            source: 'local-fallback',
-            backendError: truncateInline(String(error), 180),
-            loading: false,
-          };
-          output.appendLine(`[Suggestions] Backend no disponible (${reason}): ${String(error)}`);
-        }
+        output.appendLine(
+          `[Suggestions] Backend no disponible (${reason}, ${getBackendSuggestionScopeLabel(backendScope)}): ${String(error)}`,
+        );
       }
     }
 
     if (!isSnapshotStillActive(snapshot, backendScope)) {
       return activeSuggestionModel;
     }
-    publishSuggestionModel(model, true);
-    if (settings.autoRevealPanel && autoRevealedSuggestionUri !== model.uriString) {
-      suggestionPanel.reveal(model, true);
-      autoRevealedSuggestionUri = model.uriString;
+    const keepVisibleActions = backendScope === 'cursor'
+      && !!activeSuggestionModel?.actionsVisible
+      && activeSuggestionModel.uriString === snapshot.uriString
+      && activeSuggestionModel.line === snapshot.line
+      && activeSuggestionModel.column === snapshot.column;
+    const finalModel = keepVisibleActions ? { ...model, actionsVisible: true } : model;
+    publishSuggestionModel(finalModel, true);
+    if (backendScope === 'file' && settings.autoRevealPanel && autoRevealedSuggestionUri !== finalModel.uriString) {
+      suggestionPanel.reveal(finalModel, true);
+      autoRevealedSuggestionUri = finalModel.uriString;
     }
-    output.appendLine(`[Suggestions] ${model.filePath} | scope=${backendScope} | fuente=${model.source} | linea=${model.line}`);
-    return model;
+    output.appendLine(`[Suggestions] ${finalModel.filePath} | scope=${backendScope} | fuente=${finalModel.source} | linea=${finalModel.line}`);
+    return finalModel;
   };
 
   const scheduleActiveSuggestionRefresh = (reason = 'auto') => {
@@ -2373,20 +2555,141 @@ export function activate(context: vscode.ExtensionContext) {
     }, settings.debounceMs);
   };
 
-  const scheduleSelectionSuggestionRefresh = () => {
-    if (selectionSuggestionTimer) {
-      clearTimeout(selectionSuggestionTimer);
-      selectionSuggestionTimer = null;
+  const clearCursorSuggestionTimers = () => {
+    if (cursorIdleSuggestionTimer) {
+      clearTimeout(cursorIdleSuggestionTimer);
+      cursorIdleSuggestionTimer = null;
     }
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.selection.isEmpty) {
-      applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
+    if (cursorActionTimer) {
+      clearTimeout(cursorActionTimer);
+      cursorActionTimer = null;
+    }
+  };
+
+  const hideSuggestionActions = () => {
+    if (!activeSuggestionModel?.actionsVisible) {
+      suggestionCodeLensProvider.update(activeSuggestionModel);
       return;
     }
-    selectionSuggestionTimer = setTimeout(() => {
-      selectionSuggestionTimer = null;
-      void refreshActiveSuggestion('selection');
-    }, ACTIVE_SUGGESTION_SELECTION_STABLE_MS);
+    publishSuggestionModel({ ...activeSuggestionModel, actionsVisible: false }, true);
+  };
+
+  const revealSuggestionActions = async (anchor: CursorIdleAnchor | null) => {
+    if (!anchor || !isCursorIdleAnchorStillActive(anchor)) {
+      return;
+    }
+
+    let model = activeSuggestionModel;
+    if (
+      !model ||
+      model.uriString !== anchor.uriString ||
+      model.triggerKind !== 'cursor' ||
+      model.line !== anchor.line + 1 ||
+      model.column !== anchor.column + 1
+    ) {
+      model = await refreshActiveSuggestion('cursor-idle');
+    }
+
+    if (!model || !isCursorIdleAnchorStillActive(anchor)) {
+      return;
+    }
+
+    publishSuggestionModel({ ...model, actionsVisible: true, triggerKind: 'cursor' }, true);
+  };
+
+  const scheduleCursorIdleSuggestionRefresh = () => {
+    const settings = resolveActiveSuggestionSettings();
+    clearCursorSuggestionTimers();
+    if (!settings.enabled) {
+      publishSuggestionModel(null, false);
+      return;
+    }
+
+    const anchor = getCursorIdleAnchor();
+    if (!anchor) {
+      publishSuggestionModel(null, true);
+      return;
+    }
+
+    if (activeSuggestionModel && activeSuggestionModel.uriString !== anchor.uriString) {
+      publishSuggestionModel(null, true);
+    } else {
+      hideSuggestionActions();
+    }
+
+    cursorIdleSuggestionTimer = setTimeout(() => {
+      cursorIdleSuggestionTimer = null;
+      if (!isCursorIdleAnchorStillActive(anchor)) {
+        return;
+      }
+      void refreshActiveSuggestion('cursor-idle');
+    }, ACTIVE_SUGGESTION_CURSOR_IDLE_MS);
+
+    cursorActionTimer = setTimeout(() => {
+      cursorActionTimer = null;
+      void revealSuggestionActions(anchor);
+    }, ACTIVE_SUGGESTION_ACTION_IDLE_MS);
+  };
+
+  const applySuggestionCompletion = async (mode: 'insert' | 'replace' = 'insert') => {
+    const editor = vscode.window.activeTextEditor;
+    const model = activeSuggestionModel;
+    if (!editor || !model || editor.document.uri.toString() !== model.uriString) {
+      vscode.window.showInformationMessage('ADACEEN: no hay una sugerencia activa para aplicar.');
+      return;
+    }
+
+    const modelLineIndex = Math.max(
+      0,
+      Math.min(editor.document.lineCount - 1, (Number(model.line) || editor.selection.active.line + 1) - 1),
+    );
+    const targetLine = editor.document.lineAt(modelLineIndex);
+    const eol = getDocumentEol(editor.document);
+    const rawCompletion = model.completionText || buildCompletionFallbackForModel(model, targetLine.text);
+    const completionText = normalizeCompletionTextForEditor(rawCompletion, lineIndent(targetLine.text), eol);
+    if (!completionText.trim()) {
+      vscode.window.showInformationMessage('ADACEEN: la sugerencia no trae codigo aplicable.');
+      return;
+    }
+
+    let editStart: vscode.Position;
+    let insertedText = completionText;
+    const applied = await editor.edit((editBuilder) => {
+      if (mode === 'replace') {
+        const range = editor.selection.isEmpty
+          ? new vscode.Range(new vscode.Position(modelLineIndex, 0), targetLine.range.end)
+          : getSelectedFullLineRange(editor);
+        editStart = range.start;
+        editBuilder.replace(range, completionText);
+        return;
+      }
+
+      const insertLineIndex = editor.selection.isEmpty
+        ? modelLineIndex
+        : Math.min(editor.document.lineCount - 1, getSelectedFullLineRange(editor).end.line);
+      const insertLine = editor.document.lineAt(insertLineIndex);
+      if (editor.selection.isEmpty && !insertLine.text.trim()) {
+        const range = new vscode.Range(new vscode.Position(insertLineIndex, 0), insertLine.range.end);
+        editStart = range.start;
+        editBuilder.replace(range, completionText);
+        return;
+      }
+
+      editStart = insertLine.range.end;
+      insertedText = `${eol}${completionText}`;
+      editBuilder.insert(editStart, insertedText);
+    });
+
+    if (!applied) {
+      vscode.window.showWarningMessage('ADACEEN: no se pudo aplicar la sugerencia en el editor.');
+      return;
+    }
+
+    const finalOffset = editor.document.offsetAt(editStart!) + insertedText.length;
+    const finalPosition = editor.document.positionAt(finalOffset);
+    editor.selection = new vscode.Selection(finalPosition, finalPosition);
+    publishSuggestionModel(null, true);
+    scheduleCursorIdleSuggestionRefresh();
   };
 
   const openAssistantDisposable = vscode.commands.registerCommand('adaceen.openAssistant', async () => {
@@ -2404,6 +2707,13 @@ export function activate(context: vscode.ExtensionContext) {
       suggestionPanel.reveal(model);
     }
   });
+
+  const applySuggestionCompletionDisposable = vscode.commands.registerCommand(
+    'adaceen.applySuggestionCompletion',
+    async (mode?: string) => {
+      await applySuggestionCompletion(mode === 'replace' ? 'replace' : 'insert');
+    },
+  );
 
   const scanWorkspaceDisposable = vscode.commands.registerCommand(
     'adaceen.scanWorkspace',
@@ -2441,27 +2751,25 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     openAssistantDisposable,
     refreshSuggestionsDisposable,
+    applySuggestionCompletionDisposable,
     suggestionPanel,
     suggestionCodeLensProvider,
     suggestionStatusBar,
     suggestionDecorationType,
     vscode.languages.registerCodeLensProvider(textDocumentSelector, suggestionCodeLensProvider),
     vscode.window.onDidChangeActiveTextEditor(() => {
-      if (selectionSuggestionTimer) {
-        clearTimeout(selectionSuggestionTimer);
-        selectionSuggestionTimer = null;
-      }
-      scheduleActiveSuggestionRefresh('active-editor');
+      scheduleCursorIdleSuggestionRefresh();
     }),
     vscode.window.onDidChangeTextEditorSelection((event) => {
       if (vscode.window.activeTextEditor?.document.uri.toString() === event.textEditor.document.uri.toString()) {
-        scheduleSelectionSuggestionRefresh();
+        scheduleCursorIdleSuggestionRefresh();
         applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
       }
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (vscode.window.activeTextEditor?.document.uri.toString() === event.document.uri.toString()) {
         applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
+        scheduleCursorIdleSuggestionRefresh();
       }
     }),
     vscode.workspace.onDidSaveTextDocument(() => {
@@ -2469,17 +2777,17 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       clearWorkspaceProjectIndexCache();
-      backendSuggestionCache.clear();
-      scheduleActiveSuggestionRefresh('workspace-folders');
+      clearBackendSuggestionCaches();
+      scheduleCursorIdleSuggestionRefresh();
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (
         event.affectsConfiguration('adaceen.suggestions') ||
         event.affectsConfiguration('adaceen.backend.baseUrl')
       ) {
-        backendSuggestionCache.clear();
+        clearBackendSuggestionCaches();
         clearWorkspaceProjectIndexCache();
-        scheduleActiveSuggestionRefresh('configuration');
+        scheduleCursorIdleSuggestionRefresh();
       }
     }),
     {
@@ -2488,10 +2796,7 @@ export function activate(context: vscode.ExtensionContext) {
           clearTimeout(suggestionTimer);
           suggestionTimer = null;
         }
-        if (selectionSuggestionTimer) {
-          clearTimeout(selectionSuggestionTimer);
-          selectionSuggestionTimer = null;
-        }
+        clearCursorSuggestionTimers();
         clearSuggestionDecorations(suggestionDecorationType);
       },
     },
@@ -2610,7 +2915,7 @@ export function activate(context: vscode.ExtensionContext) {
     },
   );
 
-  scheduleActiveSuggestionRefresh('activation');
+  scheduleCursorIdleSuggestionRefresh();
   void runWorkerCycle();
 }
 

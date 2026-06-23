@@ -44,6 +44,10 @@
       {
         "command": "adaceen.refreshSuggestions",
         "title": "ADACEEN: Actualizar sugerencias del archivo activo"
+      },
+      {
+        "command": "adaceen.applySuggestionCompletion",
+        "title": "ADACEEN: Aplicar sugerencia activa"
       }
     ],
     "configuration": {
