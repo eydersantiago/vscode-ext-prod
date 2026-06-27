@@ -18,6 +18,7 @@ const DEFAULT_WORKER_POLL_MS = 8000;
 const DEFAULT_ACTIVE_SUGGESTION_DEBOUNCE_MS = 900;
 const DEFAULT_ACTIVE_SUGGESTION_MAX_CODE_CHARS = 24000;
 const DEFAULT_ACTIVE_SUGGESTION_TIMEOUT_MS = 180000;
+const DEFAULT_CODE_ACTION_CONFIRM_LABEL = 'Aplicar reemplazo';
 const ACTIVE_SUGGESTION_INDEX_TTL_MS = 60_000;
 const ACTIVE_SUGGESTION_INDEX_MAX_FILES = 90;
 const ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB = 96;
@@ -106,10 +107,13 @@ type ScanComputation = {
 type BackendSettings = {
   baseUrl: string;
   scanWorkerKey: string;
+  sessionId: string;
   autoWorkerEnabled: boolean;
   workerPollMs: number;
   workerId: string;
   requestTimeoutMs: number;
+  codeActionsEnabled: boolean;
+  autoApplyCodeActions: boolean;
 };
 
 type ActiveSuggestionSettings = {
@@ -164,6 +168,16 @@ type ActiveSuggestionModel = {
   loading?: boolean;
 };
 
+type VscodeReplacementOption = {
+  id: string;
+  label: string;
+  description: string;
+  actionType: string;
+  originalText: string;
+  replacementText: string;
+  metadata: Record<string, unknown>;
+};
+
 type WorkspaceProjectIndexEntry = {
   path: string;
   language: string;
@@ -205,6 +219,18 @@ type CursorIdleAnchor = {
 type PendingScanRequest = {
   id: string;
   repoFullName: string;
+};
+
+type PendingCodeAction = {
+  id: string;
+  repoFullName: string;
+  branch: string;
+  filePath: string;
+  actionType: string;
+  title: string;
+  originalText: string;
+  replacementText: string;
+  metadata: Record<string, unknown>;
 };
 
 type GitRemoteRef = {
@@ -397,6 +423,11 @@ function resolveBackendSettings(): BackendSettings {
     toOptionalString(getEnv('ADACEEN_SCAN_WORKER_KEY')) ??
     '';
 
+  const sessionId =
+    toOptionalString(config.get<string>('backend.sessionId')) ??
+    toOptionalString(getEnv('ADACEEN_SESSION_ID')) ??
+    '';
+
   const autoWorkerEnabled =
     toBoolean(config.get<boolean>('backend.autoWorkerEnabled')) ??
     toBoolean(getEnv('ADACEEN_SCAN_WORKER_ENABLED')) ??
@@ -413,13 +444,26 @@ function resolveBackendSettings(): BackendSettings {
     toOptionalString(getEnv('ADACEEN_SCAN_WORKER_ID')) ??
     `adaceen-vscode-${vscode.env.remoteName || 'local'}`;
 
+  const codeActionsEnabled =
+    toBoolean(config.get<boolean>('backend.codeActionsEnabled')) ??
+    toBoolean(getEnv('ADACEEN_CODE_ACTIONS_ENABLED')) ??
+    true;
+
+  const autoApplyCodeActions =
+    toBoolean(config.get<boolean>('backend.autoApplyCodeActions')) ??
+    toBoolean(getEnv('ADACEEN_AUTO_APPLY_CODE_ACTIONS')) ??
+    false;
+
   return {
     baseUrl,
     scanWorkerKey,
+    sessionId,
     autoWorkerEnabled,
     workerPollMs,
     workerId,
     requestTimeoutMs: 120000,
+    codeActionsEnabled,
+    autoApplyCodeActions,
   };
 }
 
@@ -781,6 +825,21 @@ function buildWorkerHeaders(settings: BackendSettings, includeJsonContentType: b
   return headers;
 }
 
+function buildSessionHeaders(settings: BackendSettings, includeJsonContentType: boolean): Record<string, string> {
+  const headers = buildWorkerHeaders(settings, includeJsonContentType);
+  if (settings.sessionId) {
+    headers['x-session-id'] = settings.sessionId;
+  }
+  return headers;
+}
+
+function normalizeMetadata(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
+}
+
 function extractRepoFromGitUrl(url: string): string | undefined {
   const clean = url.trim();
   const patterns = [
@@ -960,6 +1019,86 @@ async function sendScanResult(
       method: 'POST',
       headers: buildWorkerHeaders(settings, true),
       body: JSON.stringify(payload),
+    },
+    settings.requestTimeoutMs,
+  );
+}
+
+async function claimNextCodeAction(
+  settings: BackendSettings,
+  repoFullName: string,
+): Promise<PendingCodeAction | null> {
+  if (!settings.sessionId || !settings.codeActionsEnabled) {
+    return null;
+  }
+
+  const query = `?repoFullName=${encodeURIComponent(repoFullName)}`;
+  const response = await fetchJsonWithTimeout(
+    `${settings.baseUrl}/api/projects/code-actions/next${query}`,
+    {
+      method: 'GET',
+      headers: buildSessionHeaders(settings, false),
+    },
+    settings.requestTimeoutMs,
+  );
+
+  const action = asRecord(asRecord(response).action);
+  const id = toOptionalString(action.id);
+  const repo = toOptionalString(action.repoFullName);
+  const filePath = toOptionalString(action.filePath);
+  const replacementText = toOptionalString(action.replacementText);
+  if (!id || !repo || !filePath || !replacementText) {
+    return null;
+  }
+
+  return {
+    id,
+    repoFullName: repo.toLowerCase(),
+    branch: toOptionalString(action.branch) || '',
+    filePath,
+    actionType: toOptionalString(action.actionType) || 'replace_selection',
+    title: toOptionalString(action.title) || 'Reemplazo sugerido',
+    originalText: toOptionalString(action.originalText) || '',
+    replacementText,
+    metadata: normalizeMetadata(action.metadata),
+  };
+}
+
+async function completeCodeAction(
+  settings: BackendSettings,
+  actionId: string,
+  metadata: Record<string, unknown>,
+) {
+  if (!settings.sessionId) {
+    return;
+  }
+
+  await fetchJsonWithTimeout(
+    `${settings.baseUrl}/api/projects/code-actions/${encodeURIComponent(actionId)}/complete`,
+    {
+      method: 'POST',
+      headers: buildSessionHeaders(settings, true),
+      body: JSON.stringify({ metadata }),
+    },
+    settings.requestTimeoutMs,
+  );
+}
+
+async function failCodeAction(
+  settings: BackendSettings,
+  actionId: string,
+  errorMessage: string,
+) {
+  if (!settings.sessionId) {
+    return;
+  }
+
+  await fetchJsonWithTimeout(
+    `${settings.baseUrl}/api/projects/code-actions/${encodeURIComponent(actionId)}/fail`,
+    {
+      method: 'POST',
+      headers: buildSessionHeaders(settings, true),
+      body: JSON.stringify({ error: errorMessage.slice(0, 1200) }),
     },
     settings.requestTimeoutMs,
   );
@@ -1717,6 +1856,191 @@ function getSelectedFullLineRange(editor: vscode.TextEditor) {
   );
 }
 
+function splitRelativePath(value: string) {
+  const clean = value.replace(/\\/g, '/').replace(/^\/+/, '');
+  const parts = clean.split('/').filter(Boolean);
+  if (parts.some((part) => part === '..' || part === '.')) {
+    return [];
+  }
+  return parts;
+}
+
+async function uriExists(uri: vscode.Uri) {
+  try {
+    await vscode.workspace.fs.stat(uri);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveWorkspaceFileUri(filePath: string): Promise<vscode.Uri | null> {
+  const workspaceFolders = vscode.workspace.workspaceFolders || [];
+  const parts = splitRelativePath(filePath);
+  if (!workspaceFolders.length || !parts.length) {
+    return null;
+  }
+
+  for (const folder of workspaceFolders) {
+    const candidates: string[][] = [parts];
+    if (parts[0] === folder.name && parts.length > 1) {
+      candidates.push(parts.slice(1));
+    }
+
+    for (const candidate of candidates) {
+      const uri = vscode.Uri.joinPath(folder.uri, ...candidate);
+      if (await uriExists(uri)) {
+        return uri;
+      }
+    }
+  }
+
+  return null;
+}
+
+function rangeForFirstTextMatch(document: vscode.TextDocument, needle: string): vscode.Range | null {
+  if (!needle) {
+    return null;
+  }
+  const index = document.getText().indexOf(needle);
+  if (index < 0) {
+    return null;
+  }
+  const start = document.positionAt(index);
+  const end = document.positionAt(index + needle.length);
+  return new vscode.Range(start, end);
+}
+
+function metadataLineNumber(metadata: Record<string, unknown>) {
+  const value = metadata.line;
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number.parseInt(value, 10)
+      : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+function rangeForCodeActionFallback(editor: vscode.TextEditor, action: PendingCodeAction): vscode.Range {
+  const document = editor.document;
+  const lineFromMetadata = metadataLineNumber(action.metadata);
+  const actionType = action.actionType.toLowerCase();
+  if (lineFromMetadata > 0 || actionType.includes('line')) {
+    const lineIndex = Math.max(0, Math.min(document.lineCount - 1, (lineFromMetadata || editor.selection.active.line + 1) - 1));
+    return document.lineAt(lineIndex).range;
+  }
+
+  if (!editor.selection.isEmpty) {
+    return getSelectedFullLineRange(editor);
+  }
+
+  const activeLine = Math.max(0, Math.min(document.lineCount - 1, editor.selection.active.line));
+  return document.lineAt(activeLine).range;
+}
+
+async function applyPendingCodeAction(
+  action: PendingCodeAction,
+  settings: BackendSettings,
+  output: vscode.OutputChannel,
+) {
+  const uri = await resolveWorkspaceFileUri(action.filePath);
+  if (!uri) {
+    throw new Error(`No se encontro el archivo ${action.filePath} en el workspace abierto.`);
+  }
+
+  const document = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+  const label = truncateInline(action.title || 'Reemplazo sugerido', 80);
+  if (!settings.autoApplyCodeActions) {
+    const answer = await vscode.window.showInformationMessage(
+      `ADACEEN: ${label}`,
+      { modal: false },
+      DEFAULT_CODE_ACTION_CONFIRM_LABEL,
+      'Omitir',
+    );
+    if (answer !== DEFAULT_CODE_ACTION_CONFIRM_LABEL) {
+      throw new Error('Reemplazo omitido por el usuario en VS Code.');
+    }
+  }
+
+  const directRange = rangeForFirstTextMatch(document, action.originalText);
+  const range = directRange || rangeForCodeActionFallback(editor, action);
+  const applied = await editor.edit((editBuilder) => {
+    editBuilder.replace(range, action.replacementText);
+  });
+  if (!applied) {
+    throw new Error(`No se pudo aplicar el reemplazo en ${action.filePath}.`);
+  }
+
+  const finalOffset = editor.document.offsetAt(range.start) + action.replacementText.length;
+  const finalPosition = editor.document.positionAt(finalOffset);
+  editor.selection = new vscode.Selection(finalPosition, finalPosition);
+  output.appendLine(`[CodeActions] Reemplazo aplicado: ${action.filePath} (${action.id}).`);
+
+  return {
+    filePath: action.filePath,
+    replacedByMatch: !!directRange,
+    line: range.start.line + 1,
+    character: range.start.character + 1,
+    appliedAt: new Date().toISOString(),
+  };
+}
+
+async function processNextCodeActionForRepo(
+  settings: BackendSettings,
+  repoFullName: string,
+  output: vscode.OutputChannel,
+  manual = false,
+) {
+  if (!settings.sessionId) {
+    if (manual) {
+      vscode.window.showWarningMessage(
+        'ADACEEN: configura adaceen.backend.sessionId para sincronizar reemplazos con el navegador.',
+      );
+    }
+    return false;
+  }
+
+  if (!settings.codeActionsEnabled) {
+    if (manual) {
+      vscode.window.showInformationMessage('ADACEEN: la cola de reemplazos del navegador esta desactivada.');
+    }
+    return false;
+  }
+
+  const action = await claimNextCodeAction(settings, repoFullName);
+  if (!action) {
+    if (manual) {
+      vscode.window.showInformationMessage(`ADACEEN: no hay reemplazos pendientes para ${repoFullName}.`);
+    }
+    return false;
+  }
+
+  try {
+    output.appendLine(`[CodeActions] Reemplazo reclamado: ${action.id} | ${action.filePath}.`);
+    const metadata = await applyPendingCodeAction(action, settings, output);
+    await completeCodeAction(settings, action.id, {
+      ...action.metadata,
+      ...metadata,
+      workerId: settings.workerId,
+    });
+    if (manual) {
+      vscode.window.showInformationMessage(`ADACEEN: reemplazo aplicado en ${action.filePath}.`);
+    }
+  } catch (error) {
+    const message = String(error);
+    output.appendLine(`[CodeActions] No se pudo aplicar ${action.id}: ${message}`);
+    await failCodeAction(settings, action.id, message).catch((failError) => {
+      output.appendLine(`[CodeActions] No se pudo reportar fallo ${action.id}: ${String(failError)}`);
+    });
+    if (manual) {
+      vscode.window.showWarningMessage(`ADACEEN: ${message}`);
+    }
+  }
+
+  return true;
+}
+
 function buildLocalActiveSuggestion(
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null = null,
@@ -1959,6 +2283,115 @@ function buildBackendActiveSuggestionModel(
     triggerKind: scope === 'cursor' ? 'cursor' : 'file',
     actionsVisible: false,
   };
+}
+
+function detectBranchName() {
+  return toOptionalString(getEnv('ADACEEN_BRANCH')) ??
+    toOptionalString(getEnv('GITHUB_REF_NAME')) ??
+    toOptionalString(getEnv('BRANCH_NAME')) ??
+    '';
+}
+
+function summarizeActiveSuggestion(model: ActiveSuggestionModel) {
+  return uniqueCompactStrings([
+    model.summary,
+    model.fileOverview,
+    ...model.suggestions,
+  ], 5).join('\n');
+}
+
+function buildRackReplacementOptions(
+  snapshot: ActiveEditorSnapshot,
+  model: ActiveSuggestionModel,
+): VscodeReplacementOption[] {
+  const fallback = buildSuggestedCompletion(snapshot, model.suggestions[0] || model.summary, 'replace');
+  const replacementText = model.completionText || fallback;
+  if (!replacementText.trim()) {
+    return [];
+  }
+
+  const sharedMetadata: Record<string, unknown> = {
+    source: model.source,
+    triggerKind: model.triggerKind,
+    line: model.line,
+    column: model.column,
+    generatedAt: model.updatedAt,
+    language: model.language,
+  };
+  const options: VscodeReplacementOption[] = [];
+
+  if (snapshot.selectionText.trim()) {
+    options.push({
+      id: 'replace-selection',
+      label: 'Reemplazar seleccion',
+      description: 'Sustituye el texto seleccionado en VS Code con la sugerencia activa.',
+      actionType: 'replace_selection',
+      originalText: snapshot.selectionText,
+      replacementText,
+      metadata: {
+        ...sharedMetadata,
+        selectionStartLine: snapshot.selectionStartLine,
+        selectionEndLine: snapshot.selectionEndLine,
+      },
+    });
+  }
+
+  options.push({
+    id: 'replace-current-line',
+    label: 'Reemplazar linea actual',
+    description: `Sustituye la linea ${snapshot.line} de ${snapshot.fileName}.`,
+    actionType: 'replace_line',
+    originalText: snapshot.currentLineText,
+    replacementText,
+    metadata: sharedMetadata,
+  });
+
+  return options.slice(0, 3);
+}
+
+function buildRackFileList(snapshot: ActiveEditorSnapshot, projectIndex: WorkspaceProjectIndex | null) {
+  const files = projectIndex?.files.map((entry) => entry.path).filter(Boolean) || [];
+  if (!files.includes(snapshot.filePath)) {
+    files.unshift(snapshot.filePath);
+  }
+  return [...new Set(files)].slice(0, 120000);
+}
+
+async function publishActiveEditorRack(
+  snapshot: ActiveEditorSnapshot,
+  model: ActiveSuggestionModel,
+  projectIndex: WorkspaceProjectIndex | null,
+) {
+  const settings = resolveBackendSettings();
+  if (!settings.baseUrl || !settings.sessionId) {
+    return;
+  }
+
+  const files = buildRackFileList(snapshot, projectIndex);
+  const folders = [...new Set(projectIndex?.folders || [])].slice(0, 120000);
+  await fetchJsonWithTimeout(
+    `${settings.baseUrl}/api/projects/rack`,
+    {
+      method: 'POST',
+      headers: buildSessionHeaders(settings, true),
+      body: JSON.stringify({
+        source: 'vscode_extension',
+        repoFullName: snapshot.repoFullName,
+        branch: detectBranchName(),
+        generatedAt: model.updatedAt || snapshot.generatedAt,
+        totalEntries: files.length + folders.length,
+        totalFiles: files.length,
+        totalFolders: folders.length,
+        files,
+        folders,
+        activeFilePath: snapshot.filePath,
+        activeCodeSnippet: snapshot.selectionText || snapshot.visibleText || snapshot.currentLineText,
+        activeSuggestion: summarizeActiveSuggestion(model),
+        replacementOptions: buildRackReplacementOptions(snapshot, model),
+      }),
+    },
+    30000,
+  );
 }
 
 class AdaceenActiveSuggestionPanel implements vscode.Disposable {
@@ -2342,6 +2775,7 @@ export function activate(context: vscode.ExtensionContext) {
   let cursorIdleSuggestionTimer: ReturnType<typeof setTimeout> | null = null;
   let cursorActionTimer: ReturnType<typeof setTimeout> | null = null;
   let autoRevealedSuggestionUri = '';
+  let rackSyncErrorNotified = false;
   let workspaceProjectIndexCache: {
     identity: string;
     expiresAt: number;
@@ -2532,6 +2966,16 @@ export function activate(context: vscode.ExtensionContext) {
       && activeSuggestionModel.column === snapshot.column;
     const finalModel = keepVisibleActions ? { ...model, actionsVisible: true } : model;
     publishSuggestionModel(finalModel, true);
+    void publishActiveEditorRack(snapshot, finalModel, projectIndex)
+      .then(() => {
+        rackSyncErrorNotified = false;
+      })
+      .catch((error) => {
+        if (!rackSyncErrorNotified) {
+          rackSyncErrorNotified = true;
+          output.appendLine(`[Sync] No se pudo publicar el archivo activo hacia el navegador: ${String(error)}`);
+        }
+      });
     if (backendScope === 'file' && settings.autoRevealPanel && autoRevealedSuggestionUri !== finalModel.uriString) {
       suggestionPanel.reveal(finalModel, true);
       autoRevealedSuggestionUri = finalModel.uriString;
@@ -2715,6 +3159,43 @@ export function activate(context: vscode.ExtensionContext) {
     },
   );
 
+  const setBackendSessionIdDisposable = vscode.commands.registerCommand('adaceen.setBackendSessionId', async () => {
+    const current = resolveBackendSettings().sessionId;
+    const sessionId = await vscode.window.showInputBox({
+      title: 'ADACEEN: Configurar sesión compartida',
+      prompt: 'Pega el sessionId copiado desde el overlay del navegador.',
+      value: current,
+      ignoreFocusOut: true,
+      password: false,
+      validateInput: (value) => value.trim().length > 0 ? undefined : 'El sessionId no puede estar vacio.',
+    });
+    if (sessionId === undefined) {
+      return;
+    }
+
+    await vscode.workspace
+      .getConfiguration('adaceen')
+      .update('backend.sessionId', sessionId.trim(), vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage('ADACEEN: sesión compartida configurada.');
+    scheduleCursorIdleSuggestionRefresh();
+  });
+
+  const applyNextCodeActionDisposable = vscode.commands.registerCommand('adaceen.applyNextCodeAction', async () => {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders?.length) {
+      vscode.window.showWarningMessage('ADACEEN: abre una carpeta o workspace antes de aplicar reemplazos.');
+      return;
+    }
+
+    const repoFullName = await detectRepoFullName(workspaceFolders);
+    if (!repoFullName) {
+      vscode.window.showWarningMessage('ADACEEN: no pude detectar el repositorio GitHub owner/repo del workspace.');
+      return;
+    }
+
+    await processNextCodeActionForRepo(resolveBackendSettings(), repoFullName, output, true);
+  });
+
   const scanWorkspaceDisposable = vscode.commands.registerCommand(
     'adaceen.scanWorkspace',
     async (args?: ScanCommandArgs) => {
@@ -2752,6 +3233,8 @@ export function activate(context: vscode.ExtensionContext) {
     openAssistantDisposable,
     refreshSuggestionsDisposable,
     applySuggestionCompletionDisposable,
+    setBackendSessionIdDisposable,
+    applyNextCodeActionDisposable,
     suggestionPanel,
     suggestionCodeLensProvider,
     suggestionStatusBar,
@@ -2783,7 +3266,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (
         event.affectsConfiguration('adaceen.suggestions') ||
-        event.affectsConfiguration('adaceen.backend.baseUrl')
+        event.affectsConfiguration('adaceen.backend')
       ) {
         clearBackendSuggestionCaches();
         clearWorkspaceProjectIndexCache();
@@ -2846,6 +3329,12 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       missingRepoPollCount = 0;
+
+      const processedCodeAction = await processNextCodeActionForRepo(settings, repoFullName, output, false);
+      if (processedCodeAction) {
+        idlePollCount = 0;
+        return;
+      }
 
       const request = await claimNextScanRequest(settings, repoFullName);
       if (!request) {

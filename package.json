@@ -48,6 +48,14 @@
       {
         "command": "adaceen.applySuggestionCompletion",
         "title": "ADACEEN: Aplicar sugerencia activa"
+      },
+      {
+        "command": "adaceen.setBackendSessionId",
+        "title": "ADACEEN: Configurar sesión compartida"
+      },
+      {
+        "command": "adaceen.applyNextCodeAction",
+        "title": "ADACEEN: Aplicar siguiente reemplazo del navegador"
       }
     ],
     "configuration": {
@@ -96,6 +104,11 @@
           "default": "",
           "description": "Clave compartida (opcional) para autenticar el worker de escaneo."
         },
+        "adaceen.backend.sessionId": {
+          "type": "string",
+          "default": "",
+          "description": "ID de sesión ADACEEN compartido con el overlay del navegador para sincronizar sugerencias y reemplazos."
+        },
         "adaceen.backend.autoWorkerEnabled": {
           "type": "boolean",
           "default": true,
@@ -106,6 +119,16 @@
           "minimum": 2000,
           "default": 8000,
           "description": "Intervalo en milisegundos para consultar solicitudes pendientes de escaneo."
+        },
+        "adaceen.backend.codeActionsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Consulta reemplazos enviados desde el overlay del navegador para el workspace abierto."
+        },
+        "adaceen.backend.autoApplyCodeActions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Aplica los reemplazos enviados desde el navegador sin pedir confirmación en VS Code."
         },
         "adaceen.suggestions.enabled": {
           "type": "boolean",
