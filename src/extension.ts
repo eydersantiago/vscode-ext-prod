@@ -14,11 +14,12 @@ const DEFAULT_MAX_FILE_BYTES = 300 * 1024; // 300 KB por archivo
 const DEFAULT_MAX_DOCUMENTS = 12;
 const DEFAULT_MAX_DOCUMENT_BYTES = 1024 * 1024;
 const DEFAULT_BACKEND_BASE_URL = 'http://127.0.0.1:3000';
+const DEFAULT_CODESPACES_BACKEND_BASE_URL = 'https://app-adaceen-api-eyder05232002.azurewebsites.net';
 const DEFAULT_WORKER_POLL_MS = 8000;
 const DEFAULT_ACTIVE_SUGGESTION_DEBOUNCE_MS = 900;
 const DEFAULT_ACTIVE_SUGGESTION_MAX_CODE_CHARS = 24000;
 const DEFAULT_ACTIVE_SUGGESTION_TIMEOUT_MS = 120000;
-const ACTIVE_SUGGESTION_FALLBACK_DELAY_MS = 120000;
+const ACTIVE_SUGGESTION_FALLBACK_DELAY_MS = 30000;
 const DEFAULT_CODE_ACTION_CONFIRM_LABEL = 'Aplicar reemplazo';
 const ACTIVE_SUGGESTION_INDEX_TTL_MS = 60_000;
 const ACTIVE_SUGGESTION_INDEX_MAX_FILES = 90;
@@ -29,7 +30,7 @@ const ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS = 1400;
 const ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS = 2400;
 const ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES = 24;
 const ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS = 110;
-const ACTIVE_SUGGESTION_CURSOR_IDLE_MS = 5000;
+const ACTIVE_SUGGESTION_CURSOR_IDLE_MS = 3000;
 const ACTIVE_SUGGESTION_ACTION_IDLE_MS = 10000;
 const ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS = 3500;
 const WORKER_TICK_MS = 4000;
@@ -363,6 +364,16 @@ function normalizeBackendBaseUrl(value: string | undefined): string {
   return clean.replace(/\/+$/, '');
 }
 
+function getConfiguredString(config: vscode.WorkspaceConfiguration, key: string): string | undefined {
+  const inspected = config.inspect<string>(key);
+  return toOptionalString(inspected?.workspaceFolderLanguageValue) ??
+    toOptionalString(inspected?.workspaceFolderValue) ??
+    toOptionalString(inspected?.workspaceLanguageValue) ??
+    toOptionalString(inspected?.workspaceValue) ??
+    toOptionalString(inspected?.globalLanguageValue) ??
+    toOptionalString(inspected?.globalValue);
+}
+
 function isCodespaceRuntime(): boolean {
   const remoteName = (vscode.env.remoteName ?? '').toLowerCase();
   if (remoteName.includes('codespace')) {
@@ -449,10 +460,15 @@ function resolveScanOptions(args: ScanCommandArgs | undefined): ScanOptions {
 
 function resolveBackendSettings(): BackendSettings {
   const config = vscode.workspace.getConfiguration('adaceen');
+  const configuredBaseUrl = getConfiguredString(config, 'backend.baseUrl');
+  const defaultBaseUrl = isCodespaceRuntime()
+    ? DEFAULT_CODESPACES_BACKEND_BASE_URL
+    : DEFAULT_BACKEND_BASE_URL;
 
   const baseUrl = normalizeBackendBaseUrl(
-    toOptionalString(config.get<string>('backend.baseUrl')) ??
-      toOptionalString(getEnv('ADACEEN_BACKEND_URL')),
+    configuredBaseUrl ??
+      toOptionalString(getEnv('ADACEEN_BACKEND_URL')) ??
+      defaultBaseUrl,
   );
 
   const scanWorkerKey =
@@ -520,7 +536,7 @@ function resolveActiveSuggestionSettings(): ActiveSuggestionSettings {
   const autoRevealPanel =
     toBoolean(config.get<boolean>('suggestions.autoRevealPanel')) ??
     toBoolean(getEnv('ADACEEN_SUGGESTIONS_AUTO_REVEAL_PANEL')) ??
-    true;
+    false;
 
   const debounceMs = Math.max(
     250,
@@ -1458,6 +1474,30 @@ function normalizeBackendSuggestionResult(value: unknown): BackendSuggestionResu
 function delay(ms: number) {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
+function withActiveSuggestionDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  if (timeoutMs <= 0) {
+    return promise;
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<T>((resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`Backend tardo mas de ${Math.round(timeoutMs / 1000)}s; se muestra fallback local.`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        if (timeout) clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        if (timeout) clearTimeout(timeout);
+        reject(error);
+      },
+    );
   });
 }
 
@@ -2555,7 +2595,7 @@ function buildBackendSuggestionContent(
     `Archivo activo: ${snapshot.filePath}`,
     `Lenguaje: ${snapshot.language}`,
     isFileSummary ? '' : `Cursor: linea ${snapshot.line}, columna ${snapshot.column}`,
-    scope === 'cursor' ? 'Disparador: cursor quieto durante 5 segundos; posible bloqueo del estudiante.' : '',
+    scope === 'cursor' ? 'Disparador: cursor quieto durante 3 segundos; posible bloqueo del estudiante.' : '',
     selectionBlock,
     `Lineas del archivo: ${snapshot.lineCount}`,
     !isFileSummary && snapshot.currentLineText ? `Linea actual:\n${snapshot.currentLineText}` : '',
@@ -2585,7 +2625,7 @@ function buildBackendSuggestionQuestion(snapshot: ActiveEditorSnapshot, scope: B
   }
 
   return [
-    'El cursor quedo quieto 5 segundos en la linea indicada; interpreta esto como posible bloqueo del estudiante.',
+    'El cursor quedo quieto 3 segundos en la linea indicada; interpreta esto como posible bloqueo del estudiante.',
     'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa linea.',
     'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
     'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
@@ -3012,12 +3052,12 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     };
     const loadingLineMarkup = '<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencia de linea...</p></article>';
     const loadingFileMarkup = '<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencias del archivo...</p></article>';
-    const lineSuggestionMarkup = loading
-      ? loadingLineMarkup
-      : renderBubbleList(lineSuggestions, 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.');
-    const fileSuggestionMarkup = loading
-      ? loadingFileMarkup
-      : renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.');
+    const lineSuggestionMarkup = lineSuggestions.length > 0
+      ? renderBubbleList(lineSuggestions, 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.')
+      : (loading ? loadingLineMarkup : renderBubbleList(lineSuggestions, 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.'));
+    const fileSuggestionMarkup = fileSuggestions.length > 0
+      ? renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.')
+      : (loading ? loadingFileMarkup : renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.'));
     const ragMarkup = ragSources.length
       ? ragSources.map((sourceItem) => {
         const pageText = sourceItem.pageStart
@@ -3732,10 +3772,16 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (settings.useBackend) {
       try {
-        const fileSummaryRequest = getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary');
+        const fileSummaryRequest = withActiveSuggestionDeadline(
+          getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary'),
+          fallbackDelayMs,
+        );
         const [focusResult, fileSummaryResult] = backendScope === 'cursor'
           ? await Promise.all([
-            getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor'),
+            withActiveSuggestionDeadline(
+              getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor'),
+              fallbackDelayMs,
+            ),
             fileSummaryRequest,
           ])
           : [await fileSummaryRequest, { outputText: '', ragSources: [], ragCourseCode: '' }];

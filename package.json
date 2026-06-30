@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -146,7 +146,7 @@
         },
         "adaceen.suggestions.autoRevealPanel": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Abre automaticamente el panel ADACEEN de sugerencias cuando cambia el archivo activo."
         },
         "adaceen.suggestions.debounceMs": {
