@@ -17,7 +17,8 @@ const DEFAULT_BACKEND_BASE_URL = 'http://127.0.0.1:3000';
 const DEFAULT_WORKER_POLL_MS = 8000;
 const DEFAULT_ACTIVE_SUGGESTION_DEBOUNCE_MS = 900;
 const DEFAULT_ACTIVE_SUGGESTION_MAX_CODE_CHARS = 24000;
-const DEFAULT_ACTIVE_SUGGESTION_TIMEOUT_MS = 180000;
+const DEFAULT_ACTIVE_SUGGESTION_TIMEOUT_MS = 120000;
+const ACTIVE_SUGGESTION_FALLBACK_DELAY_MS = 120000;
 const DEFAULT_CODE_ACTION_CONFIRM_LABEL = 'Aplicar reemplazo';
 const ACTIVE_SUGGESTION_INDEX_TTL_MS = 60_000;
 const ACTIVE_SUGGESTION_INDEX_MAX_FILES = 90;
@@ -30,6 +31,7 @@ const ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES = 24;
 const ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS = 110;
 const ACTIVE_SUGGESTION_CURSOR_IDLE_MS = 5000;
 const ACTIVE_SUGGESTION_ACTION_IDLE_MS = 10000;
+const ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS = 3500;
 const WORKER_TICK_MS = 4000;
 const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md', 'markdown', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff']);
 
@@ -123,6 +125,22 @@ type ActiveSuggestionSettings = {
   debounceMs: number;
   maxCodeChars: number;
   backendTimeoutMs: number;
+  ragCourseCode: string;
+};
+
+type ActiveSuggestionRagSource = {
+  id: string;
+  sourceId: string;
+  chunkId: string;
+  title: string;
+  fileName: string;
+  scope: string;
+  courseCode: string;
+  citationLabel: string;
+  pageStart: number | null;
+  pageEnd: number | null;
+  excerpt: string;
+  url: string;
 };
 
 type ActiveEditorSnapshot = {
@@ -142,6 +160,7 @@ type ActiveEditorSnapshot = {
   content: string;
   currentLineText: string;
   generatedAt: string;
+  fileSummaryCacheKey: string;
   cacheKey: string;
 };
 
@@ -154,18 +173,28 @@ type ActiveSuggestionModel = {
   title: string;
   summary: string;
   fileOverview: string;
+  lineSummary: string;
   suggestions: string[];
+  fileSuggestions: string[];
+  lineSuggestions: string[];
   nextSteps: string[];
   chips: string[];
   source: 'local' | 'backend' | 'local-fallback';
   backendError: string;
+  ragSources: ActiveSuggestionRagSource[];
+  ragCourseCode: string;
   updatedAt: string;
   line: number;
   column: number;
+  fileSummaryCacheKey: string;
+  metricId: string;
   completionText: string;
+  applyMode: SuggestionApplyMode;
   triggerKind: 'file' | 'cursor';
   actionsVisible?: boolean;
   loading?: boolean;
+  applied?: boolean;
+  appliedMode?: SuggestionApplyMode;
 };
 
 type VscodeReplacementOption = {
@@ -206,8 +235,16 @@ type BackendSuggestionRequestScope = 'file_summary' | 'cursor';
 
 type BackendSuggestionInFlight = {
   key: string;
-  request: Promise<string>;
+  request: Promise<BackendSuggestionResult>;
 };
+
+type BackendSuggestionResult = {
+  outputText: string;
+  ragSources: ActiveSuggestionRagSource[];
+  ragCourseCode: string;
+};
+
+type SuggestionApplyMode = 'insert' | 'replace' | 'delete';
 
 type CursorIdleAnchor = {
   uriString: string;
@@ -513,6 +550,9 @@ function resolveActiveSuggestionSettings(): ActiveSuggestionSettings {
     debounceMs,
     maxCodeChars,
     backendTimeoutMs,
+    ragCourseCode: toOptionalString(config.get<string>('rag.courseCode')) ??
+      toOptionalString(getEnv('ADACEEN_RAG_COURSE_CODE')) ??
+      '',
   };
 }
 
@@ -1046,8 +1086,10 @@ async function claimNextCodeAction(
   const id = toOptionalString(action.id);
   const repo = toOptionalString(action.repoFullName);
   const filePath = toOptionalString(action.filePath);
-  const replacementText = toOptionalString(action.replacementText);
-  if (!id || !repo || !filePath || !replacementText) {
+  const actionType = toOptionalString(action.actionType) || 'replace_selection';
+  const replacementText = typeof action.replacementText === 'string' ? action.replacementText : '';
+  const applyMode = actionTypeToApplyMode(actionType);
+  if (!id || !repo || !filePath || (applyMode !== 'delete' && !replacementText.trim())) {
     return null;
   }
 
@@ -1056,7 +1098,7 @@ async function claimNextCodeAction(
     repoFullName: repo.toLowerCase(),
     branch: toOptionalString(action.branch) || '',
     filePath,
-    actionType: toOptionalString(action.actionType) || 'replace_selection',
+    actionType,
     title: toOptionalString(action.title) || 'Reemplazo sugerido',
     originalText: toOptionalString(action.originalText) || '',
     replacementText,
@@ -1324,6 +1366,101 @@ function uniqueCompactStrings(items: string[], limit: number) {
   return output;
 }
 
+function firstPositiveNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return null;
+}
+
+function normalizeCourseCode(value: unknown) {
+  return (toOptionalString(value) || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 24);
+}
+
+function parseRagPageRangeFromLabel(label: unknown) {
+  const match = (toOptionalString(label) || '').match(/\bp\.\s*(\d+)(?:\s*-\s*(\d+))?/i);
+  if (!match) return { pageStart: null as number | null, pageEnd: null as number | null };
+  const pageStart = firstPositiveNumber(match[1]);
+  const pageEnd = firstPositiveNumber(match[2]) || pageStart;
+  return { pageStart, pageEnd };
+}
+
+function normalizeRagSources(value: unknown): ActiveSuggestionRagSource[] {
+  const items = Array.isArray(value) ? value : [];
+  return items.map((item) => {
+    const source = asRecord(item);
+    const citation = asRecord(source.citation);
+    const metadata = asRecord(source.metadata);
+    const citationLabel = toOptionalString(source.citationLabel) ||
+      toOptionalString(citation.label) ||
+      toOptionalString(citation.marker) ||
+      '';
+    const labelPageRange = parseRagPageRangeFromLabel(citationLabel);
+    const sourceId = toOptionalString(source.sourceId) || toOptionalString(citation.sourceId) || toOptionalString(source.id) || '';
+    const chunkId = toOptionalString(source.chunkId) || toOptionalString(citation.chunkId) || '';
+    return {
+      id: toOptionalString(source.id) || sourceId || chunkId || citationLabel,
+      sourceId,
+      chunkId,
+      title: toOptionalString(source.title) || toOptionalString(citation.title) || 'Fuente RAG',
+      fileName: toOptionalString(source.fileName) || toOptionalString(citation.fileName) || '',
+      scope: toOptionalString(source.scope) || '',
+      courseCode: normalizeCourseCode(source.courseCode) ||
+        normalizeCourseCode(source.course_code) ||
+        normalizeCourseCode(metadata.courseCode) ||
+        normalizeCourseCode(metadata.course_code),
+      citationLabel,
+      pageStart: firstPositiveNumber(
+        source.pageStart,
+        source.page_start,
+        source.page,
+        source.pageNumber,
+        source.page_number,
+        citation.pageStart,
+        citation.page_start,
+        citation.page,
+        citation.pageNumber,
+        citation.page_number,
+        metadata.pageStart,
+        metadata.page_start,
+        metadata.page,
+        metadata.pageNumber,
+        metadata.page_number,
+        labelPageRange.pageStart,
+      ),
+      pageEnd: firstPositiveNumber(
+        source.pageEnd,
+        source.page_end,
+        citation.pageEnd,
+        citation.page_end,
+        metadata.pageEnd,
+        metadata.page_end,
+        labelPageRange.pageEnd,
+      ),
+      excerpt: toOptionalString(source.excerpt) || '',
+      url: toOptionalString(source.url) || toOptionalString(citation.url) || '',
+    };
+  })
+    .filter((item) => item.title || item.fileName || item.citationLabel)
+    .slice(0, 5);
+}
+
+function normalizeBackendSuggestionResult(value: unknown): BackendSuggestionResult {
+  const data = asRecord(value);
+  return {
+    outputText: toOptionalString(data.output_text) || toOptionalString(data.outputText) || '',
+    ragSources: normalizeRagSources(data.rag_sources || data.ragSources),
+    ragCourseCode: normalizeCourseCode(data.rag_course_code) || normalizeCourseCode(data.ragCourseCode),
+  };
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
 function stableStringHash(value: string) {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -1588,7 +1725,11 @@ function parseBackendSuggestionSections(output: string): BackendSuggestionSectio
       current = 'sugerencias';
       continue;
     }
-    if (/^3\s*[).:-]?\s*(dudas?|riesgos?)/.test(normalized) || /^(dudas?|riesgos?)/.test(normalized)) {
+    if (/^\d?\s*[).:-]?\s*accion\b/.test(normalized) || /^(accion|aplicar|modo)\s*:/.test(normalized)) {
+      current = '';
+      continue;
+    }
+    if (/^\d?\s*[).:-]?\s*(dudas?|riesgos?)/.test(normalized) || /^(dudas?|riesgos?)/.test(normalized)) {
       current = 'riesgos';
       continue;
     }
@@ -1621,6 +1762,68 @@ function escapeHtml(value: string) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function buildCommandUri(command: string, args: unknown[] = []) {
+  return `command:${command}?${encodeURIComponent(JSON.stringify(args))}`;
+}
+
+function withRagViewerSessionParam(rawUrl: string) {
+  const text = toOptionalString(rawUrl) || '';
+  if (!text) {
+    return '';
+  }
+  const settings = resolveBackendSettings();
+  try {
+    const parsed = new URL(text, settings.baseUrl || undefined);
+    const isAdaceenViewer = /\/api\/rag\/sources\/[^/]+\/view\b/i.test(parsed.pathname);
+    if (isAdaceenViewer && settings.sessionId && !parsed.searchParams.get('sessionId')) {
+      parsed.searchParams.set('sessionId', settings.sessionId);
+    }
+    return isAdaceenViewer ? parsed.toString() : text;
+  } catch {
+    return text;
+  }
+}
+
+function buildRagSourceTargetUrl(source: ActiveSuggestionRagSource) {
+  const rawUrl = withRagViewerSessionParam(toOptionalString(source.url) || '');
+  if (!rawUrl || !/^[a-z][a-z0-9+.-]*:/i.test(rawUrl)) {
+    return '';
+  }
+  if (/\/api\/rag\/sources\/[^/]+\/view\b/i.test(rawUrl)) {
+    return rawUrl;
+  }
+  if (!source.pageStart || rawUrl.includes('#')) {
+    return rawUrl;
+  }
+  return `${rawUrl}#page=${source.pageStart}`;
+}
+
+function buildRagSourceMarkdown(source: ActiveSuggestionRagSource) {
+  const targetUrl = buildRagSourceTargetUrl(source);
+  const pageText = source.pageStart
+    ? (source.pageEnd && source.pageEnd !== source.pageStart
+      ? `Paginas ${source.pageStart}-${source.pageEnd}`
+      : `Pagina ${source.pageStart}`)
+    : '';
+  const details = [
+    source.courseCode ? `Curso: ${source.courseCode}` : '',
+    source.scope ? `Ambito: ${source.scope}` : '',
+    source.fileName ? `Archivo: ${source.fileName}` : '',
+    pageText,
+    source.citationLabel ? `Cita: ${source.citationLabel}` : '',
+    targetUrl ? `URL: ${targetUrl}` : '',
+  ].filter(Boolean);
+  const lines = [
+    `# ${source.title || 'Fuente RAG'}`,
+    '',
+    ...details,
+  ];
+  if (source.excerpt) {
+    lines.push('', '## Fragmento', source.excerpt);
+  }
+  return lines.join('\n');
 }
 
 function isSupportedActiveDocument(document: vscode.TextDocument) {
@@ -1681,6 +1884,12 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
   const generatedAt = new Date().toISOString();
   const line = editor.selection.active.line + 1;
   const column = editor.selection.active.character + 1;
+  const fileSummaryCacheKey = stableStringHash([
+    repoFullName,
+    filePath,
+    language,
+    content,
+  ].join('\n---adaceen-file-summary---\n'));
   const cacheKey = stableStringHash([
     repoFullName,
     filePath,
@@ -1710,6 +1919,7 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
     content,
     currentLineText,
     generatedAt,
+    fileSummaryCacheKey,
     cacheKey,
   };
 }
@@ -1842,6 +2052,127 @@ function buildCompletionFallbackForModel(model: ActiveSuggestionModel, lineText:
   return `${indent}${comment.open}TODO: ${suggestion}${comment.close}`;
 }
 
+function normalizeActionProbe(value: string) {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function actionModeFromText(value: string): SuggestionApplyMode | '' {
+  const probe = normalizeActionProbe(value);
+  const explicit = probe.match(/\b(?:accion|aplicar|modo|action|apply)\s*:\s*(insert|insertar|add|replace|reemplazar|modificar|update|delete|eliminar|borrar|remove)\b/);
+  const token = explicit?.[1] || '';
+  if (/^(delete|eliminar|borrar|remove)$/.test(token)) {
+    return 'delete';
+  }
+  if (/^(replace|reemplazar|modificar|update)$/.test(token)) {
+    return 'replace';
+  }
+  if (/^(insert|insertar|add)$/.test(token)) {
+    return 'insert';
+  }
+
+  if (/\b(elimina|eliminar|borra|borrar|quita|quitar|remueve|remover|retira|retirar|delete|remove)\b/.test(probe)) {
+    return 'delete';
+  }
+  if (/\b(modifica|modificar|reemplaza|reemplazar|cambia|cambiar|actualiza|actualizar|corrige|corregir|refactoriza|refactorizar|replace|update|fix)\b/.test(probe)) {
+    return 'replace';
+  }
+  if (/\b(agrega|agregar|anade|anadir|inserta|insertar|crea|crear|implementa|implementar|add|insert|append)\b/.test(probe)) {
+    return 'insert';
+  }
+  return '';
+}
+
+function inferSuggestionApplyMode(snapshot: ActiveEditorSnapshot, suggestionText: string, completionText: string): SuggestionApplyMode {
+  const explicitMode = actionModeFromText(`${suggestionText}\n${completionText}`);
+  if (explicitMode) {
+    return explicitMode;
+  }
+
+  if (snapshot.selectionText.trim()) {
+    return 'replace';
+  }
+
+  const currentLine = snapshot.currentLineText.trim();
+  if (!currentLine) {
+    return 'insert';
+  }
+
+  if (/\b(TODO|FIXME|pass|throw new Error\(|NotImplemented|return\s*;?)\b/i.test(currentLine)) {
+    return 'replace';
+  }
+
+  if (/(\{|\(|\[|:|,|=|\breturn|\bconst|\blet|\bvar|=>)\s*$/.test(currentLine)) {
+    return 'insert';
+  }
+
+  return 'insert';
+}
+
+function suggestionApplyModeLabel(mode: SuggestionApplyMode) {
+  if (mode === 'delete') {
+    return 'Eliminar';
+  }
+  if (mode === 'replace') {
+    return 'Modificar';
+  }
+  return 'Insertar';
+}
+
+function actionTypeToApplyMode(actionType: string): SuggestionApplyMode {
+  const probe = normalizeActionProbe(actionType);
+  if (/\b(delete|remove|eliminar|borrar)\b/.test(probe)) {
+    return 'delete';
+  }
+  if (/\b(insert|append|add|agregar|anadir|insertar)\b/.test(probe)) {
+    return 'insert';
+  }
+  return 'replace';
+}
+
+function buildAppliedSuggestionModel(
+  model: ActiveSuggestionModel,
+  mode: SuggestionApplyMode,
+  finalPosition: vscode.Position,
+): ActiveSuggestionModel {
+  const appliedLine = finalPosition.line + 1;
+  const appliedColumn = finalPosition.character + 1;
+  const modeLabel = suggestionApplyModeLabel(mode).toLowerCase();
+  const appliedMessage = `Ayuda aplicada (${modeLabel}) en la linea ${appliedLine}.`;
+  const validationStep = mode === 'delete'
+    ? 'Revisa que la eliminacion no haya quitado una condicion o cierre necesario.'
+    : 'Ejecuta una validacion corta o revisa el resaltado del editor antes de pedir otra pista.';
+
+  return {
+    ...model,
+    summary: model.summary || appliedMessage,
+    lineSummary: appliedMessage,
+    suggestions: uniqueCompactStrings([
+      appliedMessage,
+      ...model.suggestions,
+    ], 5),
+    lineSuggestions: uniqueCompactStrings([
+      validationStep,
+      ...model.lineSuggestions,
+    ], 3),
+    nextSteps: uniqueCompactStrings([
+      validationStep,
+      'Si el resultado no encaja, usa Deshacer y actualiza la sugerencia.',
+      ...model.nextSteps,
+    ], 4),
+    updatedAt: new Date().toISOString(),
+    line: appliedLine,
+    column: appliedColumn,
+    completionText: '',
+    actionsVisible: false,
+    loading: false,
+    applied: true,
+    appliedMode: mode,
+  };
+}
+
 function getSelectedFullLineRange(editor: vscode.TextEditor) {
   const selection = editor.selection;
   const startLine = Math.max(0, Math.min(selection.start.line, editor.document.lineCount - 1));
@@ -1854,6 +2185,21 @@ function getSelectedFullLineRange(editor: vscode.TextEditor) {
     new vscode.Position(startLine, 0),
     editor.document.lineAt(endLine).range.end,
   );
+}
+
+function getSelectedFullLineRangeIncludingBreak(editor: vscode.TextEditor) {
+  const range = getSelectedFullLineRange(editor);
+  if (range.end.line < editor.document.lineCount - 1) {
+    return new vscode.Range(range.start, new vscode.Position(range.end.line + 1, 0));
+  }
+  return range;
+}
+
+function getSuggestionDeleteRange(editor: vscode.TextEditor, modelLineIndex: number) {
+  if (!editor.selection.isEmpty) {
+    return getSelectedFullLineRangeIncludingBreak(editor);
+  }
+  return editor.document.lineAt(modelLineIndex).rangeIncludingLineBreak;
 }
 
 function splitRelativePath(value: string) {
@@ -1963,19 +2309,40 @@ async function applyPendingCodeAction(
     }
   }
 
-  const directRange = rangeForFirstTextMatch(document, action.originalText);
+  const applyMode = actionTypeToApplyMode(action.actionType);
+  const directRange = applyMode === 'insert' ? null : rangeForFirstTextMatch(document, action.originalText);
   const range = directRange || rangeForCodeActionFallback(editor, action);
+  const eol = getDocumentEol(editor.document);
+  let editStart = range.start;
+  let appliedTextLength = action.replacementText.length;
   const applied = await editor.edit((editBuilder) => {
+    if (applyMode === 'delete') {
+      appliedTextLength = 0;
+      editBuilder.delete(range);
+      return;
+    }
+
+    if (applyMode === 'insert') {
+      const line = document.lineAt(range.end.line);
+      const insertPosition = line.range.end;
+      const prefix = line.text.trim() ? eol : '';
+      const insertedText = `${prefix}${action.replacementText}`;
+      editStart = insertPosition;
+      appliedTextLength = insertedText.length;
+      editBuilder.insert(insertPosition, insertedText);
+      return;
+    }
+
     editBuilder.replace(range, action.replacementText);
   });
   if (!applied) {
-    throw new Error(`No se pudo aplicar el reemplazo en ${action.filePath}.`);
+    throw new Error(`No se pudo aplicar el cambio en ${action.filePath}.`);
   }
 
-  const finalOffset = editor.document.offsetAt(range.start) + action.replacementText.length;
+  const finalOffset = editor.document.offsetAt(editStart) + appliedTextLength;
   const finalPosition = editor.document.positionAt(finalOffset);
   editor.selection = new vscode.Selection(finalPosition, finalPosition);
-  output.appendLine(`[CodeActions] Reemplazo aplicado: ${action.filePath} (${action.id}).`);
+  output.appendLine(`[CodeActions] Cambio aplicado: ${action.filePath} (${action.id}, ${applyMode}).`);
 
   return {
     filePath: action.filePath,
@@ -2124,6 +2491,12 @@ function buildLocalActiveSuggestion(
     isCodespaceRuntime() ? 'Codespaces' : 'VS Code',
   ], 5);
   const compactSuggestions = uniqueCompactStrings(suggestions, 4);
+  const completionText = buildSuggestedCompletion(snapshot, compactSuggestions[0] || nextSteps[0] || '');
+  const applyMode = inferSuggestionApplyMode(
+    snapshot,
+    `${compactSuggestions.join('\n')}\n${nextSteps.join('\n')}`,
+    completionText,
+  );
 
   return {
     uriString: snapshot.uriString,
@@ -2134,15 +2507,30 @@ function buildLocalActiveSuggestion(
     title: `Sugerencias para ${snapshot.fileName}`,
     summary: fileOverview || `Archivo activo: ${snapshot.filePath} (${snapshot.language}, linea ${snapshot.line}).`,
     fileOverview,
+    lineSummary: snapshot.currentLineText.trim()
+      ? `Foco actual: linea ${snapshot.line}.`
+      : '',
     suggestions: compactSuggestions,
+    fileSuggestions: compactSuggestions,
+    lineSuggestions: snapshot.currentLineText.trim() ? compactSuggestions.slice(0, 2) : [],
     nextSteps: uniqueCompactStrings(nextSteps, 3),
     chips,
     source: 'local',
     backendError: '',
+    ragSources: [],
+    ragCourseCode: '',
     updatedAt: new Date().toISOString(),
     line: snapshot.line,
     column: snapshot.column,
-    completionText: buildSuggestedCompletion(snapshot, compactSuggestions[0] || nextSteps[0] || ''),
+    fileSummaryCacheKey: snapshot.fileSummaryCacheKey,
+    metricId: stableStringHash([
+      snapshot.cacheKey,
+      fileOverview,
+      compactSuggestions.join('\n'),
+      'local',
+    ].join('\n---adaceen-metric---\n')),
+    completionText,
+    applyMode,
     triggerKind: 'cursor',
     actionsVisible: false,
   };
@@ -2153,7 +2541,8 @@ function buildBackendSuggestionContent(
   projectIndex: WorkspaceProjectIndex | null = null,
   scope: BackendSuggestionRequestScope = 'file_summary',
 ) {
-  const selectionBlock = snapshot.selectionText.trim()
+  const isFileSummary = scope === 'file_summary';
+  const selectionBlock = !isFileSummary && snapshot.selectionText.trim()
     ? [
       `Seleccion actual: lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine}`,
       snapshot.selectionText.slice(0, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS),
@@ -2165,12 +2554,12 @@ function buildBackendSuggestionContent(
     `Workspace: ${snapshot.workspaceName || '(sin workspace)'}`,
     `Archivo activo: ${snapshot.filePath}`,
     `Lenguaje: ${snapshot.language}`,
-    `Cursor: linea ${snapshot.line}, columna ${snapshot.column}`,
+    isFileSummary ? '' : `Cursor: linea ${snapshot.line}, columna ${snapshot.column}`,
     scope === 'cursor' ? 'Disparador: cursor quieto durante 5 segundos; posible bloqueo del estudiante.' : '',
     selectionBlock,
     `Lineas del archivo: ${snapshot.lineCount}`,
-    snapshot.currentLineText ? `Linea actual:\n${snapshot.currentLineText}` : '',
-    snapshot.visibleText ? `Texto visible del editor:\n${snapshot.visibleText.slice(0, ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS)}` : '',
+    !isFileSummary && snapshot.currentLineText ? `Linea actual:\n${snapshot.currentLineText}` : '',
+    !isFileSummary && snapshot.visibleText ? `Texto visible del editor:\n${snapshot.visibleText.slice(0, ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS)}` : '',
     `Codigo del archivo activo (recorte local):\n${snapshot.content.slice(0, ACTIVE_SUGGESTION_PROMPT_CODE_CHARS)}`,
     formatWorkspaceProjectIndexForPrompt(projectIndex, snapshot.filePath),
   ].filter(Boolean).join('\n\n');
@@ -2190,6 +2579,7 @@ function buildBackendSuggestionQuestion(snapshot: ActiveEditorSnapshot, scope: B
       'El estudiante selecciono un bloque del editor; interpreta esa seleccion como el foco principal.',
       'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa seleccion.',
       'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
+      'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
       'No des la solucion completa ni inventes datos que no esten en el contexto.',
     ].join(' ');
   }
@@ -2198,6 +2588,7 @@ function buildBackendSuggestionQuestion(snapshot: ActiveEditorSnapshot, scope: B
     'El cursor quedo quieto 5 segundos en la linea indicada; interpreta esto como posible bloqueo del estudiante.',
     'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa linea.',
     'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
+    'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
     'No des la solucion completa ni inventes datos que no esten en el contexto.',
   ].join(' ');
 }
@@ -2207,50 +2598,57 @@ async function fetchBackendSuggestionText(
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null = null,
   scope: BackendSuggestionRequestScope,
-): Promise<string> {
+): Promise<BackendSuggestionResult> {
   const backend = resolveBackendSettings();
   if (!backend.baseUrl) {
-    return '';
+    return { outputText: '', ragSources: [], ragCourseCode: '' };
   }
 
   const response = await fetchJsonWithTimeout(
     `${backend.baseUrl}/suggest-tab`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      headers: buildSessionHeaders(backend, true),
       body: JSON.stringify({
         tab_content: buildBackendSuggestionContent(snapshot, projectIndex, scope),
         question: buildBackendSuggestionQuestion(snapshot, scope),
         tab_title: snapshot.filePath,
         tab_url: `vscode://${snapshot.repoFullName || snapshot.workspaceName || 'workspace'}/${snapshot.filePath}`,
         suggestion_scope: scope,
+        repoFullName: snapshot.repoFullName,
+        filePath: snapshot.filePath,
+        languageHint: snapshot.language,
+        courseCode: settings.ragCourseCode,
+        ragCourseCode: settings.ragCourseCode,
       }),
     },
     settings.backendTimeoutMs,
   );
 
-  const data = asRecord(response);
-  const outputText = toOptionalString(data.output_text) || toOptionalString(data.outputText) || '';
-  return outputText;
+  return normalizeBackendSuggestionResult(response);
 }
 
 function buildBackendActiveSuggestionModel(
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null,
   scope: BackendSuggestionScope,
-  focusOutputText: string,
-  fileSummaryOutputText = '',
+  focusResult: BackendSuggestionResult,
+  fileSummaryResult: BackendSuggestionResult = { outputText: '', ragSources: [], ragCourseCode: '' },
 ): ActiveSuggestionModel | null {
+  const focusOutputText = focusResult.outputText;
   if (!focusOutputText) {
     return null;
   }
 
   const focusSections = parseBackendSuggestionSections(focusOutputText);
-  const fileSummarySections = fileSummaryOutputText
-    ? parseBackendSuggestionSections(fileSummaryOutputText)
+  const fileSummarySections = fileSummaryResult.outputText
+    ? parseBackendSuggestionSections(fileSummaryResult.outputText)
     : focusSections;
-  const lines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
-  if (lines.length === 0) {
+  const focusLines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
+  const fileLines = fileSummarySections.sugerencias.length > 0
+    ? fileSummarySections.sugerencias
+    : fileSummarySections.all;
+  if (focusLines.length === 0 && fileLines.length === 0) {
     return null;
   }
 
@@ -2262,11 +2660,25 @@ function buildBackendActiveSuggestionModel(
     ? truncateInline(focusSections.resumen.join(' '), 420)
     : '';
   const completionText = extractFirstCodeFence(focusOutputText)
-    || buildSuggestedCompletion(snapshot, lines[0] || localFallback.suggestions[0] || '');
+    || buildSuggestedCompletion(snapshot, focusLines[0] || fileLines[0] || localFallback.suggestions[0] || '');
+  const applyMode = inferSuggestionApplyMode(
+    snapshot,
+    `${focusOutputText}\n${fileSummaryResult.outputText}`,
+    completionText,
+  );
+  const fileSuggestions = uniqueCompactStrings(
+    fileLines.length ? fileLines : localFallback.fileSuggestions,
+    4,
+  );
+  const lineSuggestions = scope === 'cursor'
+    ? uniqueCompactStrings(focusLines.length ? focusLines : localFallback.lineSuggestions, 3)
+    : [];
   const combinedSuggestions = uniqueCompactStrings([
-    ...lines,
-    ...(scope === 'cursor' ? fileSummarySections.sugerencias.slice(0, 2) : []),
-  ], 4);
+    ...(lineSuggestions.length ? lineSuggestions : focusLines),
+    ...fileSuggestions,
+  ], 5);
+  const ragSources = focusResult.ragSources.length ? focusResult.ragSources : fileSummaryResult.ragSources;
+  const ragCourseCode = focusResult.ragCourseCode || fileSummaryResult.ragCourseCode;
   return {
     ...localFallback,
     title: `ADACEEN en ${snapshot.fileName}`,
@@ -2274,12 +2686,27 @@ function buildBackendActiveSuggestionModel(
       ? focusSummary || fileOverview || truncateInline(focusOutputText.replace(/\s+/g, ' '), 260)
       : fileOverview || truncateInline(focusOutputText.replace(/\s+/g, ' '), 260),
     fileOverview,
+    lineSummary: scope === 'cursor'
+      ? focusSummary || `Foco actual: linea ${snapshot.line}.`
+      : '',
     suggestions: combinedSuggestions,
+    fileSuggestions,
+    lineSuggestions,
     nextSteps: combinedSuggestions.slice(1, 4).length > 0 ? combinedSuggestions.slice(1, 4) : localFallback.nextSteps,
     source: 'backend',
     backendError: '',
+    ragSources,
+    ragCourseCode,
     updatedAt: new Date().toISOString(),
+    metricId: stableStringHash([
+      snapshot.cacheKey,
+      scope,
+      focusOutputText,
+      fileSummaryResult.outputText,
+      ragCourseCode,
+    ].join('\n---adaceen-metric---\n')),
     completionText,
+    applyMode,
     triggerKind: scope === 'cursor' ? 'cursor' : 'file',
     actionsVisible: false,
   };
@@ -2294,59 +2721,158 @@ function detectBranchName() {
 
 function summarizeActiveSuggestion(model: ActiveSuggestionModel) {
   return uniqueCompactStrings([
-    model.summary,
-    model.fileOverview,
-    ...model.suggestions,
+    model.lineSummary,
+    ...model.lineSuggestions,
+    ...model.fileSuggestions,
   ], 5).join('\n');
+}
+
+function primarySuggestionText(model: ActiveSuggestionModel) {
+  return model.lineSuggestions[0] ||
+    model.fileSuggestions[0] ||
+    model.suggestions[0] ||
+    model.summary ||
+    model.fileOverview;
+}
+
+function buildSuggestionMetricMetadata(
+  model: ActiveSuggestionModel,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    metricId: model.metricId,
+    triggerKind: model.triggerKind,
+    applyMode: model.applyMode,
+    source: model.source,
+    line: model.line,
+    column: model.column,
+    fileSummaryCacheKey: model.fileSummaryCacheKey,
+    ragCourseCode: model.ragCourseCode,
+    ragSourceCount: model.ragSources.length,
+    ragSources: model.ragSources.slice(0, 5).map((source) => ({
+      sourceId: source.sourceId,
+      chunkId: source.chunkId,
+      title: source.title,
+      citationLabel: source.citationLabel,
+      pageStart: source.pageStart,
+      pageEnd: source.pageEnd,
+      courseCode: source.courseCode,
+    })),
+    suggestionPreview: truncateInline(primarySuggestionText(model), 240),
+    backendError: model.backendError,
+    ...extra,
+  };
+}
+
+async function recordVscodeSuggestionMetric(
+  settings: BackendSettings,
+  output: vscode.OutputChannel,
+  model: ActiveSuggestionModel,
+  eventType: string,
+  value = "",
+  extra: Record<string, unknown> = {},
+) {
+  if (!settings.baseUrl || !settings.sessionId) {
+    return;
+  }
+
+  try {
+    await fetchJsonWithTimeout(
+      `${settings.baseUrl}/api/behavior/events`,
+      {
+        method: 'POST',
+        headers: buildSessionHeaders(settings, true),
+        body: JSON.stringify({
+          events: [{
+            source: 'vscode_extension',
+            category: 'suggestion',
+            eventType,
+            pageContext: isCodespaceRuntime() ? 'codespace' : 'vscode',
+            repoFullName: model.repoFullName,
+            branch: detectBranchName(),
+            filePath: model.filePath,
+            language: model.language,
+            subjectId: model.metricId,
+            value: value || model.applyMode,
+            metadata: buildSuggestionMetricMetadata(model, extra),
+            occurredAt: new Date().toISOString(),
+          }],
+        }),
+      },
+      8000,
+    );
+  } catch (error) {
+    output.appendLine(`[Metrics] No se pudo registrar ${eventType}: ${String(error)}`);
+  }
 }
 
 function buildRackReplacementOptions(
   snapshot: ActiveEditorSnapshot,
   model: ActiveSuggestionModel,
 ): VscodeReplacementOption[] {
-  const fallback = buildSuggestedCompletion(snapshot, model.suggestions[0] || model.summary, 'replace');
+  const applyMode = model.applyMode || inferSuggestionApplyMode(snapshot, summarizeActiveSuggestion(model), model.completionText);
+  const targetText = snapshot.selectionText.trim() ? snapshot.selectionText : snapshot.currentLineText;
+  const fallback = buildSuggestedCompletion(snapshot, model.suggestions[0] || model.summary, applyMode === 'replace' ? 'replace' : 'insert');
   const replacementText = model.completionText || fallback;
-  if (!replacementText.trim()) {
+  if (applyMode !== 'delete' && !replacementText.trim()) {
     return [];
   }
 
   const sharedMetadata: Record<string, unknown> = {
     source: model.source,
     triggerKind: model.triggerKind,
+    applyMode,
     line: model.line,
     column: model.column,
     generatedAt: model.updatedAt,
     language: model.language,
   };
-  const options: VscodeReplacementOption[] = [];
 
-  if (snapshot.selectionText.trim()) {
-    options.push({
-      id: 'replace-selection',
-      label: 'Reemplazar seleccion',
-      description: 'Sustituye el texto seleccionado en VS Code con la sugerencia activa.',
-      actionType: 'replace_selection',
-      originalText: snapshot.selectionText,
-      replacementText,
+  if (applyMode === 'delete') {
+    return [{
+      id: snapshot.selectionText.trim() ? 'delete-selection' : 'delete-current-line',
+      label: snapshot.selectionText.trim() ? 'Eliminar seleccion' : 'Eliminar linea actual',
+      description: snapshot.selectionText.trim()
+        ? 'Elimina el bloque seleccionado en VS Code.'
+        : `Elimina la linea ${snapshot.line} de ${snapshot.fileName}.`,
+      actionType: snapshot.selectionText.trim() ? 'delete_selection' : 'delete_line',
+      originalText: targetText,
+      replacementText: '',
       metadata: {
         ...sharedMetadata,
         selectionStartLine: snapshot.selectionStartLine,
         selectionEndLine: snapshot.selectionEndLine,
       },
-    });
+    }];
   }
 
-  options.push({
-    id: 'replace-current-line',
-    label: 'Reemplazar linea actual',
-    description: `Sustituye la linea ${snapshot.line} de ${snapshot.fileName}.`,
-    actionType: 'replace_line',
-    originalText: snapshot.currentLineText,
-    replacementText,
-    metadata: sharedMetadata,
-  });
+  if (applyMode === 'insert') {
+    return [{
+      id: 'insert-after-line',
+      label: 'Insertar cambio sugerido',
+      description: `Inserta la sugerencia cerca de la linea ${snapshot.line} de ${snapshot.fileName}.`,
+      actionType: 'insert_after_line',
+      originalText: snapshot.currentLineText,
+      replacementText,
+      metadata: sharedMetadata,
+    }];
+  }
 
-  return options.slice(0, 3);
+  return [{
+    id: snapshot.selectionText.trim() ? 'replace-selection' : 'replace-current-line',
+    label: snapshot.selectionText.trim() ? 'Modificar seleccion' : 'Modificar linea actual',
+    description: snapshot.selectionText.trim()
+      ? 'Sustituye el texto seleccionado en VS Code con la sugerencia activa.'
+      : `Sustituye la linea ${snapshot.line} de ${snapshot.fileName}.`,
+    actionType: snapshot.selectionText.trim() ? 'replace_selection' : 'replace_line',
+    originalText: targetText,
+    replacementText,
+    metadata: {
+      ...sharedMetadata,
+      selectionStartLine: snapshot.selectionStartLine,
+      selectionEndLine: snapshot.selectionEndLine,
+    },
+  }];
 }
 
 function buildRackFileList(snapshot: ActiveEditorSnapshot, projectIndex: WorkspaceProjectIndex | null) {
@@ -2411,6 +2937,7 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
         },
         {
           enableScripts: false,
+          enableCommandUris: true,
           retainContextWhenHidden: true,
         },
       );
@@ -2448,23 +2975,77 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     const summary = model?.summary || 'ADACEEN seguira la pestana activa y actualizara las pistas al navegar.';
     const loading = !!model?.loading;
     const fileOverview = model?.fileOverview || summary;
-    const suggestions = model?.suggestions?.length ? model.suggestions : ['Abre un archivo del proyecto o cambia de pestana en el editor.'];
+    const fileSuggestions = model?.fileSuggestions?.length
+      ? model.fileSuggestions
+      : (model?.suggestions?.length ? model.suggestions : ['Abre un archivo del proyecto o cambia de pestana en el editor.']);
+    const lineSuggestions = model?.lineSuggestions?.length ? model.lineSuggestions : [];
+    const showLineSection = loading || model?.triggerKind === 'cursor' || lineSuggestions.length > 0;
     const nextSteps = model?.nextSteps?.length ? model.nextSteps : ['Cuando abras un archivo, ADACEEN mostrara el siguiente paso aqui.'];
     const chips = model?.chips?.length ? model.chips : ['VS Code', 'archivo activo'];
-    const source = model?.source === 'backend'
-      ? 'backend'
-      : model?.source === 'local-fallback'
-        ? 'fallback local'
-        : 'local';
-    const sourceLabel = loading ? 'cargando' : source;
-    const suggestionMarkup = loading
-      ? `<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencias...</p></article>`
-      : suggestions.map((item, index) => `
+    const ragSources = model?.ragSources?.length ? model.ragSources : [];
+    const ragCourseCode = model?.ragCourseCode || ragSources.find((source) => source.courseCode)?.courseCode || '';
+    const sourceLabel = loading
+      ? 'cargando backend/RAG'
+      : model?.source === 'backend'
+        ? (ragSources.length || ragCourseCode ? 'backend + RAG' : 'backend (sin fuentes RAG)')
+        : model?.source === 'local-fallback'
+          ? 'fallback local'
+          : 'local';
+    const showRagSection = !!model && (model.source === 'backend' || ragSources.length > 0 || !!ragCourseCode);
+    const applied = !!model?.applied;
+    const applyMode = model?.applyMode || 'insert';
+    const applyModeLabel = suggestionApplyModeLabel(applyMode);
+    const applyHelpText = applyMode === 'delete'
+      ? 'Eliminara la seleccion o linea activa indicada por la sugerencia.'
+      : applyMode === 'replace'
+        ? 'Modificara la seleccion o linea activa con el cambio sugerido.'
+        : 'Agregara el cambio sugerido cerca de la linea activa.';
+    const applyCommandUri = buildCommandUri('adaceen.applySuggestionCompletion');
+    const renderBubbleList = (items: string[], emptyText: string) => {
+      const visibleItems = items.length ? items : [emptyText];
+      return visibleItems.map((item, index) => `
         <article class="bubble">
           <span class="bubble-mark">${index + 1}</span>
           <p>${escapeHtml(item)}</p>
         </article>
       `).join('');
+    };
+    const loadingLineMarkup = '<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencia de linea...</p></article>';
+    const loadingFileMarkup = '<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencias del archivo...</p></article>';
+    const lineSuggestionMarkup = loading
+      ? loadingLineMarkup
+      : renderBubbleList(lineSuggestions, 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.');
+    const fileSuggestionMarkup = loading
+      ? loadingFileMarkup
+      : renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.');
+    const ragMarkup = ragSources.length
+      ? ragSources.map((sourceItem) => {
+        const pageText = sourceItem.pageStart
+          ? (sourceItem.pageEnd && sourceItem.pageEnd !== sourceItem.pageStart
+            ? `p. ${sourceItem.pageStart}-${sourceItem.pageEnd}`
+            : `p. ${sourceItem.pageStart}`)
+          : '';
+        const meta = [
+          sourceItem.courseCode,
+          sourceItem.scope === 'teacher' ? 'Docente' : sourceItem.scope === 'default' ? 'Base' : '',
+          sourceItem.fileName,
+          pageText,
+          sourceItem.citationLabel,
+        ].filter(Boolean).join(' | ');
+        const moreUri = buildCommandUri('adaceen.openRagSource', [sourceItem]);
+        return `
+          <li class="rag-item">
+            <strong>${escapeHtml(sourceItem.title)}</strong>
+            ${meta ? `<span>${escapeHtml(meta)}</span>` : ''}
+            ${sourceItem.excerpt ? `<p>${escapeHtml(truncateInline(sourceItem.excerpt, 220))}</p>` : ''}
+            <a href="${escapeHtml(moreUri)}">Abrir fuente o detalle</a>
+          </li>
+        `;
+      }).join('')
+      : '';
+    const ragEmptyText = ragCourseCode
+      ? 'El backend consulto el curso RAG, pero no encontro una fuente suficientemente cercana para esta sugerencia.'
+      : 'No hay curso RAG activo en esta peticion. Revisa la sesion compartida o adaceen.rag.courseCode.';
 
     return `<!doctype html>
 <html lang="es">
@@ -2560,12 +3141,46 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     .overview {
       border-left: 4px solid #33c789;
     }
+    .focus {
+      border-left: 4px solid #2f80ed;
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editorWidget-background) 88%, #eaf3ff 12%), var(--vscode-editorWidget-background));
+    }
+    .file-suggestions {
+      border-left: 4px solid #0d847f;
+    }
+    .rag {
+      border-left: 4px solid #c95f30;
+    }
+    .apply-action {
+      border-left: 4px solid #2f80ed;
+    }
+    .apply-action.is-applied {
+      border-left-color: #33c789;
+    }
+    .section-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
     h2 {
-      margin: 0 0 8px;
+      margin: 0;
       font-size: 12px;
       letter-spacing: 0;
       text-transform: uppercase;
       color: var(--vscode-descriptionForeground);
+    }
+    .badge {
+      border-radius: 999px;
+      padding: 3px 8px;
+      border: 1px solid var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      background: var(--vscode-badge-background);
+      font-size: 10px;
+      font-weight: 800;
+      white-space: nowrap;
     }
     .bubble-list {
       display: grid;
@@ -2603,6 +3218,57 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
       color: var(--vscode-foreground);
       font-size: 13px;
     }
+    .line-summary {
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .rag-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      gap: 8px;
+    }
+    .rag-item {
+      display: grid;
+      gap: 4px;
+      padding: 9px 10px;
+      border: 1px solid var(--vscode-editorWidget-border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--vscode-editorWidget-background) 88%, #fff0dc 12%);
+    }
+    .rag-item strong {
+      color: var(--vscode-foreground);
+      font-size: 12px;
+    }
+    .rag-item span,
+    .rag-item p,
+    .rag-item a {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+    }
+    .rag-item a {
+      color: var(--vscode-textLink-foreground);
+      text-decoration: none;
+    }
+    .apply-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 0 14px;
+      border-radius: 6px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      font-size: 12px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .apply-button:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
     .steps {
       margin: 0;
       padding-left: 20px;
@@ -2629,13 +3295,48 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     <div class="chips">${chips.map((chip) => `<span class="chip">${escapeHtml(chip)}</span>`).join('')}</div>
     ${loading ? '<div class="loading-strip"><span class="spinner" aria-hidden="true"></span><span>Cargando sugerencias...</span></div>' : ''}
     <section class="overview">
-      <h2>Que hace este archivo</h2>
+      <div class="section-title-row">
+        <h2>Resumen del archivo</h2>
+        <span class="badge">Archivo completo</span>
+      </div>
       <p>${escapeHtml(fileOverview)}</p>
     </section>
-    <section>
-      <h2>Sugerencias</h2>
-      <div class="bubble-list">${suggestionMarkup}</div>
+    ${showLineSection ? `
+    <section class="focus">
+      <div class="section-title-row">
+        <h2>Recomendacion del codigo</h2>
+        <span class="badge">Linea ${model?.line || ''}</span>
+      </div>
+      ${model?.lineSummary ? `<p class="line-summary">${escapeHtml(model.lineSummary)}</p>` : ''}
+      <div class="bubble-list">${lineSuggestionMarkup}</div>
     </section>
+    ` : ''}
+    <section class="file-suggestions">
+      <div class="section-title-row">
+        <h2>Recomendacion del archivo</h2>
+        <span class="badge">Global</span>
+      </div>
+      <div class="bubble-list">${fileSuggestionMarkup}</div>
+    </section>
+    ${showRagSection ? `
+    <section class="rag">
+      <div class="section-title-row">
+        <h2>Fuentes RAG usadas</h2>
+        <span class="badge">${escapeHtml(ragCourseCode ? `RAG ${ragCourseCode}` : 'RAG')}</span>
+      </div>
+      ${ragSources.length ? `<ul class="rag-list">${ragMarkup}</ul>` : `<p>${escapeHtml(ragEmptyText)}</p>`}
+    </section>
+    ` : ''}
+    ${model && !loading ? `
+    <section class="apply-action${applied ? ' is-applied' : ''}">
+      <div class="section-title-row">
+        <h2>${applied ? 'Ayuda aplicada' : 'Aceptar ayuda'}</h2>
+        <span class="badge">${escapeHtml(applied ? 'Aplicada' : applyModeLabel)}</span>
+      </div>
+      <p class="line-summary">${escapeHtml(applied ? (model.lineSummary || 'La ayuda se aplico y el contexto sigue disponible para validar.') : applyHelpText)}</p>
+      ${applied ? '' : `<a class="apply-button" href="${escapeHtml(applyCommandUri)}">Aplicar ${escapeHtml(applyModeLabel.toLowerCase())}</a>`}
+    </section>
+    ` : ''}
     <section>
       <h2>Continuar</h2>
       <ol class="steps">${nextSteps.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ol>
@@ -2676,17 +3377,12 @@ class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvider, vsco
         },
       ),
     ];
-    if (this.model.actionsVisible && !this.model.loading) {
+    if (this.model.actionsVisible && !this.model.loading && !this.model.applied) {
       lenses.push(
         new vscode.CodeLens(range, {
-          title: '$(arrow-down) Pegar debajo',
+          title: `$(check) Aplicar cambio (${suggestionApplyModeLabel(this.model.applyMode).toLowerCase()})`,
           command: 'adaceen.applySuggestionCompletion',
-          arguments: ['insert'],
-        }),
-        new vscode.CodeLens(range, {
-          title: '$(wand) Autocompletar linea',
-          command: 'adaceen.applySuggestionCompletion',
-          arguments: ['replace'],
+          arguments: [],
         }),
       );
     }
@@ -2732,6 +3428,62 @@ function updateSuggestionStatusBar(statusBar: vscode.StatusBarItem, model: Activ
   statusBar.show();
 }
 
+function escapeMarkdown(value: string) {
+  return value.replace(/([\\`*_{}\[\]()#+\-.!|>])/g, '\\$1');
+}
+
+function buildInlineSuggestionLabel(model: ActiveSuggestionModel) {
+  if (model.loading) {
+    return "ADACEEN: cargando pista";
+  }
+  if (model.applied) {
+    return `ADACEEN aplicado: ${truncateInline(model.lineSummary || primarySuggestionText(model), 82)}`;
+  }
+  const action = suggestionApplyModeLabel(model.applyMode).toLowerCase();
+  const focus = primarySuggestionText(model);
+  return `ADACEEN ${action}: ${truncateInline(focus, 82)}`;
+}
+
+function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
+  const markdown = new vscode.MarkdownString('', true);
+  markdown.isTrusted = {
+    enabledCommands: [
+      'adaceen.openAssistant',
+      'adaceen.applySuggestionCompletion',
+      'adaceen.openRagSource',
+    ],
+  };
+
+  markdown.appendMarkdown(`**ADACEEN en linea ${model.line}**\n\n`);
+  markdown.appendMarkdown(`${escapeMarkdown(primarySuggestionText(model))}\n\n`);
+  markdown.appendMarkdown(`**Accion:** ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}\n\n`);
+
+  const openPanelUri = buildCommandUri('adaceen.openAssistant');
+  const applyUri = buildCommandUri('adaceen.applySuggestionCompletion');
+  markdown.appendMarkdown(`[Ver panel](${openPanelUri})`);
+  if (!model.loading && !model.applied) {
+    markdown.appendMarkdown(` · [Aplicar ayuda](${applyUri})`);
+  } else if (model.applied) {
+    markdown.appendMarkdown(`\n\n_Ayuda aplicada. Mantengo el contexto para que puedas validar el cambio._`);
+  }
+
+  const ragSource = model.ragSources[0];
+  if (ragSource) {
+    const ragUri = buildCommandUri('adaceen.openRagSource', [ragSource]);
+    const pageText = ragSource.pageStart
+      ? ` p. ${ragSource.pageEnd && ragSource.pageEnd !== ragSource.pageStart ? `${ragSource.pageStart}-${ragSource.pageEnd}` : ragSource.pageStart}`
+      : '';
+    markdown.appendMarkdown(`\n\n**Fuente RAG:** ${escapeMarkdown(ragSource.title)}${escapeMarkdown(pageText)} ${escapeMarkdown(ragSource.citationLabel || '')}`);
+    markdown.appendMarkdown(`\n\n[Abrir fuente RAG](${ragUri})`);
+  }
+
+  if (model.fileOverview) {
+    markdown.appendMarkdown(`\n\n---\n${escapeMarkdown(truncateInline(model.fileOverview, 260))}`);
+  }
+
+  return markdown;
+}
+
 function clearSuggestionDecorations(decorationType: vscode.TextEditorDecorationType) {
   for (const editor of vscode.window.visibleTextEditors) {
     editor.setDecorations(decorationType, []);
@@ -2743,7 +3495,33 @@ function applySuggestionDecoration(
   model: ActiveSuggestionModel | null,
 ) {
   clearSuggestionDecorations(decorationType);
-  void model;
+  if (!model) {
+    return;
+  }
+
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.toString() !== model.uriString) {
+    return;
+  }
+
+  const lineIndex = Math.max(0, Math.min(editor.document.lineCount - 1, (Number(model.line) || 1) - 1));
+  const line = editor.document.lineAt(lineIndex);
+  const decoration: vscode.DecorationOptions = {
+    range: new vscode.Range(line.range.end, line.range.end),
+    hoverMessage: buildSuggestionHoverMarkdown(model),
+    renderOptions: {
+      after: {
+        contentText: `  ${buildInlineSuggestionLabel(model)}`,
+        color: model.loading
+          ? new vscode.ThemeColor('editorCodeLens.foreground')
+          : new vscode.ThemeColor('editorInfo.foreground'),
+        fontStyle: 'italic',
+        margin: '0 0 0 1rem',
+      },
+    },
+  };
+
+  editor.setDecorations(decorationType, [decoration]);
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -2765,7 +3543,7 @@ export function activate(context: vscode.ExtensionContext) {
     },
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
   });
-  const backendSuggestionCache: Record<BackendSuggestionRequestScope, Map<string, string>> = {
+  const backendSuggestionCache: Record<BackendSuggestionRequestScope, Map<string, BackendSuggestionResult>> = {
     cursor: new Map(),
     file_summary: new Map(),
   };
@@ -2774,6 +3552,9 @@ export function activate(context: vscode.ExtensionContext) {
   let suggestionTimer: ReturnType<typeof setTimeout> | null = null;
   let cursorIdleSuggestionTimer: ReturnType<typeof setTimeout> | null = null;
   let cursorActionTimer: ReturnType<typeof setTimeout> | null = null;
+  const recordedSuggestionMetricKeys = new Set<string>();
+  let suppressSuggestionRefreshUntil = 0;
+  let suppressSuggestionRefreshUri = '';
   let autoRevealedSuggestionUri = '';
   let rackSyncErrorNotified = false;
   let workspaceProjectIndexCache: {
@@ -2789,6 +3570,26 @@ export function activate(context: vscode.ExtensionContext) {
     suggestionPanel.update(model);
     suggestionCodeLensProvider.update(model);
     applySuggestionDecoration(suggestionDecorationType, model);
+  };
+
+  const recordSuggestionMetric = (
+    model: ActiveSuggestionModel | null,
+    eventType: string,
+    value = "",
+    extra: Record<string, unknown> = {},
+    once = false,
+  ) => {
+    if (!model || model.loading) {
+      return;
+    }
+    const key = `${eventType}:${model.metricId}:${value || model.applyMode}`;
+    if (once && recordedSuggestionMetricKeys.has(key)) {
+      return;
+    }
+    if (once) {
+      recordedSuggestionMetricKeys.add(key);
+    }
+    void recordVscodeSuggestionMetric(resolveBackendSettings(), output, model, eventType, value, extra);
   };
 
   const clearWorkspaceProjectIndexCache = () => {
@@ -2808,16 +3609,13 @@ export function activate(context: vscode.ExtensionContext) {
     scope: BackendSuggestionRequestScope,
   ) => {
     const projectKey = projectIndex?.cacheKey || 'sin-mapa';
+    const backend = resolveBackendSettings();
+    const activeRagCourse = normalizeCourseCode(resolveActiveSuggestionSettings().ragCourseCode);
+    const sessionKey = stableStringHash(`${backend.sessionId || 'sin-sesion'}:${activeRagCourse || 'curso-backend'}`);
     if (scope === 'file_summary') {
-      const fileKey = stableStringHash([
-        snapshot.repoFullName,
-        snapshot.filePath,
-        snapshot.language,
-        snapshot.content,
-      ].join('\n---adaceen-file-summary---\n'));
-      return `${fileKey}:${projectKey}`;
+      return `${sessionKey}:${snapshot.fileSummaryCacheKey}:${projectKey}`;
     }
-    return `${snapshot.cacheKey}:${projectKey}`;
+    return `${sessionKey}:${snapshot.cacheKey}:${projectKey}`;
   };
 
   const getBackendSuggestionText = async (
@@ -2844,11 +3642,11 @@ export function activate(context: vscode.ExtensionContext) {
       );
     }
 
-    const outputText = await inFlight.request;
-    if (outputText) {
-      backendSuggestionCache[scope].set(cacheKey, outputText);
+    const result = await inFlight.request;
+    if (result.outputText) {
+      backendSuggestionCache[scope].set(cacheKey, result);
     }
-    return outputText;
+    return result;
   };
 
   const getWorkspaceProjectIndex = async () => {
@@ -2902,8 +3700,15 @@ export function activate(context: vscode.ExtensionContext) {
       return null;
     }
 
+    const backendStartedAt = Date.now();
+    const fallbackDelayMs = Math.min(settings.backendTimeoutMs, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS);
     let model = buildLocalActiveSuggestion(snapshot);
-    model = { ...model, triggerKind: backendScope === 'cursor' ? 'cursor' : 'file', actionsVisible: false };
+    model = {
+      ...model,
+      triggerKind: backendScope === 'cursor' ? 'cursor' : 'file',
+      actionsVisible: false,
+      loading: settings.useBackend,
+    };
     publishSuggestionModel(model, true);
     if (settings.autoRevealPanel && backendScope === 'file' && autoRevealedSuggestionUri !== snapshot.uriString) {
       suggestionPanel.reveal(model, true);
@@ -2920,6 +3725,7 @@ export function activate(context: vscode.ExtensionContext) {
         ...buildLocalActiveSuggestion(snapshot, projectIndex),
         triggerKind: backendScope === 'cursor' ? 'cursor' : 'file',
         actionsVisible: false,
+        loading: true,
       };
       publishSuggestionModel(model, true);
     }
@@ -2927,23 +3733,32 @@ export function activate(context: vscode.ExtensionContext) {
     if (settings.useBackend) {
       try {
         const fileSummaryRequest = getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary');
-        const [focusOutputText, fileSummaryOutputText] = backendScope === 'cursor'
+        const [focusResult, fileSummaryResult] = backendScope === 'cursor'
           ? await Promise.all([
             getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor'),
             fileSummaryRequest,
           ])
-          : [await fileSummaryRequest, ''];
+          : [await fileSummaryRequest, { outputText: '', ragSources: [], ragCourseCode: '' }];
         const backendModel = buildBackendActiveSuggestionModel(
           snapshot,
           projectIndex,
           backendScope,
-          focusOutputText,
-          fileSummaryOutputText,
+          focusResult,
+          fileSummaryResult,
         );
         if (backendModel) {
           model = backendModel;
+        } else {
+          throw new Error('Backend no devolvio sugerencias aplicables.');
         }
       } catch (error) {
+        const remainingMs = fallbackDelayMs - (Date.now() - backendStartedAt);
+        if (remainingMs > 0) {
+          await delay(remainingMs);
+        }
+        if (!isSnapshotStillActive(snapshot, backendScope)) {
+          return activeSuggestionModel;
+        }
         model = {
           ...model,
           source: 'local-fallback',
@@ -2966,6 +3781,11 @@ export function activate(context: vscode.ExtensionContext) {
       && activeSuggestionModel.column === snapshot.column;
     const finalModel = keepVisibleActions ? { ...model, actionsVisible: true } : model;
     publishSuggestionModel(finalModel, true);
+    recordSuggestionMetric(finalModel, 'vscode_suggestion_shown', finalModel.applyMode, {
+      reason,
+      cacheNamespace: backendScope,
+      projectIndexKey: projectIndex?.cacheKey || '',
+    }, true);
     void publishActiveEditorRack(snapshot, finalModel, projectIndex)
       .then(() => {
         rackSyncErrorNotified = false;
@@ -3038,12 +3858,31 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    publishSuggestionModel({ ...model, actionsVisible: true, triggerKind: 'cursor' }, true);
+    const visibleModel = { ...model, actionsVisible: true, triggerKind: 'cursor' as const };
+    publishSuggestionModel(visibleModel, true);
+    recordSuggestionMetric(visibleModel, 'vscode_suggestion_actions_revealed', visibleModel.applyMode, {
+      idleMs: ACTIVE_SUGGESTION_ACTION_IDLE_MS,
+    }, true);
+  };
+
+  const suppressAutoRefreshForActiveApply = (uriString: string) => {
+    suppressSuggestionRefreshUri = uriString;
+    suppressSuggestionRefreshUntil = Date.now() + ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS;
+  };
+
+  const isAutoRefreshSuppressed = () => {
+    const editor = vscode.window.activeTextEditor;
+    return !!editor
+      && Date.now() < suppressSuggestionRefreshUntil
+      && editor.document.uri.toString() === suppressSuggestionRefreshUri;
   };
 
   const scheduleCursorIdleSuggestionRefresh = () => {
     const settings = resolveActiveSuggestionSettings();
     clearCursorSuggestionTimers();
+    if (isAutoRefreshSuppressed()) {
+      return;
+    }
     if (!settings.enabled) {
       publishSuggestionModel(null, false);
       return;
@@ -3075,11 +3914,15 @@ export function activate(context: vscode.ExtensionContext) {
     }, ACTIVE_SUGGESTION_ACTION_IDLE_MS);
   };
 
-  const applySuggestionCompletion = async (mode: 'insert' | 'replace' = 'insert') => {
+  const applySuggestionCompletion = async (modeOverride?: SuggestionApplyMode) => {
     const editor = vscode.window.activeTextEditor;
     const model = activeSuggestionModel;
     if (!editor || !model || editor.document.uri.toString() !== model.uriString) {
       vscode.window.showInformationMessage('ADACEEN: no hay una sugerencia activa para aplicar.');
+      return;
+    }
+    if (model.applied) {
+      vscode.window.showInformationMessage('ADACEEN: esta ayuda ya fue aplicada. Valida el cambio o actualiza la sugerencia.');
       return;
     }
 
@@ -3089,6 +3932,34 @@ export function activate(context: vscode.ExtensionContext) {
     );
     const targetLine = editor.document.lineAt(modelLineIndex);
     const eol = getDocumentEol(editor.document);
+    const mode = modeOverride || model.applyMode || 'insert';
+    if (mode === 'delete') {
+      const range = getSuggestionDeleteRange(editor, modelLineIndex);
+      const deletedText = editor.document.getText(range);
+      if (!deletedText.trim()) {
+        vscode.window.showInformationMessage('ADACEEN: no hay codigo seleccionado o linea con contenido para eliminar.');
+        return;
+      }
+
+      suppressAutoRefreshForActiveApply(model.uriString);
+      const appliedDelete = await editor.edit((editBuilder) => {
+        editBuilder.delete(range);
+      });
+      if (!appliedDelete) {
+        suppressSuggestionRefreshUntil = 0;
+        vscode.window.showWarningMessage('ADACEEN: no se pudo aplicar la eliminacion en el editor.');
+        return;
+      }
+
+      editor.selection = new vscode.Selection(range.start, range.start);
+      recordSuggestionMetric(model, 'suggestion_completion_applied', 'delete', {
+        appliedMode: 'delete',
+        deletedCharacters: deletedText.length,
+      });
+      publishSuggestionModel(buildAppliedSuggestionModel(model, 'delete', range.start), true);
+      return;
+    }
+
     const rawCompletion = model.completionText || buildCompletionFallbackForModel(model, targetLine.text);
     const completionText = normalizeCompletionTextForEditor(rawCompletion, lineIndent(targetLine.text), eol);
     if (!completionText.trim()) {
@@ -3098,6 +3969,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     let editStart: vscode.Position;
     let insertedText = completionText;
+    suppressAutoRefreshForActiveApply(model.uriString);
     const applied = await editor.edit((editBuilder) => {
       if (mode === 'replace') {
         const range = editor.selection.isEmpty
@@ -3125,6 +3997,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     if (!applied) {
+      suppressSuggestionRefreshUntil = 0;
       vscode.window.showWarningMessage('ADACEEN: no se pudo aplicar la sugerencia en el editor.');
       return;
     }
@@ -3132,8 +4005,11 @@ export function activate(context: vscode.ExtensionContext) {
     const finalOffset = editor.document.offsetAt(editStart!) + insertedText.length;
     const finalPosition = editor.document.positionAt(finalOffset);
     editor.selection = new vscode.Selection(finalPosition, finalPosition);
-    publishSuggestionModel(null, true);
-    scheduleCursorIdleSuggestionRefresh();
+    recordSuggestionMetric(model, 'suggestion_completion_applied', mode, {
+      appliedMode: mode,
+      insertedCharacters: insertedText.length,
+    });
+    publishSuggestionModel(buildAppliedSuggestionModel(model, mode, finalPosition), true);
   };
 
   const openAssistantDisposable = vscode.commands.registerCommand('adaceen.openAssistant', async () => {
@@ -3143,21 +4019,65 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
     suggestionPanel.reveal(model);
+    recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', model.applyMode);
   });
 
   const refreshSuggestionsDisposable = vscode.commands.registerCommand('adaceen.refreshSuggestions', async () => {
     const model = await refreshActiveSuggestion('manual-refresh');
     if (model) {
       suggestionPanel.reveal(model);
+      recordSuggestionMetric(model, 'vscode_suggestion_manual_refresh', model.applyMode);
     }
   });
 
   const applySuggestionCompletionDisposable = vscode.commands.registerCommand(
     'adaceen.applySuggestionCompletion',
     async (mode?: string) => {
-      await applySuggestionCompletion(mode === 'replace' ? 'replace' : 'insert');
+      const normalizedMode: SuggestionApplyMode | undefined =
+        mode === 'insert' || mode === 'replace' || mode === 'delete' ? mode : undefined;
+      await applySuggestionCompletion(normalizedMode);
     },
   );
+
+  const openRagSourceDisposable = vscode.commands.registerCommand('adaceen.openRagSource', async (sourceArg?: unknown) => {
+    const sourceItem = normalizeRagSources([sourceArg])[0];
+    if (!sourceItem) {
+      vscode.window.showInformationMessage('ADACEEN: esta sugerencia no trae una fuente RAG abrible.');
+      return;
+    }
+
+    const targetUrl = buildRagSourceTargetUrl(sourceItem);
+    if (targetUrl) {
+      await vscode.env.openExternal(vscode.Uri.parse(targetUrl));
+      recordSuggestionMetric(activeSuggestionModel, 'vscode_rag_source_opened', sourceItem.citationLabel || sourceItem.title, {
+        sourceId: sourceItem.sourceId,
+        chunkId: sourceItem.chunkId,
+        title: sourceItem.title,
+        citationLabel: sourceItem.citationLabel,
+        pageStart: sourceItem.pageStart,
+        pageEnd: sourceItem.pageEnd,
+        courseCode: sourceItem.courseCode,
+        url: targetUrl,
+      });
+      return;
+    }
+
+    const document = await vscode.workspace.openTextDocument({
+      language: 'markdown',
+      content: buildRagSourceMarkdown(sourceItem),
+    });
+    await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+    recordSuggestionMetric(activeSuggestionModel, 'vscode_rag_source_opened', sourceItem.citationLabel || sourceItem.title, {
+      sourceId: sourceItem.sourceId,
+      chunkId: sourceItem.chunkId,
+      title: sourceItem.title,
+      citationLabel: sourceItem.citationLabel,
+      pageStart: sourceItem.pageStart,
+      pageEnd: sourceItem.pageEnd,
+      courseCode: sourceItem.courseCode,
+      openedAsMarkdown: true,
+    });
+  });
 
   const setBackendSessionIdDisposable = vscode.commands.registerCommand('adaceen.setBackendSessionId', async () => {
     const current = resolveBackendSettings().sessionId;
@@ -3233,6 +4153,7 @@ export function activate(context: vscode.ExtensionContext) {
     openAssistantDisposable,
     refreshSuggestionsDisposable,
     applySuggestionCompletionDisposable,
+    openRagSourceDisposable,
     setBackendSessionIdDisposable,
     applyNextCodeActionDisposable,
     suggestionPanel,
