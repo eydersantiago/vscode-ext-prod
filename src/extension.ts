@@ -245,6 +245,10 @@ type BackendSuggestionResult = {
   ragCourseCode: string;
 };
 
+type BackendSuggestionSettledResult =
+  | { ok: true; result: BackendSuggestionResult }
+  | { ok: false; error: unknown };
+
 type SuggestionApplyMode = 'insert' | 'replace' | 'delete';
 
 type CursorIdleAnchor = {
@@ -1501,6 +1505,20 @@ function withActiveSuggestionDeadline<T>(promise: Promise<T>, timeoutMs: number)
   });
 }
 
+function createEmptyBackendSuggestionResult(): BackendSuggestionResult {
+  return { outputText: '', ragSources: [], ragCourseCode: '' };
+}
+
+async function settleBackendSuggestionResult(
+  promise: Promise<BackendSuggestionResult>,
+): Promise<BackendSuggestionSettledResult> {
+  try {
+    return { ok: true, result: await promise };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
 function stableStringHash(value: string) {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -2658,6 +2676,10 @@ async function fetchBackendSuggestionText(
         repoFullName: snapshot.repoFullName,
         filePath: snapshot.filePath,
         languageHint: snapshot.language,
+        selection: snapshot.selectionText,
+        cursorLine: snapshot.line,
+        cursorColumn: snapshot.column,
+        currentLineText: snapshot.currentLineText,
         courseCode: settings.ragCourseCode,
         ragCourseCode: settings.ragCourseCode,
       }),
@@ -2673,16 +2695,21 @@ function buildBackendActiveSuggestionModel(
   projectIndex: WorkspaceProjectIndex | null,
   scope: BackendSuggestionScope,
   focusResult: BackendSuggestionResult,
-  fileSummaryResult: BackendSuggestionResult = { outputText: '', ragSources: [], ragCourseCode: '' },
+  fileSummaryResult: BackendSuggestionResult = createEmptyBackendSuggestionResult(),
+  backendError = '',
 ): ActiveSuggestionModel | null {
   const focusOutputText = focusResult.outputText;
-  if (!focusOutputText) {
+  const fileSummaryOutputText = fileSummaryResult.outputText;
+  if (!focusOutputText && !fileSummaryOutputText) {
     return null;
   }
 
-  const focusSections = parseBackendSuggestionSections(focusOutputText);
-  const fileSummarySections = fileSummaryResult.outputText
-    ? parseBackendSuggestionSections(fileSummaryResult.outputText)
+  const emptySections: BackendSuggestionSections = { resumen: [], sugerencias: [], riesgos: [], all: [] };
+  const focusSections = focusOutputText
+    ? parseBackendSuggestionSections(focusOutputText)
+    : emptySections;
+  const fileSummarySections = fileSummaryOutputText
+    ? parseBackendSuggestionSections(fileSummaryOutputText)
     : focusSections;
   const focusLines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
   const fileLines = fileSummarySections.sugerencias.length > 0
@@ -2699,8 +2726,13 @@ function buildBackendActiveSuggestionModel(
   const focusSummary = focusSections.resumen.length > 0
     ? truncateInline(focusSections.resumen.join(' '), 420)
     : '';
+  const completionSeed = focusLines[0]
+    || (scope === 'cursor' ? localFallback.lineSuggestions[0] : fileLines[0])
+    || fileLines[0]
+    || localFallback.suggestions[0]
+    || '';
   const completionText = extractFirstCodeFence(focusOutputText)
-    || buildSuggestedCompletion(snapshot, focusLines[0] || fileLines[0] || localFallback.suggestions[0] || '');
+    || buildSuggestedCompletion(snapshot, completionSeed);
   const applyMode = inferSuggestionApplyMode(
     snapshot,
     `${focusOutputText}\n${fileSummaryResult.outputText}`,
@@ -2734,7 +2766,7 @@ function buildBackendActiveSuggestionModel(
     lineSuggestions,
     nextSteps: combinedSuggestions.slice(1, 4).length > 0 ? combinedSuggestions.slice(1, 4) : localFallback.nextSteps,
     source: 'backend',
-    backendError: '',
+    backendError: backendError ? truncateInline(backendError, 180) : '',
     ragSources,
     ragCourseCode,
     updatedAt: new Date().toISOString(),
@@ -3776,21 +3808,55 @@ export function activate(context: vscode.ExtensionContext) {
           getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary'),
           fallbackDelayMs,
         );
-        const [focusResult, fileSummaryResult] = backendScope === 'cursor'
-          ? await Promise.all([
-            withActiveSuggestionDeadline(
-              getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor'),
-              fallbackDelayMs,
-            ),
-            fileSummaryRequest,
-          ])
-          : [await fileSummaryRequest, { outputText: '', ragSources: [], ragCourseCode: '' }];
+        let focusResult: BackendSuggestionResult;
+        let fileSummaryResult: BackendSuggestionResult = createEmptyBackendSuggestionResult();
+        let partialBackendError = '';
+
+        if (backendScope === 'cursor') {
+          const cursorRequest = withActiveSuggestionDeadline(
+            getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor'),
+            fallbackDelayMs,
+          );
+          const [cursorSettled, fileSummarySettled] = await Promise.all([
+            settleBackendSuggestionResult(cursorRequest),
+            settleBackendSuggestionResult(fileSummaryRequest),
+          ]);
+          const backendErrors: string[] = [];
+
+          if (cursorSettled.ok) {
+            focusResult = cursorSettled.result;
+          } else {
+            focusResult = createEmptyBackendSuggestionResult();
+            backendErrors.push(`cursor: ${String(cursorSettled.error)}`);
+          }
+
+          if (fileSummarySettled.ok) {
+            fileSummaryResult = fileSummarySettled.result;
+          } else {
+            backendErrors.push(`file_summary: ${String(fileSummarySettled.error)}`);
+          }
+
+          if (!cursorSettled.ok && !fileSummarySettled.ok) {
+            throw new Error(backendErrors.join(' | ') || 'Backend no disponible para sugerencias.');
+          }
+
+          partialBackendError = backendErrors.join(' | ');
+          if (partialBackendError) {
+            output.appendLine(
+              `[Suggestions] Backend parcial (${reason}, ${getBackendSuggestionScopeLabel(backendScope)}): ${partialBackendError}`,
+            );
+          }
+        } else {
+          focusResult = await fileSummaryRequest;
+        }
+
         const backendModel = buildBackendActiveSuggestionModel(
           snapshot,
           projectIndex,
           backendScope,
           focusResult,
           fileSummaryResult,
+          partialBackendError,
         );
         if (backendModel) {
           model = backendModel;
