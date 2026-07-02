@@ -137,6 +137,8 @@ type ActiveSuggestionRagSource = {
   fileName: string;
   scope: string;
   courseCode: string;
+  knowledgeTier: string;
+  contextDomain: string;
   citationLabel: string;
   pageStart: number | null;
   pageEnd: number | null;
@@ -1426,6 +1428,14 @@ function normalizeRagSources(value: unknown): ActiveSuggestionRagSource[] {
       title: toOptionalString(source.title) || toOptionalString(citation.title) || 'Fuente RAG',
       fileName: toOptionalString(source.fileName) || toOptionalString(citation.fileName) || '',
       scope: toOptionalString(source.scope) || '',
+      knowledgeTier: toOptionalString(source.knowledgeTier) ||
+        toOptionalString(metadata.knowledgeTier) ||
+        toOptionalString(metadata.knowledge_tier) ||
+        '',
+      contextDomain: toOptionalString(source.contextDomain) ||
+        toOptionalString(metadata.contextDomain) ||
+        toOptionalString(metadata.context_domain) ||
+        '',
       courseCode: normalizeCourseCode(source.courseCode) ||
         normalizeCourseCode(source.course_code) ||
         normalizeCourseCode(metadata.courseCode) ||
@@ -3099,6 +3109,7 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
           : '';
         const meta = [
           sourceItem.courseCode,
+          sourceItem.knowledgeTier === 'supplemental' || sourceItem.contextDomain === 'bitacora' ? 'Suplementario' : 'RAG principal',
           sourceItem.scope === 'teacher' ? 'Docente' : sourceItem.scope === 'default' ? 'Base' : '',
           sourceItem.fileName,
           pageText,
@@ -3545,8 +3556,11 @@ function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
     const pageText = ragSource.pageStart
       ? ` p. ${ragSource.pageEnd && ragSource.pageEnd !== ragSource.pageStart ? `${ragSource.pageStart}-${ragSource.pageEnd}` : ragSource.pageStart}`
       : '';
-    markdown.appendMarkdown(`\n\n**Fuente RAG:** ${escapeMarkdown(ragSource.title)}${escapeMarkdown(pageText)} ${escapeMarkdown(ragSource.citationLabel || '')}`);
-    markdown.appendMarkdown(`\n\n[Abrir fuente RAG](${ragUri})`);
+    const ragLabel = ragSource.knowledgeTier === 'supplemental' || ragSource.contextDomain === 'bitacora'
+      ? 'Contexto suplementario'
+      : 'Fuente RAG';
+    markdown.appendMarkdown(`\n\n**${ragLabel}:** ${escapeMarkdown(ragSource.title)}${escapeMarkdown(pageText)} ${escapeMarkdown(ragSource.citationLabel || '')}`);
+    markdown.appendMarkdown(`\n\n[Abrir fuente o detalle](${ragUri})`);
   }
 
   if (model.fileOverview) {
