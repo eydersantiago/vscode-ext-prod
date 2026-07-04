@@ -27,7 +27,8 @@ const ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB = 96;
 const ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS = 220;
 const ACTIVE_SUGGESTION_PROMPT_CODE_CHARS = 7200;
 const ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS = 1400;
-const ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS = 2400;
+const ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS = 12000;
+const ACTIVE_SUGGESTION_SELECTION_MAX_LINES = 20;
 const ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES = 24;
 const ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS = 110;
 const ACTIVE_SUGGESTION_CURSOR_IDLE_MS = 3000;
@@ -159,6 +160,10 @@ type ActiveEditorSnapshot = {
   selectionText: string;
   selectionStartLine: number;
   selectionEndLine: number;
+  selectionLineCount: number;
+  selectionOriginalLineCount: number;
+  selectionTruncated: boolean;
+  selectionRangeKey: string;
   visibleText: string;
   content: string;
   currentLineText: string;
@@ -189,6 +194,10 @@ type ActiveSuggestionModel = {
   updatedAt: string;
   line: number;
   column: number;
+  selectionLineCount: number;
+  selectionOriginalLineCount: number;
+  selectionTruncated: boolean;
+  selectionRangeKey: string;
   fileSummaryCacheKey: string;
   metricId: string;
   completionText: string;
@@ -258,6 +267,7 @@ type CursorIdleAnchor = {
   version: number;
   line: number;
   column: number;
+  selectionRangeKey: string;
 };
 
 type PendingScanRequest = {
@@ -1917,11 +1927,61 @@ function getVisibleEditorText(editor: vscode.TextEditor, maxChars: number) {
   return chunks.join('\n').slice(0, maxChars);
 }
 
-function getSelectedEditorText(editor: vscode.TextEditor, maxChars: number) {
-  if (editor.selection.isEmpty) {
-    return '';
+function effectiveSelectionEndLine(selection: vscode.Selection) {
+  if (!selection.isEmpty && selection.end.character === 0 && selection.end.line > selection.start.line) {
+    return selection.end.line - 1;
   }
-  return editor.document.getText(editor.selection).slice(0, maxChars);
+  return selection.end.line;
+}
+
+function buildSelectionRangeKey(editor: vscode.TextEditor) {
+  const selection = editor.selection;
+  return [
+    selection.start.line,
+    selection.start.character,
+    selection.end.line,
+    selection.end.character,
+    selection.active.line,
+    selection.active.character,
+    selection.isEmpty ? 'empty' : 'selection',
+  ].join(':');
+}
+
+function getSelectedEditorSnippet(editor: vscode.TextEditor, maxChars: number) {
+  const selection = editor.selection;
+  if (selection.isEmpty) {
+    return {
+      text: '',
+      startLine: 0,
+      endLine: 0,
+      lineCount: 0,
+      originalLineCount: 0,
+      truncated: false,
+      rangeKey: buildSelectionRangeKey(editor),
+    };
+  }
+
+  const startLine = Math.max(0, Math.min(selection.start.line, editor.document.lineCount - 1));
+  const effectiveEndLine = Math.max(startLine, Math.min(effectiveSelectionEndLine(selection), editor.document.lineCount - 1));
+  const originalLineCount = Math.max(1, effectiveEndLine - startLine + 1);
+  const limitedEndLine = Math.min(effectiveEndLine, startLine + ACTIVE_SUGGESTION_SELECTION_MAX_LINES - 1);
+  const truncatedByLines = limitedEndLine < effectiveEndLine;
+  const endPosition = truncatedByLines
+    ? editor.document.lineAt(limitedEndLine).range.end
+    : selection.end;
+  const range = new vscode.Range(selection.start, endPosition);
+  const rawText = editor.document.getText(range);
+  const text = rawText.slice(0, maxChars);
+
+  return {
+    text,
+    startLine: startLine + 1,
+    endLine: limitedEndLine + 1,
+    lineCount: Math.max(1, limitedEndLine - startLine + 1),
+    originalLineCount,
+    truncated: truncatedByLines,
+    rangeKey: buildSelectionRangeKey(editor),
+  };
 }
 
 async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Promise<ActiveEditorSnapshot | null> {
@@ -1944,9 +2004,7 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
   const currentLineText = activeLine >= 0 && activeLine < document.lineCount
     ? document.lineAt(activeLine).text
     : '';
-  const selectionText = getSelectedEditorText(editor, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS);
-  const selectionStartLine = editor.selection.isEmpty ? 0 : editor.selection.start.line + 1;
-  const selectionEndLine = editor.selection.isEmpty ? 0 : editor.selection.end.line + 1;
+  const selection = getSelectedEditorSnippet(editor, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS);
   const visibleText = getVisibleEditorText(editor, Math.min(settings.maxCodeChars, 12000));
   const language = inferActiveLanguage(filePath, document.languageId);
   const generatedAt = new Date().toISOString();
@@ -1964,9 +2022,12 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
     language,
     line,
     column,
-    selectionStartLine,
-    selectionEndLine,
-    selectionText,
+    selection.startLine,
+    selection.endLine,
+    selection.lineCount,
+    selection.originalLineCount,
+    selection.truncated,
+    selection.text,
     content,
   ].join('\n---adaceen---\n'));
 
@@ -1980,9 +2041,13 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
     line,
     column,
     lineCount: document.lineCount,
-    selectionText,
-    selectionStartLine,
-    selectionEndLine,
+    selectionText: selection.text,
+    selectionStartLine: selection.startLine,
+    selectionEndLine: selection.endLine,
+    selectionLineCount: selection.lineCount,
+    selectionOriginalLineCount: selection.originalLineCount,
+    selectionTruncated: selection.truncated,
+    selectionRangeKey: selection.rangeKey,
     visibleText,
     content,
     currentLineText,
@@ -2003,7 +2068,8 @@ function isSnapshotStillActive(snapshot: ActiveEditorSnapshot, scope: BackendSug
   }
 
   return editor.selection.active.line + 1 === snapshot.line
-    && editor.selection.active.character + 1 === snapshot.column;
+    && editor.selection.active.character + 1 === snapshot.column
+    && buildSelectionRangeKey(editor) === snapshot.selectionRangeKey;
 }
 
 function getCursorIdleAnchor(): CursorIdleAnchor | null {
@@ -2017,6 +2083,7 @@ function getCursorIdleAnchor(): CursorIdleAnchor | null {
     version: editor.document.version,
     line: editor.selection.active.line,
     column: editor.selection.active.character,
+    selectionRangeKey: buildSelectionRangeKey(editor),
   };
 }
 
@@ -2031,7 +2098,8 @@ function isCursorIdleAnchorStillActive(anchor: CursorIdleAnchor | null) {
 
   return editor.document.version === anchor.version
     && editor.selection.active.line === anchor.line
-    && editor.selection.active.character === anchor.column;
+    && editor.selection.active.character === anchor.column
+    && buildSelectionRangeKey(editor) === anchor.selectionRangeKey;
 }
 
 function countMatches(value: string, pattern: RegExp) {
@@ -2486,8 +2554,17 @@ function buildLocalActiveSuggestion(
   const suggestions: string[] = [];
   const nextSteps: string[] = [];
   const fileOverview = buildLocalFileOverview(snapshot, projectIndex);
+  const hasSelection = !!snapshot.selectionText.trim();
+  const selectionLimitNote = snapshot.selectionTruncated
+    ? ` La seleccion original tenia ${snapshot.selectionOriginalLineCount} lineas; ADACEEN analizo las primeras ${snapshot.selectionLineCount} lineas.`
+    : '';
 
-  if (snapshot.currentLineText.trim()) {
+  if (hasSelection) {
+    suggestions.push(
+      `Analiza el bloque seleccionado completo (${snapshot.selectionLineCount} linea(s), ${snapshot.selectionStartLine}-${snapshot.selectionEndLine}) antes de proponer cambios.${selectionLimitNote}`,
+    );
+    nextSteps.push('Trabaja sobre la seleccion como unidad: identifica entrada, efecto y salida del bloque antes de editar.');
+  } else if (snapshot.currentLineText.trim()) {
     suggestions.push(`El cursor quedo en la linea ${snapshot.line}; revisa ese punto como posible bloqueo antes de cambiar mas codigo.`);
     nextSteps.push(`Trabaja desde la linea ${snapshot.line}: completa una intencion pequena y valida el resultado.`);
   }
@@ -2555,10 +2632,14 @@ function buildLocalActiveSuggestion(
     snapshot.repoFullName ? `repo ${snapshot.repoFullName}` : snapshot.workspaceName || 'workspace',
     snapshot.language,
     `${snapshot.lineCount} lineas`,
-    `cursor linea ${snapshot.line}`,
+    hasSelection
+      ? `seleccion ${snapshot.selectionLineCount}${snapshot.selectionTruncated ? `/${snapshot.selectionOriginalLineCount}` : ''} lineas`
+      : `cursor linea ${snapshot.line}`,
     isCodespaceRuntime() ? 'Codespaces' : 'VS Code',
   ], 5);
   const compactSuggestions = uniqueCompactStrings(suggestions, 4);
+  const focusLine = hasSelection ? snapshot.selectionStartLine : snapshot.line;
+  const focusColumn = hasSelection ? 1 : snapshot.column;
   const completionText = buildSuggestedCompletion(snapshot, compactSuggestions[0] || nextSteps[0] || '');
   const applyMode = inferSuggestionApplyMode(
     snapshot,
@@ -2575,8 +2656,10 @@ function buildLocalActiveSuggestion(
     title: `Sugerencias para ${snapshot.fileName}`,
     summary: fileOverview || `Archivo activo: ${snapshot.filePath} (${snapshot.language}, linea ${snapshot.line}).`,
     fileOverview,
-    lineSummary: snapshot.currentLineText.trim()
-      ? `Foco actual: linea ${snapshot.line}.`
+    lineSummary: hasSelection
+      ? `Foco actual: seleccion lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine} (${snapshot.selectionLineCount} linea(s) analizadas${snapshot.selectionTruncated ? ` de ${snapshot.selectionOriginalLineCount}` : ''}).`
+      : snapshot.currentLineText.trim()
+        ? `Foco actual: linea ${snapshot.line}.`
       : '',
     suggestions: compactSuggestions,
     fileSuggestions: compactSuggestions,
@@ -2588,8 +2671,12 @@ function buildLocalActiveSuggestion(
     ragSources: [],
     ragCourseCode: '',
     updatedAt: new Date().toISOString(),
-    line: snapshot.line,
-    column: snapshot.column,
+    line: focusLine,
+    column: focusColumn,
+    selectionLineCount: snapshot.selectionLineCount,
+    selectionOriginalLineCount: snapshot.selectionOriginalLineCount,
+    selectionTruncated: snapshot.selectionTruncated,
+    selectionRangeKey: snapshot.selectionRangeKey,
     fileSummaryCacheKey: snapshot.fileSummaryCacheKey,
     metricId: stableStringHash([
       snapshot.cacheKey,
@@ -2612,9 +2699,14 @@ function buildBackendSuggestionContent(
   const isFileSummary = scope === 'file_summary';
   const selectionBlock = !isFileSummary && snapshot.selectionText.trim()
     ? [
-      `Seleccion actual: lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine}`,
+      `Bloque seleccionado por el usuario: lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine}`,
+      `Lineas analizadas de la seleccion: ${snapshot.selectionLineCount}${snapshot.selectionTruncated ? ` de ${snapshot.selectionOriginalLineCount}` : ''}`,
+      snapshot.selectionTruncated
+        ? `Aviso: la seleccion supero el limite de ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas; analiza solo este recorte inicial y menciona esa limitacion si afecta la respuesta.`
+        : '',
+      'El foco principal es todo este bloque seleccionado, no solamente la linea del cursor.',
       snapshot.selectionText.slice(0, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS),
-    ].join('\n')
+    ].filter(Boolean).join('\n')
     : '';
 
   return [
@@ -2644,8 +2736,9 @@ function buildBackendSuggestionQuestion(snapshot: ActiveEditorSnapshot, scope: B
 
   if (snapshot.selectionText.trim()) {
     return [
-      'El estudiante selecciono un bloque del editor; interpreta esa seleccion como el foco principal.',
-      'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa seleccion.',
+      `El estudiante selecciono un bloque del editor; analiza la seleccion completa recibida, con limite maximo de ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas, como foco principal.`,
+      'No reduzcas el analisis a la linea del cursor si hay varias lineas seleccionadas.',
+      'Describe en 1 bullet que parece estar intentando hacer el bloque seleccionado y da 2 sugerencias breves para continuar desde esa seleccion.',
       'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
       'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
       'No des la solucion completa ni inventes datos que no esten en el contexto.',
@@ -2687,6 +2780,12 @@ async function fetchBackendSuggestionText(
         filePath: snapshot.filePath,
         languageHint: snapshot.language,
         selection: snapshot.selectionText,
+        selectionStartLine: snapshot.selectionStartLine,
+        selectionEndLine: snapshot.selectionEndLine,
+        selectionLineCount: snapshot.selectionLineCount,
+        selectionOriginalLineCount: snapshot.selectionOriginalLineCount,
+        selectionTruncated: snapshot.selectionTruncated,
+        selectionMaxLines: ACTIVE_SUGGESTION_SELECTION_MAX_LINES,
         cursorLine: snapshot.line,
         cursorColumn: snapshot.column,
         currentLineText: snapshot.currentLineText,
@@ -2828,6 +2927,10 @@ function buildSuggestionMetricMetadata(
     source: model.source,
     line: model.line,
     column: model.column,
+    selectionLineCount: model.selectionLineCount,
+    selectionOriginalLineCount: model.selectionOriginalLineCount,
+    selectionTruncated: model.selectionTruncated,
+    selectionMaxLines: ACTIVE_SUGGESTION_SELECTION_MAX_LINES,
     fileSummaryCacheKey: model.fileSummaryCacheKey,
     ragCourseCode: model.ragCourseCode,
     ragSourceCount: model.ragSources.length,
@@ -2906,6 +3009,10 @@ function buildRackReplacementOptions(
     applyMode,
     line: model.line,
     column: model.column,
+    selectionLineCount: snapshot.selectionLineCount,
+    selectionOriginalLineCount: snapshot.selectionOriginalLineCount,
+    selectionTruncated: snapshot.selectionTruncated,
+    selectionMaxLines: ACTIVE_SUGGESTION_SELECTION_MAX_LINES,
     generatedAt: model.updatedAt,
     language: model.language,
   };
@@ -3061,7 +3168,8 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
       ? model.fileSuggestions
       : (model?.suggestions?.length ? model.suggestions : ['Abre un archivo del proyecto o cambia de pestana en el editor.']);
     const lineSuggestions = model?.lineSuggestions?.length ? model.lineSuggestions : [];
-    const showLineSection = loading || model?.triggerKind === 'cursor' || lineSuggestions.length > 0;
+    const hasSelectionFocus = !!model?.selectionLineCount;
+    const showLineSection = loading || model?.triggerKind === 'cursor' || lineSuggestions.length > 0 || hasSelectionFocus;
     const nextSteps = model?.nextSteps?.length ? model.nextSteps : ['Cuando abras un archivo, ADACEEN mostrara el siguiente paso aqui.'];
     const chips = model?.chips?.length ? model.chips : ['VS Code', 'archivo activo'];
     const ragSources = model?.ragSources?.length ? model.ragSources : [];
@@ -3077,6 +3185,13 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     const applied = !!model?.applied;
     const applyMode = model?.applyMode || 'insert';
     const applyModeLabel = suggestionApplyModeLabel(applyMode);
+    const focusTitle = hasSelectionFocus ? 'Recomendacion de la seleccion' : 'Recomendacion del codigo';
+    const focusBadge = hasSelectionFocus
+      ? `Seleccion ${model?.selectionLineCount || 0}${model?.selectionTruncated ? `/${model?.selectionOriginalLineCount || model?.selectionLineCount || 0}` : ''} lineas`
+      : `Linea ${model?.line || ''}`;
+    const selectionWarningMarkup = model?.selectionTruncated
+      ? `<div class="limit-note">Seleccion limitada: se analizaron las primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount || 'la seleccion'}.</div>`
+      : '';
     const applyHelpText = applyMode === 'delete'
       ? 'Eliminara la seleccion o linea activa indicada por la sugerencia.'
       : applyMode === 'replace'
@@ -3092,11 +3207,14 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
         </article>
       `).join('');
     };
-    const loadingLineMarkup = '<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencia de linea...</p></article>';
+    const focusEmptyText = hasSelectionFocus
+      ? 'Selecciona hasta 20 lineas para recibir una pista puntual sobre ese bloque.'
+      : 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.';
+    const loadingLineMarkup = `<article class="bubble is-loading"><span class="bubble-mark">...</span><p>${escapeHtml(hasSelectionFocus ? 'Cargando analisis de la seleccion...' : 'Cargando sugerencia de linea...')}</p></article>`;
     const loadingFileMarkup = '<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencias del archivo...</p></article>';
     const lineSuggestionMarkup = lineSuggestions.length > 0
-      ? renderBubbleList(lineSuggestions, 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.')
-      : (loading ? loadingLineMarkup : renderBubbleList(lineSuggestions, 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.'));
+      ? renderBubbleList(lineSuggestions, focusEmptyText)
+      : (loading ? loadingLineMarkup : renderBubbleList(lineSuggestions, focusEmptyText));
     const fileSuggestionMarkup = fileSuggestions.length > 0
       ? renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.')
       : (loading ? loadingFileMarkup : renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.'));
@@ -3306,6 +3424,16 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
       font-size: 12px;
       color: var(--vscode-descriptionForeground);
     }
+    .limit-note {
+      margin: 0 0 10px;
+      border: 1px solid rgba(201, 95, 48, 0.42);
+      border-radius: 7px;
+      padding: 8px 10px;
+      background: color-mix(in srgb, var(--vscode-editorWidget-background) 82%, #fff0dc 18%);
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      font-weight: 700;
+    }
     .rag-list {
       list-style: none;
       padding: 0;
@@ -3387,9 +3515,10 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     ${showLineSection ? `
     <section class="focus">
       <div class="section-title-row">
-        <h2>Recomendacion del codigo</h2>
-        <span class="badge">Linea ${model?.line || ''}</span>
+        <h2>${escapeHtml(focusTitle)}</h2>
+        <span class="badge">${escapeHtml(focusBadge)}</span>
       </div>
+      ${selectionWarningMarkup}
       ${model?.lineSummary ? `<p class="line-summary">${escapeHtml(model.lineSummary)}</p>` : ''}
       <div class="bubble-list">${lineSuggestionMarkup}</div>
     </section>
@@ -3504,6 +3633,9 @@ function updateSuggestionStatusBar(statusBar: vscode.StatusBarItem, model: Activ
   statusBar.tooltip = [
     model.fileOverview ? `Descripcion: ${model.fileOverview}` : '',
     model.summary,
+    model.selectionTruncated
+      ? `Seleccion limitada: primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount}.`
+      : '',
     '',
     ...(model.suggestions || []).map((item) => `- ${item}`),
     model.backendError ? `Backend: ${model.backendError}` : '',
@@ -3524,7 +3656,8 @@ function buildInlineSuggestionLabel(model: ActiveSuggestionModel) {
   }
   const action = suggestionApplyModeLabel(model.applyMode).toLowerCase();
   const focus = primarySuggestionText(model);
-  return `ADACEEN ${action}: ${truncateInline(focus, 82)}`;
+  const scope = model.selectionLineCount ? 'seleccion' : action;
+  return `ADACEEN ${scope}: ${truncateInline(focus, 82)}`;
 }
 
 function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
@@ -3537,7 +3670,15 @@ function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
     ],
   };
 
-  markdown.appendMarkdown(`**ADACEEN en linea ${model.line}**\n\n`);
+  const focusLabel = model.selectionLineCount
+    ? `seleccion (${model.selectionLineCount}${model.selectionTruncated ? `/${model.selectionOriginalLineCount || model.selectionLineCount}` : ''} lineas)`
+    : `linea ${model.line}`;
+  markdown.appendMarkdown(`**ADACEEN en ${escapeMarkdown(focusLabel)}**\n\n`);
+  if (model.selectionTruncated) {
+    markdown.appendMarkdown(
+      `> Seleccion limitada: se analizaron las primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount || 'la seleccion'}.\n\n`,
+    );
+  }
   markdown.appendMarkdown(`${escapeMarkdown(primarySuggestionText(model))}\n\n`);
   markdown.appendMarkdown(`**Accion:** ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}\n\n`);
 
@@ -3903,8 +4044,9 @@ export function activate(context: vscode.ExtensionContext) {
     const keepVisibleActions = backendScope === 'cursor'
       && !!activeSuggestionModel?.actionsVisible
       && activeSuggestionModel.uriString === snapshot.uriString
-      && activeSuggestionModel.line === snapshot.line
-      && activeSuggestionModel.column === snapshot.column;
+      && (activeSuggestionModel.selectionRangeKey
+        ? activeSuggestionModel.selectionRangeKey === snapshot.selectionRangeKey
+        : activeSuggestionModel.line === snapshot.line && activeSuggestionModel.column === snapshot.column);
     const finalModel = keepVisibleActions ? { ...model, actionsVisible: true } : model;
     publishSuggestionModel(finalModel, true);
     recordSuggestionMetric(finalModel, 'vscode_suggestion_shown', finalModel.applyMode, {
@@ -3974,8 +4116,9 @@ export function activate(context: vscode.ExtensionContext) {
       !model ||
       model.uriString !== anchor.uriString ||
       model.triggerKind !== 'cursor' ||
-      model.line !== anchor.line + 1 ||
-      model.column !== anchor.column + 1
+      (model.selectionRangeKey
+        ? model.selectionRangeKey !== anchor.selectionRangeKey
+        : model.line !== anchor.line + 1 || model.column !== anchor.column + 1)
     ) {
       model = await refreshActiveSuggestion('cursor-idle');
     }
