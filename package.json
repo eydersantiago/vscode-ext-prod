@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {

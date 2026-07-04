@@ -3204,7 +3204,7 @@ async function publishActiveEditorRack(
         replacementOptions: buildRackReplacementOptions(snapshot, model),
       }),
     },
-    30000,
+    settings.requestTimeoutMs,
   );
 }
 
