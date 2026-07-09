@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.21",
+  "version": "0.0.24",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -44,6 +44,14 @@
       {
         "command": "adaceen.refreshSuggestions",
         "title": "ADACEEN: Actualizar sugerencias del archivo activo"
+      },
+      {
+        "command": "adaceen.openSuggestionHistory",
+        "title": "ADACEEN: Ver historial de recomendaciones"
+      },
+      {
+        "command": "adaceen.clearSuggestionHistory",
+        "title": "ADACEEN: Limpiar historial de recomendaciones"
       },
       {
         "command": "adaceen.applySuggestionCompletion",
@@ -148,6 +156,11 @@
           "type": "boolean",
           "default": false,
           "description": "Abre automaticamente el panel ADACEEN de sugerencias cuando cambia el archivo activo."
+        },
+        "adaceen.suggestions.autoOpenSelectionActions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Abre el menu flotante de acciones rapidas al detectar una sugerencia aplicable sobre codigo seleccionado."
         },
         "adaceen.suggestions.debounceMs": {
           "type": "number",
