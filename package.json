@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.6",
+  "version": "0.0.24",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -44,6 +44,30 @@
       {
         "command": "adaceen.refreshSuggestions",
         "title": "ADACEEN: Actualizar sugerencias del archivo activo"
+      },
+      {
+        "command": "adaceen.openSuggestionHistory",
+        "title": "ADACEEN: Ver historial de recomendaciones"
+      },
+      {
+        "command": "adaceen.clearSuggestionHistory",
+        "title": "ADACEEN: Limpiar historial de recomendaciones"
+      },
+      {
+        "command": "adaceen.applySuggestionCompletion",
+        "title": "ADACEEN: Aplicar sugerencia activa"
+      },
+      {
+        "command": "adaceen.openRagSource",
+        "title": "ADACEEN: Ver fuente RAG"
+      },
+      {
+        "command": "adaceen.setBackendSessionId",
+        "title": "ADACEEN: Configurar sesión compartida"
+      },
+      {
+        "command": "adaceen.applyNextCodeAction",
+        "title": "ADACEEN: Aplicar siguiente reemplazo del navegador"
       }
     ],
     "configuration": {
@@ -92,6 +116,11 @@
           "default": "",
           "description": "Clave compartida (opcional) para autenticar el worker de escaneo."
         },
+        "adaceen.backend.sessionId": {
+          "type": "string",
+          "default": "",
+          "description": "ID de sesión ADACEEN compartido con el overlay del navegador para sincronizar sugerencias y reemplazos."
+        },
         "adaceen.backend.autoWorkerEnabled": {
           "type": "boolean",
           "default": true,
@@ -102,6 +131,16 @@
           "minimum": 2000,
           "default": 8000,
           "description": "Intervalo en milisegundos para consultar solicitudes pendientes de escaneo."
+        },
+        "adaceen.backend.codeActionsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Consulta reemplazos enviados desde el overlay del navegador para el workspace abierto."
+        },
+        "adaceen.backend.autoApplyCodeActions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Aplica los reemplazos enviados desde el navegador sin pedir confirmación en VS Code."
         },
         "adaceen.suggestions.enabled": {
           "type": "boolean",
@@ -115,8 +154,13 @@
         },
         "adaceen.suggestions.autoRevealPanel": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Abre automaticamente el panel ADACEEN de sugerencias cuando cambia el archivo activo."
+        },
+        "adaceen.suggestions.autoOpenSelectionActions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Abre el menu flotante de acciones rapidas al detectar una sugerencia aplicable sobre codigo seleccionado."
         },
         "adaceen.suggestions.debounceMs": {
           "type": "number",
@@ -133,8 +177,13 @@
         "adaceen.suggestions.backendTimeoutMs": {
           "type": "number",
           "minimum": 10000,
-          "default": 180000,
+          "default": 120000,
           "description": "Tiempo máximo en milisegundos para esperar una sugerencia del backend antes de usar fallback local."
+        },
+        "adaceen.rag.courseCode": {
+          "type": "string",
+          "default": "",
+          "description": "Curso RAG activo para sugerencias en VS Code. Si queda vacío, el backend usa el curso permitido por la sesión."
         }
       }
     }
