@@ -1,9 +1,20 @@
 {
-  "name": "adaceen-codespace",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
-  "extensions": [
-    "adaceen.adaceen"
-  ],
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.base.schema.json",
+  "name": "ADACEEN VS Code Extension",
+
+  // Antes: base:ubuntu-24.04, que NO trae Node. `npm ci`, webpack y tsc
+  // no podian correr sin instalar el runtime a mano en cada arranque.
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22-bookworm",
+
+  "onCreateCommand": "npm ci --prefer-offline --no-audit --fund=false",
+  "updateContentCommand": "npm ci --prefer-offline --no-audit --fund=false",
+  "waitFor": "onCreateCommand",
+
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb"
+  },
+
   "customizations": {
     "vscode": {
       "extensions": [
@@ -14,13 +25,12 @@
       ],
       "settings": {
         "remote.extensionKind": {
-          "adaceen.adaceen": [
-            "workspace",
-            "ui"
-          ]
-        }
+          "adaceen.adaceen": ["workspace", "ui"]
+        },
+        "typescript.tsdk": "node_modules/typescript/lib"
       }
     }
   },
-  "postAttachCommand": "bash .devcontainer/install-extensions.sh"
+
+  "remoteUser": "node"
 }
