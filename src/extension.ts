@@ -4397,6 +4397,108 @@ class AdaceenSuggestionInlayHintProvider implements vscode.InlayHintsProvider, v
   }
 }
 
+type BackendOrigin = {
+  /** Modo del backend: local | azure | queue. */
+  mode: string;
+  /** Etiqueta ya resuelta por el backend: "Google Cloud - L4". */
+  label: string;
+  id: string;
+  provider: string;
+  reachable: boolean;
+  /** Motivo cuando no se pudo consultar, para el tooltip. */
+  detail: string;
+};
+
+const UNKNOWN_BACKEND_ORIGIN: BackendOrigin = {
+  mode: '',
+  label: 'sin consultar',
+  id: '',
+  provider: 'unknown',
+  reachable: false,
+  detail: '',
+};
+
+function backendOriginIcon(origin: BackendOrigin): string {
+  if (!origin.reachable) {
+    return '$(warning)';
+  }
+  switch (origin.provider) {
+    case 'gcp':
+      return '$(cloud)';
+    case 'colab':
+      return '$(beaker)';
+    case 'mac':
+    case 'pc':
+      return '$(device-desktop)';
+    case 'azure':
+    case 'local':
+      return '$(server)';
+    default:
+      return '$(question)';
+  }
+}
+
+/**
+ * Pregunta al backend quien esta poniendo la GPU.
+ *
+ * Nunca lanza: si el backend no responde o es una version anterior sin
+ * /api/agent/backend, devuelve un origen no alcanzable con el motivo en
+ * detail, que es justo lo que hay que mostrarle al estudiante.
+ */
+async function fetchBackendOrigin(settings: BackendSettings): Promise<BackendOrigin> {
+  try {
+    const data = asRecord(
+      await fetchJsonWithTimeout(
+        `${settings.baseUrl}/api/agent/backend`,
+        { method: 'GET', headers: buildWorkerHeaders(settings, false) },
+        8000,
+      ),
+    );
+    // worker es el ultimo job atendido; expected es lo que el backend espera
+    // cuando todavia no ha pasado ninguno.
+    const worker = asRecord(data.worker ?? data.expected);
+    return {
+      mode: toOptionalString(data.mode) ?? '',
+      label: toOptionalString(worker.label) ?? 'sin identificar',
+      id: toOptionalString(worker.id) ?? '',
+      provider: toOptionalString(worker.provider) ?? 'unknown',
+      reachable: true,
+      detail: '',
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const outdated = /\b404\b/.test(message);
+    return {
+      ...UNKNOWN_BACKEND_ORIGIN,
+      label: outdated ? 'backend sin indicador' : 'backend no disponible',
+      detail: outdated
+        ? 'Este backend es anterior a /api/agent/backend. Actualiza PDC para ver el origen de la GPU.'
+        : message,
+    };
+  }
+}
+
+function updateBackendOriginStatusBar(
+  statusBar: vscode.StatusBarItem,
+  origin: BackendOrigin,
+  settings: BackendSettings,
+) {
+  statusBar.text = `${backendOriginIcon(origin)} GPU: ${origin.label}`;
+  statusBar.tooltip = [
+    `Origen de la inferencia: ${origin.label}`,
+    origin.id ? `Worker: ${origin.id}` : '',
+    origin.mode ? `Modo del backend: ${origin.mode}` : '',
+    `Backend: ${settings.baseUrl}`,
+    origin.detail,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  statusBar.backgroundColor = origin.reachable
+    ? undefined
+    : new vscode.ThemeColor('statusBarItem.warningBackground');
+  statusBar.show();
+}
+
 function updateSuggestionStatusBar(statusBar: vscode.StatusBarItem, model: ActiveSuggestionModel | null, enabled: boolean) {
   if (!enabled) {
     statusBar.hide();
@@ -4565,6 +4667,54 @@ export function activate(context: vscode.ExtensionContext) {
   const suggestionStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98);
   suggestionStatusBar.command = 'adaceen.openAssistant';
   updateSuggestionStatusBar(suggestionStatusBar, null, resolveActiveSuggestionSettings().enabled);
+
+  // Indicador de origen de la GPU: PC, Mac, Google Cloud o Colab.
+  const backendOriginStatusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    99,
+  );
+  backendOriginStatusBar.command = 'adaceen.refreshBackendOrigin';
+  updateBackendOriginStatusBar(
+    backendOriginStatusBar,
+    UNKNOWN_BACKEND_ORIGIN,
+    resolveBackendSettings(),
+  );
+  let backendOriginTimer: ReturnType<typeof setInterval> | null = null;
+
+  const refreshBackendOrigin = async (announce = false) => {
+    const settings = resolveBackendSettings();
+    const origin = await fetchBackendOrigin(settings);
+    updateBackendOriginStatusBar(backendOriginStatusBar, origin, settings);
+    if (announce) {
+      const message = origin.reachable
+        ? `ADACEEN: la inferencia sale de ${origin.label}${origin.id ? ` (${origin.id})` : ''}.`
+        : `ADACEEN: no se pudo consultar el backend. ${origin.detail}`;
+      if (origin.reachable) {
+        void vscode.window.showInformationMessage(message);
+      } else {
+        void vscode.window.showWarningMessage(message);
+      }
+    }
+    return origin;
+  };
+
+  context.subscriptions.push(
+    backendOriginStatusBar,
+    vscode.commands.registerCommand('adaceen.refreshBackendOrigin', () =>
+      refreshBackendOrigin(true),
+    ),
+    new vscode.Disposable(() => {
+      if (backendOriginTimer) {
+        clearInterval(backendOriginTimer);
+        backendOriginTimer = null;
+      }
+    }),
+  );
+
+  void refreshBackendOrigin();
+  backendOriginTimer = setInterval(() => {
+    void refreshBackendOrigin();
+  }, 30000);
   const suggestionDecorationType = vscode.window.createTextEditorDecorationType({
     after: {
       color: new vscode.ThemeColor('editorCodeLens.foreground'),

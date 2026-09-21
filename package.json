@@ -68,6 +68,11 @@
       {
         "command": "adaceen.applyNextCodeAction",
         "title": "ADACEEN: Aplicar siguiente reemplazo del navegador"
+      },
+      {
+        "command": "adaceen.refreshBackendOrigin",
+        "title": "ADACEEN: Ver de donde sale la GPU",
+        "category": "ADACEEN"
       }
     ],
     "configuration": {
