@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { AdaceenSelectionWidget, SelectionWidgetModel } from './selection-widget';
 
 const DEFAULT_INCLUDE_GLOB =
   '**/*.{ts,tsx,js,jsx,mjs,cjs,py,java,cpp,c,h,hpp,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}';
@@ -130,6 +131,8 @@ type ActiveSuggestionSettings = {
   useBackend: boolean;
   autoRevealPanel: boolean;
   autoOpenSelectionActions: boolean;
+  /** Ventana flotante anclada a la seleccion (Insertar / Modificar / Eliminar). */
+  selectionWidget: boolean;
   debounceMs: number;
   maxCodeChars: number;
   backendTimeoutMs: number;
@@ -608,6 +611,11 @@ function resolveActiveSuggestionSettings(): ActiveSuggestionSettings {
     toBoolean(getEnv('ADACEEN_SUGGESTIONS_AUTO_OPEN_SELECTION_ACTIONS')) ??
     true;
 
+  const selectionWidget =
+    toBoolean(config.get<boolean>('suggestions.selectionWidget')) ??
+    toBoolean(getEnv('ADACEEN_SUGGESTIONS_SELECTION_WIDGET')) ??
+    true;
+
   const debounceMs = Math.max(
     250,
     toPositiveInt(config.get<number>('suggestions.debounceMs')) ??
@@ -634,6 +642,7 @@ function resolveActiveSuggestionSettings(): ActiveSuggestionSettings {
     useBackend,
     autoRevealPanel,
     autoOpenSelectionActions,
+    selectionWidget,
     debounceMs,
     maxCodeChars,
     backendTimeoutMs,
@@ -3087,6 +3096,31 @@ function primarySuggestionText(model: ActiveSuggestionModel) {
     model.fileOverview;
 }
 
+/**
+ * Lo que el widget flotante necesita del modelo activo. Solo tiene sentido
+ * cuando hay seleccion: sin seleccion no hay a que anclarlo.
+ */
+function toSelectionWidgetModel(model: ActiveSuggestionModel | null): SelectionWidgetModel | null {
+  if (!model || model.selectionLineCount <= 0) {
+    return null;
+  }
+  const startLine = Math.max(1, Number(model.line) || 1);
+  const endLine = startLine + Math.max(0, model.selectionLineCount - 1);
+  return {
+    uriString: model.uriString,
+    startLine,
+    endLine,
+    headline: model.lineSummary || primarySuggestionText(model) || '',
+    completionText: model.completionText || '',
+    language: model.language || '',
+    recommendedMode: model.applyMode || 'insert',
+    source: model.source,
+    ragCourseCode: model.ragCourseCode || '',
+    loading: !!model.loading,
+    applied: !!model.applied,
+  };
+}
+
 function normalizeHistoryText(value: string, max = 360) {
   return truncateInline(value.replace(/\s+/g, ' ').trim(), max);
 }
@@ -4664,6 +4698,8 @@ export function activate(context: vscode.ExtensionContext) {
   const suggestionCodeLensProvider = new AdaceenSuggestionCodeLensProvider();
   const suggestionCodeActionProvider = new AdaceenSuggestionCodeActionProvider();
   const suggestionInlayHintProvider = new AdaceenSuggestionInlayHintProvider();
+  // Ventana flotante anclada a la seleccion: una sola sugerencia, en un solo sitio.
+  const selectionWidget = new AdaceenSelectionWidget();
   const suggestionStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98);
   suggestionStatusBar.command = 'adaceen.openAssistant';
   updateSuggestionStatusBar(suggestionStatusBar, null, resolveActiveSuggestionSettings().enabled);
@@ -4748,6 +4784,11 @@ export function activate(context: vscode.ExtensionContext) {
 
   const maybeOpenSelectionInlinePanel = (model: ActiveSuggestionModel | null) => {
     const settings = resolveActiveSuggestionSettings();
+    if (settings.selectionWidget) {
+      // El widget flotante ya muestra la sugerencia y las tres acciones; abrir
+      // ademas el hover y el menu de quick fix era lo que "esparcia" la informacion.
+      return;
+    }
     if (
       !settings.enabled ||
       !settings.autoOpenSelectionActions ||
@@ -4809,8 +4850,14 @@ export function activate(context: vscode.ExtensionContext) {
     suggestionPanel.update(model, latestSuggestionHistory);
     suggestionCodeLensProvider.update(model);
     suggestionCodeActionProvider.update(model);
-    suggestionInlayHintProvider.update(model);
-    applySuggestionDecoration(suggestionDecorationType, model);
+    const widgetModel = resolveActiveSuggestionSettings().selectionWidget && enabled
+      ? toSelectionWidgetModel(model)
+      : null;
+    selectionWidget.show(widgetModel);
+    // Con el widget a la vista, el inlay hint y la decoracion de fin de linea
+    // repetirian lo mismo a dos centimetros: se apagan mientras dure.
+    suggestionInlayHintProvider.update(widgetModel ? null : model);
+    applySuggestionDecoration(suggestionDecorationType, widgetModel ? null : model);
     maybeOpenSelectionInlinePanel(model);
     if (model && !model.loading && !model.applied) {
       void rememberSuggestionHistory(context.workspaceState, model)
@@ -5331,6 +5378,18 @@ export function activate(context: vscode.ExtensionContext) {
     publishSuggestionModel(buildAppliedSuggestionModel(model, mode, finalPosition), true);
   };
 
+  // Botones de la ventana flotante. Reciben el hilo de comentarios como
+  // argumento (lo pone VS Code), que aqui no hace falta: la accion siempre
+  // va sobre la sugerencia activa.
+  const selectionWidgetDisposables = [
+    selectionWidget,
+    vscode.commands.registerCommand('adaceen.selectionWidget.insert', () => applySuggestionCompletion('insert')),
+    vscode.commands.registerCommand('adaceen.selectionWidget.replace', () => applySuggestionCompletion('replace')),
+    vscode.commands.registerCommand('adaceen.selectionWidget.delete', () => applySuggestionCompletion('delete')),
+    vscode.commands.registerCommand('adaceen.selectionWidget.close', () => selectionWidget.hide()),
+  ];
+  context.subscriptions.push(...selectionWidgetDisposables);
+
   const openAssistantDisposable = vscode.commands.registerCommand('adaceen.openAssistant', async () => {
     const model = activeSuggestionModel || await refreshActiveSuggestion('open-panel');
     suggestionPanel.reveal(model);
@@ -5549,12 +5608,16 @@ export function activate(context: vscode.ExtensionContext) {
       suggestionCodeActionProvider,
       { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
     ),
-    vscode.window.onDidChangeActiveTextEditor(() => {
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor && editor.document.uri.toString() !== selectionWidget.uriString) {
+        selectionWidget.hide();
+      }
       suggestionInlayHintProvider.update(activeSuggestionModel);
       applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
       scheduleCursorIdleSuggestionRefresh();
     }),
     vscode.window.onDidChangeTextEditorSelection((event) => {
+      selectionWidget.onSelectionChanged(event.textEditor);
       if (vscode.window.activeTextEditor?.document.uri.toString() === event.textEditor.document.uri.toString()) {
         scheduleCursorIdleSuggestionRefresh();
         suggestionInlayHintProvider.update(activeSuggestionModel);

@@ -73,8 +73,62 @@
         "command": "adaceen.refreshBackendOrigin",
         "title": "ADACEEN: Ver de donde sale la GPU",
         "category": "ADACEEN"
+      },
+      {
+        "command": "adaceen.selectionWidget.insert",
+        "title": "Insertar debajo",
+        "category": "ADACEEN",
+        "icon": "$(add)"
+      },
+      {
+        "command": "adaceen.selectionWidget.replace",
+        "title": "Modificar seleccion",
+        "category": "ADACEEN",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "adaceen.selectionWidget.delete",
+        "title": "Eliminar seleccion",
+        "category": "ADACEEN",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "adaceen.selectionWidget.close",
+        "title": "Cerrar sugerencia",
+        "category": "ADACEEN",
+        "icon": "$(close)"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        { "command": "adaceen.selectionWidget.insert", "when": "false" },
+        { "command": "adaceen.selectionWidget.replace", "when": "false" },
+        { "command": "adaceen.selectionWidget.delete", "when": "false" },
+        { "command": "adaceen.selectionWidget.close", "when": "false" }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "adaceen.selectionWidget.insert",
+          "group": "inline@1",
+          "when": "commentController == adaceen.selection"
+        },
+        {
+          "command": "adaceen.selectionWidget.replace",
+          "group": "inline@2",
+          "when": "commentController == adaceen.selection"
+        },
+        {
+          "command": "adaceen.selectionWidget.delete",
+          "group": "inline@3",
+          "when": "commentController == adaceen.selection"
+        },
+        {
+          "command": "adaceen.selectionWidget.close",
+          "group": "inline@9",
+          "when": "commentController == adaceen.selection"
+        }
+      ]
+    },
     "configuration": {
       "title": "ADACEEN",
       "properties": {
@@ -165,7 +219,12 @@
         "adaceen.suggestions.autoOpenSelectionActions": {
           "type": "boolean",
           "default": true,
-          "description": "Abre el menu flotante de acciones rapidas al detectar una sugerencia aplicable sobre codigo seleccionado."
+          "description": "Abre el menu flotante de acciones rapidas al detectar una sugerencia aplicable sobre codigo seleccionado. Sin efecto mientras adaceen.suggestions.selectionWidget este activo."
+        },
+        "adaceen.suggestions.selectionWidget": {
+          "type": "boolean",
+          "default": true,
+          "description": "Al seleccionar codigo, muestra una ventana flotante anclada a la seleccion con la sugerencia, el codigo propuesto y las acciones Insertar / Modificar / Eliminar. Sustituye al hover y al quick fix automaticos."
         },
         "adaceen.suggestions.debounceMs": {
           "type": "number",
