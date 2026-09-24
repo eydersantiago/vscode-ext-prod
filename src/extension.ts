@@ -2221,6 +2221,14 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
   };
 }
 
+/** El archivo de la sugerencia sigue abierto en algun grupo del editor. */
+function isSuggestionModelDocumentVisible(model: ActiveSuggestionModel | null) {
+  if (!model) {
+    return false;
+  }
+  return vscode.window.visibleTextEditors.some((editor) => editor.document.uri.toString() === model.uriString);
+}
+
 function isSnapshotStillActive(snapshot: ActiveEditorSnapshot, scope: BackendSuggestionScope) {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.uri.toString() !== snapshot.uriString) {
@@ -3603,6 +3611,12 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
   private panel: vscode.WebviewPanel | null = null;
   private latestModel: ActiveSuggestionModel | null = null;
   private latestHistory: ActiveSuggestionHistoryEntry[] = [];
+  /** Ultimo HTML pintado (sin el estado de vista): si no cambia, no se repinta. */
+  private lastBody = '';
+  /** Acordeones que el estudiante abrio o cerro a mano, por clave. */
+  private readonly openSections = new Map<string, boolean>();
+  private scrollY = 0;
+  private nonce = '';
 
   constructor(initialHistory: ActiveSuggestionHistoryEntry[] = []) {
     this.latestHistory = initialHistory;
@@ -3625,13 +3639,26 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
           preserveFocus,
         },
         {
-          enableScripts: false,
+          // Un script minimo (con nonce) solo para recordar acordeones y
+          // scroll entre repintados; los botones siguen siendo command: URIs.
+          enableScripts: true,
           enableCommandUris: true,
           retainContextWhenHidden: true,
         },
       );
+      this.nonce = Array.from({ length: 32 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
+      this.lastBody = '';
+      this.panel.webview.onDidReceiveMessage((message: unknown) => {
+        const data = message && typeof message === 'object' ? message as Record<string, unknown> : {};
+        if (data.type === 'toggle' && typeof data.key === 'string') {
+          this.openSections.set(data.key, data.open === true);
+        } else if (data.type === 'scroll' && typeof data.y === 'number' && Number.isFinite(data.y)) {
+          this.scrollY = Math.max(0, data.y);
+        }
+      });
       this.panel.onDidDispose(() => {
         this.panel = null;
+        this.lastBody = '';
       });
     } else {
       this.panel.reveal(vscode.ViewColumn.Beside, preserveFocus);
@@ -3657,7 +3684,19 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     if (!this.panel) {
       return;
     }
-    this.panel.webview.html = this.buildHtml(this.latestModel, this.latestHistory);
+    const body = this.buildHtml(this.latestModel, this.latestHistory);
+    if (body === this.lastBody) {
+      // Mismo contenido: repintar solo cerraria los acordeones y subiria el scroll.
+      return;
+    }
+    this.lastBody = body;
+    const viewState = escapeHtml(JSON.stringify({
+      open: Object.fromEntries(this.openSections),
+      scrollY: this.scrollY,
+    }));
+    this.panel.webview.html = body
+      .replace('__ADACEEN_VIEW_STATE__', viewState)
+      .split('__ADACEEN_NONCE__').join(this.nonce);
   }
 
   private buildHtml(model: ActiveSuggestionModel | null, history: ActiveSuggestionHistoryEntry[]) {
@@ -3761,7 +3800,7 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     // --- ESTE ARCHIVO ---
     const fileMarkup = model && (fileOverview || fileSuggestions.length)
       ? `
-      <details class="block"${hasFocus ? '' : ' open'}>
+      <details class="block" data-key="file"${hasFocus ? '' : ' open'}>
         <summary><h2>Este archivo</h2><span class="badge">${escapeHtml(model.fileName)}</span></summary>
         ${fileOverview ? `<p>${escapeHtml(fileOverview)}</p>` : ''}
         ${fileSuggestions.length ? `<ul class="compact">${fileSuggestions.slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
@@ -3771,7 +3810,7 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     // --- FUENTES RAG ---
     const ragMarkup = ragSources.length
       ? `
-      <details class="block">
+      <details class="block" data-key="rag">
         <summary><h2>Fuentes del curso</h2><span class="badge">${escapeHtml(ragCourseCode ? `RAG ${ragCourseCode} · ${ragSources.length}` : String(ragSources.length))}</span></summary>
         <ul class="rag-list">${ragSources.map((sourceItem) => {
           const pageText = sourceItem.pageStart
@@ -3805,7 +3844,7 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     const clearHistoryUri = buildCommandUri('adaceen.clearSuggestionHistory');
     const historyMarkup = history.length
       ? `
-      <details class="block"${model ? '' : ' open'}>
+      <details class="block" data-key="history"${model ? '' : ' open'}>
         <summary><h2>Historial</h2><span class="badge">${escapeHtml(String(history.length))}</span></summary>
         <ul class="history-list">${historyItems.map((entry) => {
           const openEntryUri = buildCommandUri('adaceen.openSuggestionHistoryEntry', [entry.id]);
@@ -3836,7 +3875,7 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-__ADACEEN_NONCE__';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ADACEEN sugerencias</title>
   <style>
@@ -3910,7 +3949,7 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
-<body>
+<body data-state="__ADACEEN_VIEW_STATE__">
   <main class="wrap">
     <div class="head">
       <div class="diamond" aria-hidden="true"></div>
@@ -3925,6 +3964,27 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     ${ragMarkup}
     ${historyMarkup}
   </main>
+  <script nonce="__ADACEEN_NONCE__">
+    (function () {
+      var vscode = acquireVsCodeApi();
+      var state = {};
+      try { state = JSON.parse(document.body.getAttribute('data-state') || '{}'); } catch (e) { state = {}; }
+      var open = state.open || {};
+      document.querySelectorAll('details[data-key]').forEach(function (el) {
+        var key = el.getAttribute('data-key');
+        if (Object.prototype.hasOwnProperty.call(open, key)) { el.open = !!open[key]; }
+        el.addEventListener('toggle', function () {
+          vscode.postMessage({ type: 'toggle', key: key, open: el.open });
+        });
+      });
+      if (typeof state.scrollY === 'number' && state.scrollY > 0) { window.scrollTo(0, state.scrollY); }
+      var timer = null;
+      window.addEventListener('scroll', function () {
+        clearTimeout(timer);
+        timer = setTimeout(function () { vscode.postMessage({ type: 'scroll', y: window.scrollY }); }, 150);
+      });
+    })();
+  </script>
 </body>
 </html>`;
   }
@@ -4749,6 +4809,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     const snapshot = await buildActiveEditorSnapshot(settings);
     if (!snapshot) {
+      if (isSuggestionModelDocumentVisible(activeSuggestionModel)) {
+        return activeSuggestionModel;
+      }
       publishSuggestionModel(null, true);
       return null;
     }
@@ -4983,7 +5046,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     const anchor = getCursorIdleAnchor();
     if (!anchor) {
-      publishSuggestionModel(null, true);
+      // Sin editor con foco no se borra la sugerencia mientras su archivo
+      // siga a la vista (p. ej. el estudiante esta leyendo el panel).
+      if (!isSuggestionModelDocumentVisible(activeSuggestionModel)) {
+        publishSuggestionModel(null, true);
+      }
       return;
     }
     const hasSelection = !!vscode.window.activeTextEditor && !vscode.window.activeTextEditor.selection.isEmpty;
@@ -5010,9 +5077,27 @@ export function activate(context: vscode.ExtensionContext) {
     }, actionIdleMs);
   };
 
+  const resolveEditorForSuggestion = async (model: ActiveSuggestionModel) => {
+    const active = vscode.window.activeTextEditor;
+    if (active && active.document.uri.toString() === model.uriString) {
+      return active;
+    }
+    // Pulsado desde el panel: el editor sigue abierto a un lado; se le
+    // devuelve el foco (conserva su seleccion) y se aplica ahi.
+    const visible = vscode.window.visibleTextEditors.find((item) => item.document.uri.toString() === model.uriString);
+    if (visible) {
+      return vscode.window.showTextDocument(visible.document, { viewColumn: visible.viewColumn, preserveFocus: false });
+    }
+    try {
+      return await vscode.window.showTextDocument(vscode.Uri.parse(model.uriString), { preview: false });
+    } catch {
+      return undefined;
+    }
+  };
+
   const applySuggestionCompletion = async (modeOverride?: SuggestionApplyMode) => {
-    const editor = vscode.window.activeTextEditor;
     const model = activeSuggestionModel;
+    const editor = model ? await resolveEditorForSuggestion(model) : undefined;
     if (!editor || !model || editor.document.uri.toString() !== model.uriString) {
       vscode.window.showInformationMessage('ADACEEN: no hay una sugerencia activa para aplicar.');
       return;
@@ -5339,7 +5424,12 @@ export function activate(context: vscode.ExtensionContext) {
       { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
     ),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (editor && editor.document.uri.toString() !== selectionWidget.uriString) {
+      if (!editor) {
+        // El foco se fue al panel de ADACEEN, a la terminal o a la salida:
+        // el archivo sigue abierto, asi que no se toca nada.
+        return;
+      }
+      if (editor.document.uri.toString() !== selectionWidget.uriString) {
         selectionWidget.hide();
       }
       suggestionInlayHintProvider.update(activeSuggestionModel);
