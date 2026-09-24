@@ -39,7 +39,11 @@
       },
       {
         "command": "adaceen.openAssistant",
-        "title": "ADACEEN: Abrir sugerencias del archivo activo"
+        "title": "ADACEEN: Abrir panel de quiz y seguimiento"
+      },
+      {
+        "command": "adaceen.quiz.checkPending",
+        "title": "ADACEEN: Buscar quiz del docente"
       },
       {
         "command": "adaceen.refreshSuggestions",
@@ -99,6 +103,24 @@
         "icon": "$(close)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "adaceen",
+          "title": "ADACEEN",
+          "icon": "media/adaceen.svg"
+        }
+      ]
+    },
+    "views": {
+      "adaceen": [
+        {
+          "type": "webview",
+          "id": "adaceen.quizView",
+          "name": "Quiz y seguimiento"
+        }
+      ]
+    },
     "menus": {
       "commandPalette": [
         { "command": "adaceen.selectionWidget.insert", "when": "false" },

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AdaceenSelectionWidget, SelectionWidgetModel } from './selection-widget';
+import { AdaceenQuizViewProvider, QuizHistoryItem } from './quiz-view';
 
 const DEFAULT_INCLUDE_GLOB =
   '**/*.{ts,tsx,js,jsx,mjs,cjs,py,java,cpp,c,h,hpp,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}';
@@ -3607,387 +3608,27 @@ async function publishActiveEditorRack(
   );
 }
 
-class AdaceenActiveSuggestionPanel implements vscode.Disposable {
-  private panel: vscode.WebviewPanel | null = null;
-  private latestModel: ActiveSuggestionModel | null = null;
-  private latestHistory: ActiveSuggestionHistoryEntry[] = [];
-  /** Ultimo HTML pintado (sin el estado de vista): si no cambia, no se repinta. */
-  private lastBody = '';
-  /** Acordeones que el estudiante abrio o cerro a mano, por clave. */
-  private readonly openSections = new Map<string, boolean>();
-  private scrollY = 0;
-  private nonce = '';
-
-  constructor(initialHistory: ActiveSuggestionHistoryEntry[] = []) {
-    this.latestHistory = initialHistory;
-  }
-
-  reveal(
-    model: ActiveSuggestionModel | null,
-    preserveFocus = true,
-    history: ActiveSuggestionHistoryEntry[] = this.latestHistory,
-  ) {
-    this.latestModel = model || this.latestModel;
-    this.latestHistory = history;
-
-    if (!this.panel) {
-      this.panel = vscode.window.createWebviewPanel(
-        'adaceenActiveSuggestions',
-        'ADACEEN sugerencias',
-        {
-          viewColumn: vscode.ViewColumn.Beside,
-          preserveFocus,
-        },
-        {
-          // Un script minimo (con nonce) solo para recordar acordeones y
-          // scroll entre repintados; los botones siguen siendo command: URIs.
-          enableScripts: true,
-          enableCommandUris: true,
-          retainContextWhenHidden: true,
-        },
-      );
-      this.nonce = Array.from({ length: 32 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-      this.lastBody = '';
-      this.panel.webview.onDidReceiveMessage((message: unknown) => {
-        const data = message && typeof message === 'object' ? message as Record<string, unknown> : {};
-        if (data.type === 'toggle' && typeof data.key === 'string') {
-          this.openSections.set(data.key, data.open === true);
-        } else if (data.type === 'scroll' && typeof data.y === 'number' && Number.isFinite(data.y)) {
-          this.scrollY = Math.max(0, data.y);
-        }
-      });
-      this.panel.onDidDispose(() => {
-        this.panel = null;
-        this.lastBody = '';
-      });
-    } else {
-      this.panel.reveal(vscode.ViewColumn.Beside, preserveFocus);
-    }
-
-    this.render();
-  }
-
-  update(model: ActiveSuggestionModel | null, history: ActiveSuggestionHistoryEntry[] = this.latestHistory) {
-    this.latestModel = model;
-    this.latestHistory = history;
-    if (this.panel) {
-      this.render();
-    }
-  }
-
-  dispose() {
-    this.panel?.dispose();
-    this.panel = null;
-  }
-
-  private render() {
-    if (!this.panel) {
-      return;
-    }
-    const body = this.buildHtml(this.latestModel, this.latestHistory);
-    if (body === this.lastBody) {
-      // Mismo contenido: repintar solo cerraria los acordeones y subiria el scroll.
-      return;
-    }
-    this.lastBody = body;
-    const viewState = escapeHtml(JSON.stringify({
-      open: Object.fromEntries(this.openSections),
-      scrollY: this.scrollY,
-    }));
-    this.panel.webview.html = body
-      .replace('__ADACEEN_VIEW_STATE__', viewState)
-      .split('__ADACEEN_NONCE__').join(this.nonce);
-  }
-
-  private buildHtml(model: ActiveSuggestionModel | null, history: ActiveSuggestionHistoryEntry[]) {
-    // Orden del panel, de arriba abajo, por lo que el estudiante necesita
-    // primero:
-    //   1. cabecera: en que archivo y en que foco estamos, de donde sale la pista
-    //   2. AHORA: la recomendacion del foco con el codigo y las tres acciones
-    //   3. este archivo (plegable)
-    //   4. fuentes RAG (plegable)
-    //   5. historial (plegable, una sola lista, sin duplicados)
-    // Sin archivo abierto solo se muestran la cabecera y el historial.
-    const loading = !!model?.loading;
-    const applied = !!model?.applied;
-    const hasSelection = !!model?.selectionLineCount;
-    const hasFocus = !!model && (model.triggerKind === 'cursor' || hasSelection || model.lineSuggestions.length > 0);
-    const focusStart = model?.line || 0;
-    const focusEnd = hasSelection ? focusStart + Math.max(0, (model?.selectionLineCount || 1) - 1) : focusStart;
-    const focusLabel = !model
-      ? ''
-      : hasSelection
-        ? (focusStart === focusEnd ? `Seleccion, linea ${focusStart}` : `Seleccion, lineas ${focusStart}-${focusEnd}`)
-        : (model.triggerKind === 'cursor' && focusStart > 0 ? `Linea ${focusStart}` : 'Archivo completo');
-    const ragSources = model?.ragSources?.length ? model.ragSources : [];
-    const ragCourseCode = model?.ragCourseCode || ragSources.find((source) => source.courseCode)?.courseCode || '';
-    const sourceChip = loading
-      ? 'consultando al backend'
-      : model?.source === 'backend'
-        ? (ragCourseCode ? `backend · RAG ${ragCourseCode}` : 'backend')
-        : model?.source === 'local-fallback'
-          ? 'pista local (el backend no respondio)'
-          : model
-            ? 'pista local'
-            : '';
-    const updatedLabel = model?.updatedAt
-      ? new Date(model.updatedAt).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
-      : '';
-    const applyMode = model?.applyMode || 'insert';
-    const headline = model ? (model.lineSummary || primarySuggestionText(model) || '') : '';
-    const lineSuggestions = model?.lineSuggestions?.length ? model.lineSuggestions : [];
-    const extraLineSuggestions = lineSuggestions.filter((item) => item !== headline).slice(0, 3);
-    const fileOverview = model?.fileOverview || '';
-    const fileSuggestions = model?.fileSuggestions?.length ? model.fileSuggestions : [];
-    const completionText = !applied && model?.completionText?.trim() ? model.completionText.replace(/\r\n/g, '\n').replace(/\n+$/, '') : '';
-    const showActions = !!model && !loading && !applied && model.source !== 'local-fallback';
-    const target = hasSelection ? 'seleccion' : 'linea';
-    const actionUri = (mode: SuggestionApplyMode) => buildCommandUri('adaceen.applySuggestionCompletion', [mode]);
-    const actionButton = (mode: SuggestionApplyMode, label: string) => {
-      const recommended = mode === applyMode;
-      const cls = `apply-button${recommended ? '' : ' secondary'}${mode === 'delete' ? ' danger' : ''}`;
-      return `<a class="${cls}" href="${escapeHtml(actionUri(mode))}">${escapeHtml(label)}${recommended ? ' <small>recomendada</small>' : ''}</a>`;
-    };
-    const selectionWarning = model?.selectionTruncated
-      ? `<p class="note">Se analizaron las primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount || 'la seleccion'}.</p>`
-      : '';
-
-    // --- AHORA ---
-    let nowMarkup = '';
-    if (model && hasFocus) {
-      const body: string[] = [];
-      if (headline) {
-        body.push(`<p class="headline">${escapeHtml(headline)}</p>`);
-      }
-      if (loading) {
-        body.push('<p class="note"><span class="spinner" aria-hidden="true"></span> Consultando al backend. Mientras tanto, esta es la pista local.</p>');
-      }
-      body.push(selectionWarning);
-      if (completionText) {
-        body.push(`<div class="code-block"><div class="code-head"><span>Codigo propuesto</span><span>${escapeHtml(model.language || '')}</span></div><pre><code>${escapeHtml(completionText)}</code></pre></div>`);
-      }
-      if (applied) {
-        body.push(`<p class="applied">Aplicado (${escapeHtml(suggestionApplyModeLabel(model.appliedMode || applyMode).toLowerCase())}). Ctrl+Z lo deshace.</p>`);
-      } else if (showActions) {
-        body.push(`<div class="apply-actions-row">
-          ${actionButton('insert', 'Insertar debajo')}
-          ${actionButton('replace', `Modificar ${target}`)}
-          ${actionButton('delete', `Eliminar ${target}`)}
-        </div>`);
-      }
-      if (extraLineSuggestions.length) {
-        body.push(`<ul class="compact">${extraLineSuggestions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`);
-      }
-      nowMarkup = `
-      <section class="now">
-        <div class="section-title-row">
-          <h2>Ahora</h2>
-          <span class="badge">${escapeHtml(focusLabel)}</span>
-        </div>
-        ${body.join('\n')}
-      </section>`;
-    } else if (model) {
-      nowMarkup = `
-      <section class="now">
-        <div class="section-title-row">
-          <h2>Ahora</h2>
-          <span class="badge">${escapeHtml(focusLabel)}</span>
-        </div>
-        <p class="note">Selecciona un bloque de codigo (hasta ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas) para recibir una pista puntual con codigo y acciones.</p>
-      </section>`;
-    }
-
-    // --- ESTE ARCHIVO ---
-    const fileMarkup = model && (fileOverview || fileSuggestions.length)
-      ? `
-      <details class="block" data-key="file"${hasFocus ? '' : ' open'}>
-        <summary><h2>Este archivo</h2><span class="badge">${escapeHtml(model.fileName)}</span></summary>
-        ${fileOverview ? `<p>${escapeHtml(fileOverview)}</p>` : ''}
-        ${fileSuggestions.length ? `<ul class="compact">${fileSuggestions.slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
-      </details>`
-      : '';
-
-    // --- FUENTES RAG ---
-    const ragMarkup = ragSources.length
-      ? `
-      <details class="block" data-key="rag">
-        <summary><h2>Fuentes del curso</h2><span class="badge">${escapeHtml(ragCourseCode ? `RAG ${ragCourseCode} · ${ragSources.length}` : String(ragSources.length))}</span></summary>
-        <ul class="rag-list">${ragSources.map((sourceItem) => {
-          const pageText = sourceItem.pageStart
-            ? (sourceItem.pageEnd && sourceItem.pageEnd !== sourceItem.pageStart
-              ? `p. ${sourceItem.pageStart}-${sourceItem.pageEnd}`
-              : `p. ${sourceItem.pageStart}`)
-            : '';
-          const meta = [sourceItem.fileName, pageText, sourceItem.citationLabel].filter(Boolean).join(' · ');
-          const moreUri = buildCommandUri('adaceen.openRagSource', [sourceItem]);
-          return `
-            <li class="rag-item">
-              <a href="${escapeHtml(moreUri)}"><strong>${escapeHtml(sourceItem.title)}</strong></a>
-              ${meta ? `<span>${escapeHtml(meta)}</span>` : ''}
-              ${sourceItem.excerpt ? `<p>${escapeHtml(truncateInline(sourceItem.excerpt, 160))}</p>` : ''}
-            </li>`;
-        }).join('')}</ul>
-      </details>`
-      : '';
-
-    // --- HISTORIAL: una sola lista, sin repetir el mismo texto dos veces ---
-    const seen = new Set<string>();
-    const historyItems = history.filter((entry) => {
+/** Historial en el formato compacto que muestra la vista de quiz. */
+function toQuizHistoryItems(history: ActiveSuggestionHistoryEntry[]): QuizHistoryItem[] {
+  const seen = new Set<string>();
+  return history
+    .filter((entry) => {
       const key = `${entry.filePath}\u0000${normalizeHistoryText(entry.summary, 120).toLowerCase()}`;
       if (seen.has(key)) {
         return false;
       }
       seen.add(key);
       return true;
-    }).slice(0, ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT * 2);
-    const openHistoryUri = buildCommandUri('adaceen.openSuggestionHistory');
-    const clearHistoryUri = buildCommandUri('adaceen.clearSuggestionHistory');
-    const historyMarkup = history.length
-      ? `
-      <details class="block" data-key="history"${model ? '' : ' open'}>
-        <summary><h2>Historial</h2><span class="badge">${escapeHtml(String(history.length))}</span></summary>
-        <ul class="history-list">${historyItems.map((entry) => {
-          const openEntryUri = buildCommandUri('adaceen.openSuggestionHistoryEntry', [entry.id]);
-          const meta = [historyEntryTargetLabel(entry), entry.ragCourseCode ? `RAG ${entry.ragCourseCode}` : entry.source].filter(Boolean).join(' · ');
-          return `
-            <li class="history-item">
-              <a href="${escapeHtml(openEntryUri)}"><strong>${escapeHtml(entry.fileName)}</strong> <span>${escapeHtml(meta)}</span></a>
-              <p>${escapeHtml(truncateInline(entry.summary || entry.suggestions[0] || '', 140))}</p>
-            </li>`;
-        }).join('')}</ul>
-        <div class="history-actions">
-          <a href="${escapeHtml(openHistoryUri)}">Ver completo</a>
-          <a href="${escapeHtml(clearHistoryUri)}">Limpiar</a>
-        </div>
-      </details>`
-      : '';
-
-    // --- CABECERA ---
-    const headTitle = model ? model.fileName : 'ADACEEN';
-    const headSub = model
-      ? [focusLabel, sourceChip, updatedLabel].filter(Boolean).join(' · ')
-      : 'Abre un archivo del proyecto. Las pistas siguen la pestana activa.';
-    const errorMarkup = model?.backendError
-      ? `<p class="note error">${escapeHtml(model.backendError)}</p>`
-      : '';
-
-    return `<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-__ADACEEN_NONCE__';">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ADACEEN sugerencias</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 14px 16px;
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
-      font-family: var(--vscode-font-family);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-    .wrap { max-width: 760px; }
-    .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-    .diamond {
-      flex: none; width: 16px; height: 16px; transform: rotate(45deg); border-radius: 3px 8px 3px 8px;
-      background: linear-gradient(135deg, #c9f36f 0%, #33c789 52%, #0d847f 100%);
-    }
-    .head h1 { margin: 0; font-size: 14px; font-weight: 600; }
-    .head p { margin: 2px 0 0; font-size: 11px; color: var(--vscode-descriptionForeground); }
-    h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--vscode-descriptionForeground); }
-    .section-title-row, summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    .badge {
-      font-size: 10px; padding: 2px 7px; border-radius: 999px;
-      background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
-      white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis;
-    }
-    .now {
-      padding: 10px 12px 12px; border-radius: 8px; margin-bottom: 10px;
-      background: var(--vscode-editorWidget-background);
-      border: 1px solid var(--vscode-focusBorder);
-    }
-    .headline { margin: 8px 0 6px; font-size: 13px; }
-    .note { margin: 6px 0; font-size: 12px; color: var(--vscode-descriptionForeground); }
-    .note.error { color: var(--vscode-errorForeground); }
-    .applied { margin: 8px 0 0; font-size: 12px; color: var(--vscode-testing-iconPassed, #33c789); }
-    .code-block {
-      margin: 8px 0; border-radius: 6px; overflow: hidden;
-      border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35));
-      background: var(--vscode-textCodeBlock-background);
-    }
-    .code-head { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 10px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35)); }
-    pre { margin: 0; padding: 8px; overflow-x: auto; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 12px); line-height: 1.4; }
-    .apply-actions-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-    .apply-button {
-      display: inline-block; padding: 5px 10px; border-radius: 4px; text-decoration: none; font-size: 12px;
-      background: var(--vscode-button-background); color: var(--vscode-button-foreground);
-    }
-    .apply-button small { opacity: 0.8; font-size: 10px; margin-left: 4px; }
-    .apply-button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
-    .apply-button.danger { background: transparent; color: var(--vscode-errorForeground); border: 1px solid var(--vscode-errorForeground); }
-    ul.compact { margin: 8px 0 0; padding-left: 18px; }
-    ul.compact li { margin: 3px 0; font-size: 12px; }
-    details.block { margin: 0 0 8px; padding: 8px 12px; border-radius: 8px; background: var(--vscode-sideBar-background, transparent); border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.25)); }
-    details.block summary { cursor: pointer; list-style: none; }
-    details.block summary::-webkit-details-marker { display: none; }
-    details.block summary h2::before { content: '\\25B8'; display: inline-block; width: 12px; }
-    details.block[open] summary h2::before { content: '\\25BE'; }
-    details.block > p { margin: 8px 0 0; font-size: 12px; }
-    .rag-list, .history-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
-    .rag-item, .history-item { font-size: 12px; }
-    .rag-item span, .history-item span { display: block; font-size: 11px; color: var(--vscode-descriptionForeground); }
-    .rag-item p, .history-item p { margin: 3px 0 0; color: var(--vscode-descriptionForeground); }
-    a { color: var(--vscode-textLink-foreground); text-decoration: none; }
-    .history-actions { margin-top: 8px; display: flex; gap: 14px; font-size: 11px; }
-    .spinner {
-      display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px;
-      border: 2px solid var(--vscode-descriptionForeground); border-top-color: transparent;
-      animation: spin 0.9s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body data-state="__ADACEEN_VIEW_STATE__">
-  <main class="wrap">
-    <div class="head">
-      <div class="diamond" aria-hidden="true"></div>
-      <div>
-        <h1>${escapeHtml(headTitle)}${loading ? ' <span class="spinner" aria-hidden="true"></span>' : ''}</h1>
-        <p>${escapeHtml(headSub)}</p>
-      </div>
-    </div>
-    ${errorMarkup}
-    ${nowMarkup}
-    ${fileMarkup}
-    ${ragMarkup}
-    ${historyMarkup}
-  </main>
-  <script nonce="__ADACEEN_NONCE__">
-    (function () {
-      var vscode = acquireVsCodeApi();
-      var state = {};
-      try { state = JSON.parse(document.body.getAttribute('data-state') || '{}'); } catch (e) { state = {}; }
-      var open = state.open || {};
-      document.querySelectorAll('details[data-key]').forEach(function (el) {
-        var key = el.getAttribute('data-key');
-        if (Object.prototype.hasOwnProperty.call(open, key)) { el.open = !!open[key]; }
-        el.addEventListener('toggle', function () {
-          vscode.postMessage({ type: 'toggle', key: key, open: el.open });
-        });
-      });
-      if (typeof state.scrollY === 'number' && state.scrollY > 0) { window.scrollTo(0, state.scrollY); }
-      var timer = null;
-      window.addEventListener('scroll', function () {
-        clearTimeout(timer);
-        timer = setTimeout(function () { vscode.postMessage({ type: 'scroll', y: window.scrollY }); }, 150);
-      });
-    })();
-  </script>
-</body>
-</html>`;
-  }
+    })
+    .slice(0, ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT * 2)
+    .map((entry) => ({
+      id: entry.id,
+      fileName: entry.fileName,
+      meta: [historyEntryTargetLabel(entry), entry.ragCourseCode ? `RAG ${entry.ragCourseCode}` : entry.source]
+        .filter(Boolean)
+        .join(' · '),
+      summary: truncateInline(entry.summary || entry.suggestions[0] || '', 140),
+    }));
 }
 
 class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
@@ -4484,7 +4125,29 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   let latestSuggestionHistory = readSuggestionHistory(context.workspaceState);
-  const suggestionPanel = new AdaceenActiveSuggestionPanel(latestSuggestionHistory);
+  // Vista movible "Quiz y seguimiento" (reemplaza el panel de sugerencias):
+  // quiz tras aceptar una sugerencia o lanzado por el docente, e historial.
+  const quizView = new AdaceenQuizViewProvider({
+    memento: context.globalState,
+    output,
+    getRequestContext: () => {
+      const settings = resolveBackendSettings();
+      return settings.baseUrl ? { baseUrl: settings.baseUrl, headers: buildSessionHeaders(settings, false) } : null;
+    },
+    openHistoryEntry: (id) => {
+      void vscode.commands.executeCommand('adaceen.openSuggestionHistoryEntry', id);
+    },
+    openAllHistory: () => {
+      void vscode.commands.executeCommand('adaceen.openSuggestionHistory');
+    },
+  });
+  quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(AdaceenQuizViewProvider.viewType, quizView, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.commands.registerCommand('adaceen.quiz.checkPending', () => quizView.checkPending(true)),
+  );
   const suggestionCodeLensProvider = new AdaceenSuggestionCodeLensProvider();
   const suggestionCodeActionProvider = new AdaceenSuggestionCodeActionProvider();
   const suggestionInlayHintProvider = new AdaceenSuggestionInlayHintProvider();
@@ -4637,7 +4300,7 @@ export function activate(context: vscode.ExtensionContext) {
   const publishSuggestionModel = (model: ActiveSuggestionModel | null, enabled = true) => {
     activeSuggestionModel = model;
     updateSuggestionStatusBar(suggestionStatusBar, model, enabled);
-    suggestionPanel.update(model, latestSuggestionHistory);
+    quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
     suggestionCodeLensProvider.update(model);
     suggestionCodeActionProvider.update(model);
     const widgetModel = resolveActiveSuggestionSettings().selectionWidget && enabled
@@ -4653,7 +4316,7 @@ export function activate(context: vscode.ExtensionContext) {
       void rememberSuggestionHistory(context.workspaceState, model)
         .then((history) => {
           latestSuggestionHistory = history;
-          suggestionPanel.update(activeSuggestionModel, latestSuggestionHistory);
+          quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
         })
         .catch((error) => {
           output.appendLine(`[Suggestions] No se pudo guardar historial: ${String(error)}`);
@@ -4829,7 +4492,7 @@ export function activate(context: vscode.ExtensionContext) {
     publishSuggestionModel(model, true);
     publishActiveRackSnapshot(snapshot, model, null, `${reason}:local`);
     if (settings.autoRevealPanel && backendScope === 'file' && autoRevealedSuggestionUri !== snapshot.uriString) {
-      suggestionPanel.reveal(model, true);
+      void quizView.reveal(true);
       autoRevealedSuggestionUri = snapshot.uriString;
     }
 
@@ -4952,7 +4615,7 @@ export function activate(context: vscode.ExtensionContext) {
     }, true);
     publishActiveRackSnapshot(snapshot, finalModel, projectIndex, `${reason}:final`);
     if (backendScope === 'file' && settings.autoRevealPanel && autoRevealedSuggestionUri !== finalModel.uriString) {
-      suggestionPanel.reveal(finalModel, true);
+      void quizView.reveal(true);
       autoRevealedSuggestionUri = finalModel.uriString;
     }
     output.appendLine(`[Suggestions] ${finalModel.filePath} | scope=${backendScope} | fuente=${finalModel.source} | linea=${finalModel.line}`);
@@ -5095,6 +4758,24 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  const notifyQuizOfAcceptedChange = (
+    model: ActiveSuggestionModel,
+    mode: SuggestionApplyMode,
+    originalCode: string,
+    newCode: string,
+  ) => {
+    void quizView.onSuggestionAccepted({
+      filePath: model.filePath,
+      language: model.language,
+      applyMode: mode,
+      originalCode,
+      newCode,
+      suggestionText: model.lineSummary || primarySuggestionText(model) || '',
+      ragCourseCode: model.ragCourseCode || '',
+      repoFullName: model.repoFullName || '',
+    });
+  };
+
   const applySuggestionCompletion = async (modeOverride?: SuggestionApplyMode) => {
     const model = activeSuggestionModel;
     const editor = model ? await resolveEditorForSuggestion(model) : undefined;
@@ -5138,6 +4819,7 @@ export function activate(context: vscode.ExtensionContext) {
         deletedCharacters: deletedText.length,
       });
       publishSuggestionModel(buildAppliedSuggestionModel(model, 'delete', range.start), true);
+      notifyQuizOfAcceptedChange(model, 'delete', deletedText, '');
       return;
     }
 
@@ -5150,6 +4832,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     let editStart: vscode.Position;
     let insertedText = completionText;
+    // Lo que habia antes (o la linea de contexto al insertar), para el quiz.
+    let originalCode = '';
     suppressAutoRefreshForActiveApply(model.uriString);
     const applied = await editor.edit((editBuilder) => {
       if (mode === 'replace') {
@@ -5157,6 +4841,7 @@ export function activate(context: vscode.ExtensionContext) {
           ? new vscode.Range(new vscode.Position(modelLineIndex, 0), targetLine.range.end)
           : getSelectedFullLineRange(editor);
         editStart = range.start;
+        originalCode = editor.document.getText(range);
         editBuilder.replace(range, completionText);
         return;
       }
@@ -5165,6 +4850,9 @@ export function activate(context: vscode.ExtensionContext) {
         ? modelLineIndex
         : Math.min(editor.document.lineCount - 1, getSelectedFullLineRange(editor).end.line);
       const insertLine = editor.document.lineAt(insertLineIndex);
+      originalCode = editor.selection.isEmpty
+        ? insertLine.text
+        : editor.document.getText(getSelectedFullLineRange(editor));
       if (editor.selection.isEmpty && !insertLine.text.trim()) {
         const range = new vscode.Range(new vscode.Position(insertLineIndex, 0), insertLine.range.end);
         editStart = range.start;
@@ -5191,6 +4879,7 @@ export function activate(context: vscode.ExtensionContext) {
       insertedCharacters: insertedText.length,
     });
     publishSuggestionModel(buildAppliedSuggestionModel(model, mode, finalPosition), true);
+    notifyQuizOfAcceptedChange(model, mode, originalCode, completionText);
   };
 
   // Botones de la ventana flotante. Reciben el hilo de comentarios como
@@ -5207,9 +4896,8 @@ export function activate(context: vscode.ExtensionContext) {
 
   const openAssistantDisposable = vscode.commands.registerCommand('adaceen.openAssistant', async () => {
     const model = activeSuggestionModel || await refreshActiveSuggestion('open-panel');
-    suggestionPanel.reveal(model);
+    void quizView.reveal(false);
     if (!model) {
-      vscode.window.showInformationMessage('ADACEEN: panel abierto. Abre un archivo del proyecto para ver sugerencias.');
       return;
     }
     recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', model.applyMode);
@@ -5218,14 +4906,14 @@ export function activate(context: vscode.ExtensionContext) {
   const refreshSuggestionsDisposable = vscode.commands.registerCommand('adaceen.refreshSuggestions', async () => {
     const model = await refreshActiveSuggestion('manual-refresh');
     if (model) {
-      suggestionPanel.reveal(model);
+      void quizView.reveal(false);
       recordSuggestionMetric(model, 'vscode_suggestion_manual_refresh', model.applyMode);
     }
   });
 
   const openSuggestionHistoryDisposable = vscode.commands.registerCommand('adaceen.openSuggestionHistory', async () => {
     latestSuggestionHistory = readSuggestionHistory(context.workspaceState);
-    suggestionPanel.update(activeSuggestionModel, latestSuggestionHistory);
+    quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
     if (latestSuggestionHistory.length === 0) {
       vscode.window.showInformationMessage('ADACEEN: aun no hay recomendaciones guardadas en el historial.');
       return;
@@ -5249,7 +4937,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     latestSuggestionHistory = [];
     await writeSuggestionHistory(context.workspaceState, latestSuggestionHistory);
-    suggestionPanel.update(activeSuggestionModel, latestSuggestionHistory);
+    quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
     vscode.window.showInformationMessage('ADACEEN: historial de recomendaciones limpiado.');
   });
 
@@ -5410,7 +5098,7 @@ export function activate(context: vscode.ExtensionContext) {
     openRagSourceDisposable,
     setBackendSessionIdDisposable,
     applyNextCodeActionDisposable,
-    suggestionPanel,
+    quizView,
     suggestionCodeLensProvider,
     suggestionCodeActionProvider,
     suggestionInlayHintProvider,
