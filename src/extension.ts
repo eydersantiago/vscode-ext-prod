@@ -2997,9 +2997,12 @@ function buildBackendActiveSuggestionModel(
   const focusSections = focusOutputText
     ? parseBackendSuggestionSections(focusOutputText)
     : emptySections;
+  // Sin resumen de archivo del backend se usa la pista local del archivo,
+  // nunca las secciones del foco: eso hacia que el "resumen de archivo"
+  // repitiera palabra por palabra lo dicho sobre la seleccion.
   const fileSummarySections = fileSummaryOutputText
     ? parseBackendSuggestionSections(fileSummaryOutputText)
-    : focusSections;
+    : emptySections;
   const focusLines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
   const fileLines = fileSummarySections.sugerencias.length > 0
     ? fileSummarySections.sugerencias
@@ -3255,7 +3258,7 @@ function buildSuggestionHistoryEntries(model: ActiveSuggestionModel): ActiveSugg
     model.fileOverview,
     ...model.fileSuggestions,
   ], 6);
-  if (fileSuggestions.length > 0) {
+  if (model.triggerKind === 'file' && fileSuggestions.length > 0) {
     entries.push({
       ...base,
       id: buildSuggestionHistoryEntryId(model, 'file', fileSuggestions),
@@ -3658,143 +3661,176 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
   }
 
   private buildHtml(model: ActiveSuggestionModel | null, history: ActiveSuggestionHistoryEntry[]) {
-    const title = model?.title || 'Abre un archivo para recibir sugerencias';
-    const summary = model?.summary || 'ADACEEN seguira la pestana activa y actualizara las pistas al navegar.';
+    // Orden del panel, de arriba abajo, por lo que el estudiante necesita
+    // primero:
+    //   1. cabecera: en que archivo y en que foco estamos, de donde sale la pista
+    //   2. AHORA: la recomendacion del foco con el codigo y las tres acciones
+    //   3. este archivo (plegable)
+    //   4. fuentes RAG (plegable)
+    //   5. historial (plegable, una sola lista, sin duplicados)
+    // Sin archivo abierto solo se muestran la cabecera y el historial.
     const loading = !!model?.loading;
-    const fileOverview = model?.fileOverview || summary;
-    const fileSuggestions = model?.fileSuggestions?.length
-      ? model.fileSuggestions
-      : (model?.suggestions?.length ? model.suggestions : ['Abre un archivo del proyecto o cambia de pestana en el editor.']);
-    const lineSuggestions = model?.lineSuggestions?.length ? model.lineSuggestions : [];
-    const hasSelectionFocus = !!model?.selectionLineCount;
-    const showLineSection = loading || model?.triggerKind === 'cursor' || lineSuggestions.length > 0 || hasSelectionFocus;
-    const nextSteps = model?.nextSteps?.length ? model.nextSteps : ['Cuando abras un archivo, ADACEEN mostrara el siguiente paso aqui.'];
-    const chips = model?.chips?.length ? model.chips : ['VS Code', 'archivo activo'];
+    const applied = !!model?.applied;
+    const hasSelection = !!model?.selectionLineCount;
+    const hasFocus = !!model && (model.triggerKind === 'cursor' || hasSelection || model.lineSuggestions.length > 0);
+    const focusStart = model?.line || 0;
+    const focusEnd = hasSelection ? focusStart + Math.max(0, (model?.selectionLineCount || 1) - 1) : focusStart;
+    const focusLabel = !model
+      ? ''
+      : hasSelection
+        ? (focusStart === focusEnd ? `Seleccion, linea ${focusStart}` : `Seleccion, lineas ${focusStart}-${focusEnd}`)
+        : (model.triggerKind === 'cursor' && focusStart > 0 ? `Linea ${focusStart}` : 'Archivo completo');
     const ragSources = model?.ragSources?.length ? model.ragSources : [];
     const ragCourseCode = model?.ragCourseCode || ragSources.find((source) => source.courseCode)?.courseCode || '';
-    const sourceLabel = loading
-      ? 'cargando backend/RAG'
+    const sourceChip = loading
+      ? 'consultando al backend'
       : model?.source === 'backend'
-        ? (ragSources.length || ragCourseCode ? 'backend + RAG' : 'backend (sin fuentes RAG)')
+        ? (ragCourseCode ? `backend · RAG ${ragCourseCode}` : 'backend')
         : model?.source === 'local-fallback'
-          ? 'fallback local'
-          : 'local';
-    const showRagSection = !!model && (model.source === 'backend' || ragSources.length > 0 || !!ragCourseCode);
-    const applied = !!model?.applied;
+          ? 'pista local (el backend no respondio)'
+          : model
+            ? 'pista local'
+            : '';
+    const updatedLabel = model?.updatedAt
+      ? new Date(model.updatedAt).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+      : '';
     const applyMode = model?.applyMode || 'insert';
-    const applyModeLabel = suggestionApplyModeLabel(applyMode);
-    const focusTitle = hasSelectionFocus ? 'Recomendacion de la seleccion' : 'Recomendacion del codigo';
-    const focusBadge = hasSelectionFocus
-      ? `Seleccion ${model?.selectionLineCount || 0}${model?.selectionTruncated ? `/${model?.selectionOriginalLineCount || model?.selectionLineCount || 0}` : ''} lineas`
-      : `Linea ${model?.line || ''}`;
-    const applyHelpText = applyMode === 'delete'
-      ? `Eliminara la ${hasSelectionFocus ? 'seleccion' : 'linea activa'} indicada por la sugerencia.`
-      : applyMode === 'replace'
-        ? `Modificara la ${hasSelectionFocus ? 'seleccion' : 'linea activa'} con el cambio sugerido.`
-        : 'Agregara el cambio sugerido debajo del foco actual.';
-    const applyCommandUri = buildCommandUri('adaceen.applySuggestionCompletion', [applyMode]);
-    const insertCommandUri = buildCommandUri('adaceen.applySuggestionCompletion', ['insert']);
-    const replaceCommandUri = buildCommandUri('adaceen.applySuggestionCompletion', ['replace']);
-    const deleteCommandUri = buildCommandUri('adaceen.applySuggestionCompletion', ['delete']);
+    const headline = model ? (model.lineSummary || primarySuggestionText(model) || '') : '';
+    const lineSuggestions = model?.lineSuggestions?.length ? model.lineSuggestions : [];
+    const extraLineSuggestions = lineSuggestions.filter((item) => item !== headline).slice(0, 3);
+    const fileOverview = model?.fileOverview || '';
+    const fileSuggestions = model?.fileSuggestions?.length ? model.fileSuggestions : [];
+    const completionText = !applied && model?.completionText?.trim() ? model.completionText.replace(/\r\n/g, '\n').replace(/\n+$/, '') : '';
+    const showActions = !!model && !loading && !applied && model.source !== 'local-fallback';
+    const target = hasSelection ? 'seleccion' : 'linea';
+    const actionUri = (mode: SuggestionApplyMode) => buildCommandUri('adaceen.applySuggestionCompletion', [mode]);
+    const actionButton = (mode: SuggestionApplyMode, label: string) => {
+      const recommended = mode === applyMode;
+      const cls = `apply-button${recommended ? '' : ' secondary'}${mode === 'delete' ? ' danger' : ''}`;
+      return `<a class="${cls}" href="${escapeHtml(actionUri(mode))}">${escapeHtml(label)}${recommended ? ' <small>recomendada</small>' : ''}</a>`;
+    };
+    const selectionWarning = model?.selectionTruncated
+      ? `<p class="note">Se analizaron las primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount || 'la seleccion'}.</p>`
+      : '';
+
+    // --- AHORA ---
+    let nowMarkup = '';
+    if (model && hasFocus) {
+      const body: string[] = [];
+      if (headline) {
+        body.push(`<p class="headline">${escapeHtml(headline)}</p>`);
+      }
+      if (loading) {
+        body.push('<p class="note"><span class="spinner" aria-hidden="true"></span> Consultando al backend. Mientras tanto, esta es la pista local.</p>');
+      }
+      body.push(selectionWarning);
+      if (completionText) {
+        body.push(`<div class="code-block"><div class="code-head"><span>Codigo propuesto</span><span>${escapeHtml(model.language || '')}</span></div><pre><code>${escapeHtml(completionText)}</code></pre></div>`);
+      }
+      if (applied) {
+        body.push(`<p class="applied">Aplicado (${escapeHtml(suggestionApplyModeLabel(model.appliedMode || applyMode).toLowerCase())}). Ctrl+Z lo deshace.</p>`);
+      } else if (showActions) {
+        body.push(`<div class="apply-actions-row">
+          ${actionButton('insert', 'Insertar debajo')}
+          ${actionButton('replace', `Modificar ${target}`)}
+          ${actionButton('delete', `Eliminar ${target}`)}
+        </div>`);
+      }
+      if (extraLineSuggestions.length) {
+        body.push(`<ul class="compact">${extraLineSuggestions.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`);
+      }
+      nowMarkup = `
+      <section class="now">
+        <div class="section-title-row">
+          <h2>Ahora</h2>
+          <span class="badge">${escapeHtml(focusLabel)}</span>
+        </div>
+        ${body.join('\n')}
+      </section>`;
+    } else if (model) {
+      nowMarkup = `
+      <section class="now">
+        <div class="section-title-row">
+          <h2>Ahora</h2>
+          <span class="badge">${escapeHtml(focusLabel)}</span>
+        </div>
+        <p class="note">Selecciona un bloque de codigo (hasta ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas) para recibir una pista puntual con codigo y acciones.</p>
+      </section>`;
+    }
+
+    // --- ESTE ARCHIVO ---
+    const fileMarkup = model && (fileOverview || fileSuggestions.length)
+      ? `
+      <details class="block"${hasFocus ? '' : ' open'}>
+        <summary><h2>Este archivo</h2><span class="badge">${escapeHtml(model.fileName)}</span></summary>
+        ${fileOverview ? `<p>${escapeHtml(fileOverview)}</p>` : ''}
+        ${fileSuggestions.length ? `<ul class="compact">${fileSuggestions.slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+      </details>`
+      : '';
+
+    // --- FUENTES RAG ---
+    const ragMarkup = ragSources.length
+      ? `
+      <details class="block">
+        <summary><h2>Fuentes del curso</h2><span class="badge">${escapeHtml(ragCourseCode ? `RAG ${ragCourseCode} · ${ragSources.length}` : String(ragSources.length))}</span></summary>
+        <ul class="rag-list">${ragSources.map((sourceItem) => {
+          const pageText = sourceItem.pageStart
+            ? (sourceItem.pageEnd && sourceItem.pageEnd !== sourceItem.pageStart
+              ? `p. ${sourceItem.pageStart}-${sourceItem.pageEnd}`
+              : `p. ${sourceItem.pageStart}`)
+            : '';
+          const meta = [sourceItem.fileName, pageText, sourceItem.citationLabel].filter(Boolean).join(' · ');
+          const moreUri = buildCommandUri('adaceen.openRagSource', [sourceItem]);
+          return `
+            <li class="rag-item">
+              <a href="${escapeHtml(moreUri)}"><strong>${escapeHtml(sourceItem.title)}</strong></a>
+              ${meta ? `<span>${escapeHtml(meta)}</span>` : ''}
+              ${sourceItem.excerpt ? `<p>${escapeHtml(truncateInline(sourceItem.excerpt, 160))}</p>` : ''}
+            </li>`;
+        }).join('')}</ul>
+      </details>`
+      : '';
+
+    // --- HISTORIAL: una sola lista, sin repetir el mismo texto dos veces ---
+    const seen = new Set<string>();
+    const historyItems = history.filter((entry) => {
+      const key = `${entry.filePath}\u0000${normalizeHistoryText(entry.summary, 120).toLowerCase()}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    }).slice(0, ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT * 2);
     const openHistoryUri = buildCommandUri('adaceen.openSuggestionHistory');
     const clearHistoryUri = buildCommandUri('adaceen.clearSuggestionHistory');
-    const selectionWarningMarkup = model?.selectionTruncated
-      ? `<div class="limit-note">Seleccion limitada: se analizaron las primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount || 'la seleccion'}.</div>`
-      : '';
-    const renderBubbleList = (items: string[], emptyText: string) => {
-      const visibleItems = items.length ? items : [emptyText];
-      return visibleItems.map((item, index) => `
-        <article class="bubble">
-          <span class="bubble-mark">${index + 1}</span>
-          <p>${escapeHtml(item)}</p>
-        </article>
-      `).join('');
-    };
-    const focusEmptyText = hasSelectionFocus
-      ? 'Selecciona hasta 20 lineas para recibir una pista puntual sobre ese bloque.'
-      : 'Mueve el cursor o selecciona un bloque para recibir una pista puntual.';
-    const loadingLineMarkup = `<article class="bubble is-loading"><span class="bubble-mark">...</span><p>${escapeHtml(hasSelectionFocus ? 'Cargando analisis de la seleccion...' : 'Cargando sugerencia de linea...')}</p></article>`;
-    const loadingFileMarkup = '<article class="bubble is-loading"><span class="bubble-mark">...</span><p>Cargando sugerencias del archivo...</p></article>';
-    const lineSuggestionMarkup = lineSuggestions.length > 0
-      ? renderBubbleList(lineSuggestions, focusEmptyText)
-      : (loading ? loadingLineMarkup : renderBubbleList(lineSuggestions, focusEmptyText));
-    const fileSuggestionMarkup = fileSuggestions.length > 0
-      ? renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.')
-      : (loading ? loadingFileMarkup : renderBubbleList(fileSuggestions, 'Abre un archivo del proyecto para recibir sugerencias.'));
-    const renderHistoryItems = (items: ActiveSuggestionHistoryEntry[], emptyText: string) => {
-      if (items.length === 0) {
-        return `<p class="history-empty">${escapeHtml(emptyText)}</p>`;
-      }
-
-      return `<ul class="history-list">${items.map((entry) => {
-        const openEntryUri = buildCommandUri('adaceen.openSuggestionHistoryEntry', [entry.id]);
-        const meta = [
-          historyEntryTargetLabel(entry),
-          entry.source,
-          entry.ragCourseCode ? `RAG ${entry.ragCourseCode}` : '',
-        ].filter(Boolean).join(' | ');
-        const firstSuggestion = entry.suggestions.find(Boolean) || entry.summary;
-        return `
-          <li class="history-item">
-            <div>
-              <strong>${escapeHtml(entry.fileName)}</strong>
-              <span>${escapeHtml(meta)}</span>
-            </div>
-            <p>${escapeHtml(truncateInline(firstSuggestion, 150))}</p>
-            <a href="${escapeHtml(openEntryUri)}">Abrir foco</a>
-          </li>
-        `;
-      }).join('')}</ul>`;
-    };
-    const lineHistory = history
-      .filter((entry) => entry.kind === 'line')
-      .slice(0, ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT);
-    const fileHistory = history
-      .filter((entry) => entry.kind === 'file')
-      .slice(0, ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT);
-    const historyMarkup = history.length > 0
+    const historyMarkup = history.length
       ? `
-      <div class="history-columns">
-        <div>
-          <h3>Linea o seleccion</h3>
-          ${renderHistoryItems(lineHistory, 'Aun no hay recomendaciones de linea guardadas.')}
+      <details class="block"${model ? '' : ' open'}>
+        <summary><h2>Historial</h2><span class="badge">${escapeHtml(String(history.length))}</span></summary>
+        <ul class="history-list">${historyItems.map((entry) => {
+          const openEntryUri = buildCommandUri('adaceen.openSuggestionHistoryEntry', [entry.id]);
+          const meta = [historyEntryTargetLabel(entry), entry.ragCourseCode ? `RAG ${entry.ragCourseCode}` : entry.source].filter(Boolean).join(' · ');
+          return `
+            <li class="history-item">
+              <a href="${escapeHtml(openEntryUri)}"><strong>${escapeHtml(entry.fileName)}</strong> <span>${escapeHtml(meta)}</span></a>
+              <p>${escapeHtml(truncateInline(entry.summary || entry.suggestions[0] || '', 140))}</p>
+            </li>`;
+        }).join('')}</ul>
+        <div class="history-actions">
+          <a href="${escapeHtml(openHistoryUri)}">Ver completo</a>
+          <a href="${escapeHtml(clearHistoryUri)}">Limpiar</a>
         </div>
-        <div>
-          <h3>Resumen de archivo</h3>
-          ${renderHistoryItems(fileHistory, 'Aun no hay resumenes de archivo guardados.')}
-        </div>
-      </div>
-      `
-      : '<p class="history-empty">Cuando ADACEEN genere una recomendacion estable, quedara guardada aqui.</p>';
-    const ragMarkup = ragSources.length
-      ? ragSources.map((sourceItem) => {
-        const pageText = sourceItem.pageStart
-          ? (sourceItem.pageEnd && sourceItem.pageEnd !== sourceItem.pageStart
-            ? `p. ${sourceItem.pageStart}-${sourceItem.pageEnd}`
-            : `p. ${sourceItem.pageStart}`)
-          : '';
-        const meta = [
-          sourceItem.courseCode,
-          sourceItem.knowledgeTier === 'supplemental' || sourceItem.contextDomain === 'bitacora' ? 'Suplementario' : 'RAG principal',
-          sourceItem.scope === 'teacher' ? 'Docente' : sourceItem.scope === 'default' ? 'Base' : '',
-          sourceItem.fileName,
-          pageText,
-          sourceItem.citationLabel,
-        ].filter(Boolean).join(' | ');
-        const moreUri = buildCommandUri('adaceen.openRagSource', [sourceItem]);
-        return `
-          <li class="rag-item">
-            <strong>${escapeHtml(sourceItem.title)}</strong>
-            ${meta ? `<span>${escapeHtml(meta)}</span>` : ''}
-            ${sourceItem.excerpt ? `<p>${escapeHtml(truncateInline(sourceItem.excerpt, 220))}</p>` : ''}
-            <a href="${escapeHtml(moreUri)}">Abrir fuente o detalle</a>
-          </li>
-        `;
-      }).join('')
+      </details>`
       : '';
-    const ragEmptyText = ragCourseCode
-      ? 'El backend consulto el curso RAG, pero no encontro una fuente suficientemente cercana para esta sugerencia.'
-      : 'No hay curso RAG activo en esta peticion. Revisa la sesion compartida o adaceen.rag.courseCode.';
+
+    // --- CABECERA ---
+    const headTitle = model ? model.fileName : 'ADACEEN';
+    const headSub = model
+      ? [focusLabel, sourceChip, updatedLabel].filter(Boolean).join(' · ')
+      : 'Abre un archivo del proyecto. Las pistas siguen la pestana activa.';
+    const errorMarkup = model?.backendError
+      ? `<p class="note error">${escapeHtml(model.backendError)}</p>`
+      : '';
 
     return `<!doctype html>
 <html lang="es">
@@ -3806,314 +3842,72 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
   <style>
     body {
       margin: 0;
-      padding: 18px;
+      padding: 14px 16px;
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
       font-family: var(--vscode-font-family);
-    }
-    .wrap {
-      max-width: 820px;
-    }
-    .head {
-      display: flex;
-      align-items: flex-start;
-      gap: 14px;
-      margin-bottom: 14px;
-    }
-    .diamond {
-      width: 24px;
-      height: 24px;
-      margin-top: 4px;
-      transform: rotate(45deg);
-      border-radius: 5px 12px 5px 12px;
-      background: linear-gradient(135deg, #c9f36f 0%, #33c789 52%, #0d847f 100%);
-      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
-      flex: 0 0 auto;
-    }
-    h1 {
-      margin: 0 0 6px;
-      font-size: 18px;
-      line-height: 1.25;
-    }
-    p {
-      margin: 0;
-      color: var(--vscode-descriptionForeground);
+      font-size: 13px;
       line-height: 1.45;
     }
-    .chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin: 12px 0 16px;
+    .wrap { max-width: 760px; }
+    .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .diamond {
+      flex: none; width: 16px; height: 16px; transform: rotate(45deg); border-radius: 3px 8px 3px 8px;
+      background: linear-gradient(135deg, #c9f36f 0%, #33c789 52%, #0d847f 100%);
     }
-    .chip {
-      border: 1px solid var(--vscode-badge-background);
-      border-radius: 999px;
-      padding: 4px 8px;
-      color: var(--vscode-badge-foreground);
-      background: var(--vscode-badge-background);
-      font-size: 11px;
-      font-weight: 700;
-    }
-    .loading-strip {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin: 0 0 14px;
-      border: 1px solid rgba(201, 95, 48, 0.35);
-      border-radius: 8px;
-      background: color-mix(in srgb, var(--vscode-editorWidget-background) 78%, #ffe3bf 22%);
-      padding: 10px 12px;
-      color: var(--vscode-foreground);
-      font-size: 12px;
-      font-weight: 700;
-    }
-    .spinner {
-      width: 14px;
-      height: 14px;
-      border-radius: 999px;
-      border: 2px solid rgba(201, 95, 48, 0.22);
-      border-top-color: #c95f30;
-      animation: spin 900ms linear infinite;
-      flex: 0 0 auto;
-    }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-    section {
-      border: 1px solid var(--vscode-editorWidget-border);
-      border-radius: 8px;
-      background: var(--vscode-editorWidget-background);
-      padding: 12px;
-      margin-top: 12px;
-    }
-    .overview {
-      border-left: 4px solid #33c789;
-    }
-    .focus {
-      border-left: 4px solid #2f80ed;
-      background:
-        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editorWidget-background) 88%, #eaf3ff 12%), var(--vscode-editorWidget-background));
-    }
-    .file-suggestions {
-      border-left: 4px solid #0d847f;
-    }
-    .rag {
-      border-left: 4px solid #c95f30;
-    }
-    .history {
-      border-left: 4px solid #8f6df2;
-    }
-    .apply-action {
-      border-left: 4px solid #2f80ed;
-    }
-    .apply-action.is-applied {
-      border-left-color: #33c789;
-    }
-    .section-title-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 8px;
-    }
-    h2 {
-      margin: 0;
-      font-size: 12px;
-      letter-spacing: 0;
-      text-transform: uppercase;
-      color: var(--vscode-descriptionForeground);
-    }
-    h3 {
-      margin: 0 0 8px;
-      font-size: 12px;
-      color: var(--vscode-foreground);
-    }
+    .head h1 { margin: 0; font-size: 14px; font-weight: 600; }
+    .head p { margin: 2px 0 0; font-size: 11px; color: var(--vscode-descriptionForeground); }
+    h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--vscode-descriptionForeground); }
+    .section-title-row, summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .badge {
-      border-radius: 999px;
-      padding: 3px 8px;
-      border: 1px solid var(--vscode-badge-background);
-      color: var(--vscode-badge-foreground);
-      background: var(--vscode-badge-background);
-      font-size: 10px;
-      font-weight: 800;
-      white-space: nowrap;
+      font-size: 10px; padding: 2px 7px; border-radius: 999px;
+      background: var(--vscode-badge-background); color: var(--vscode-badge-foreground);
+      white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis;
     }
-    .bubble-list {
-      display: grid;
-      gap: 10px;
+    .now {
+      padding: 10px 12px 12px; border-radius: 8px; margin-bottom: 10px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-focusBorder);
     }
-    .bubble {
-      display: grid;
-      grid-template-columns: 30px minmax(0, 1fr);
-      align-items: start;
-      gap: 10px;
-      border: 1px solid rgba(51, 199, 137, 0.36);
-      border-radius: 18px;
-      background:
-        linear-gradient(180deg, color-mix(in srgb, var(--vscode-editorWidget-background) 88%, #e8fff6 12%), var(--vscode-editorWidget-background));
-      padding: 11px 12px;
-      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.08);
+    .headline { margin: 8px 0 6px; font-size: 13px; }
+    .note { margin: 6px 0; font-size: 12px; color: var(--vscode-descriptionForeground); }
+    .note.error { color: var(--vscode-errorForeground); }
+    .applied { margin: 8px 0 0; font-size: 12px; color: var(--vscode-testing-iconPassed, #33c789); }
+    .code-block {
+      margin: 8px 0; border-radius: 6px; overflow: hidden;
+      border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35));
+      background: var(--vscode-textCodeBlock-background);
     }
-    .bubble.is-loading {
-      border-color: rgba(201, 95, 48, 0.42);
-      background: color-mix(in srgb, var(--vscode-editorWidget-background) 82%, #fff0dc 18%);
-    }
-    .bubble-mark {
-      display: inline-grid;
-      place-items: center;
-      width: 26px;
-      height: 26px;
-      border-radius: 999px;
-      color: #0d3f3d;
-      background: #c9f36f;
-      font-size: 11px;
-      font-weight: 800;
-      line-height: 1;
-    }
-    .bubble p {
-      color: var(--vscode-foreground);
-      font-size: 13px;
-    }
-    .line-summary {
-      margin-bottom: 10px;
-      font-size: 12px;
-      color: var(--vscode-descriptionForeground);
-    }
-    .limit-note {
-      margin: 0 0 10px;
-      border: 1px solid rgba(201, 95, 48, 0.42);
-      border-radius: 7px;
-      padding: 8px 10px;
-      background: color-mix(in srgb, var(--vscode-editorWidget-background) 82%, #fff0dc 18%);
-      color: var(--vscode-foreground);
-      font-size: 12px;
-      font-weight: 700;
-    }
-    .rag-list {
-      list-style: none;
-      padding: 0;
-      margin: 0;
-      display: grid;
-      gap: 8px;
-    }
-    .rag-item {
-      display: grid;
-      gap: 4px;
-      padding: 9px 10px;
-      border: 1px solid var(--vscode-editorWidget-border);
-      border-radius: 8px;
-      background: color-mix(in srgb, var(--vscode-editorWidget-background) 88%, #fff0dc 12%);
-    }
-    .rag-item strong {
-      color: var(--vscode-foreground);
-      font-size: 12px;
-    }
-    .rag-item span,
-    .rag-item p,
-    .rag-item a {
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-    }
-    .rag-item a {
-      color: var(--vscode-textLink-foreground);
-      text-decoration: none;
-    }
-    .history-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-    .history-columns {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .history-list {
-      list-style: none;
-      display: grid;
-      gap: 8px;
-      margin: 0;
-      padding: 0;
-    }
-    .history-item {
-      display: grid;
-      gap: 5px;
-      border: 1px solid var(--vscode-editorWidget-border);
-      border-radius: 8px;
-      padding: 9px 10px;
-      background: color-mix(in srgb, var(--vscode-editorWidget-background) 88%, #f1edff 12%);
-    }
-    .history-item strong {
-      display: block;
-      color: var(--vscode-foreground);
-      font-size: 12px;
-      overflow-wrap: anywhere;
-    }
-    .history-item span,
-    .history-item p,
-    .history-item a,
-    .history-empty {
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-    }
-    .history-item a {
-      width: fit-content;
-      color: var(--vscode-textLink-foreground);
-      text-decoration: none;
-    }
+    .code-head { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 10px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.35)); }
+    pre { margin: 0; padding: 8px; overflow-x: auto; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 12px); line-height: 1.4; }
+    .apply-actions-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
     .apply-button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 34px;
-      padding: 0 14px;
-      border-radius: 6px;
-      border: 1px solid var(--vscode-button-border, transparent);
-      color: var(--vscode-button-foreground);
-      background: var(--vscode-button-background);
-      font-size: 12px;
-      font-weight: 800;
-      text-decoration: none;
+      display: inline-block; padding: 5px 10px; border-radius: 4px; text-decoration: none; font-size: 12px;
+      background: var(--vscode-button-background); color: var(--vscode-button-foreground);
     }
-    .apply-button:hover {
-      background: var(--vscode-button-hoverBackground);
+    .apply-button small { opacity: 0.8; font-size: 10px; margin-left: 4px; }
+    .apply-button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+    .apply-button.danger { background: transparent; color: var(--vscode-errorForeground); border: 1px solid var(--vscode-errorForeground); }
+    ul.compact { margin: 8px 0 0; padding-left: 18px; }
+    ul.compact li { margin: 3px 0; font-size: 12px; }
+    details.block { margin: 0 0 8px; padding: 8px 12px; border-radius: 8px; background: var(--vscode-sideBar-background, transparent); border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.25)); }
+    details.block summary { cursor: pointer; list-style: none; }
+    details.block summary::-webkit-details-marker { display: none; }
+    details.block summary h2::before { content: '\\25B8'; display: inline-block; width: 12px; }
+    details.block[open] summary h2::before { content: '\\25BE'; }
+    details.block > p { margin: 8px 0 0; font-size: 12px; }
+    .rag-list, .history-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+    .rag-item, .history-item { font-size: 12px; }
+    .rag-item span, .history-item span { display: block; font-size: 11px; color: var(--vscode-descriptionForeground); }
+    .rag-item p, .history-item p { margin: 3px 0 0; color: var(--vscode-descriptionForeground); }
+    a { color: var(--vscode-textLink-foreground); text-decoration: none; }
+    .history-actions { margin-top: 8px; display: flex; gap: 14px; font-size: 11px; }
+    .spinner {
+      display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px;
+      border: 2px solid var(--vscode-descriptionForeground); border-top-color: transparent;
+      animation: spin 0.9s linear infinite;
     }
-    .apply-actions-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 10px;
-    }
-    .apply-button.secondary {
-      color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
-      background: var(--vscode-button-secondaryBackground, var(--vscode-editorWidget-background));
-    }
-    .apply-button.secondary:hover {
-      background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
-    }
-    .apply-button.danger {
-      background: var(--vscode-inputValidation-errorBackground, var(--vscode-button-background));
-      border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-button-border, transparent));
-    }
-    .steps {
-      margin: 0;
-      padding-left: 20px;
-      display: grid;
-      gap: 8px;
-    }
-    li { line-height: 1.45; }
-    .meta {
-      margin-top: 14px;
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-    }
-    @media (max-width: 680px) {
-      .history-columns {
-        grid-template-columns: 1fr;
-      }
-    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -4121,79 +3915,15 @@ class AdaceenActiveSuggestionPanel implements vscode.Disposable {
     <div class="head">
       <div class="diamond" aria-hidden="true"></div>
       <div>
-        <h1>${escapeHtml(title)}</h1>
-        <p>${escapeHtml(summary)}</p>
+        <h1>${escapeHtml(headTitle)}${loading ? ' <span class="spinner" aria-hidden="true"></span>' : ''}</h1>
+        <p>${escapeHtml(headSub)}</p>
       </div>
     </div>
-    <div class="chips">${chips.map((chip) => `<span class="chip">${escapeHtml(chip)}</span>`).join('')}</div>
-    ${loading ? '<div class="loading-strip"><span class="spinner" aria-hidden="true"></span><span>Cargando sugerencias...</span></div>' : ''}
-    <section class="overview">
-      <div class="section-title-row">
-        <h2>Resumen del archivo</h2>
-        <span class="badge">Archivo completo</span>
-      </div>
-      <p>${escapeHtml(fileOverview)}</p>
-    </section>
-    ${showLineSection ? `
-    <section class="focus">
-      <div class="section-title-row">
-        <h2>${escapeHtml(focusTitle)}</h2>
-        <span class="badge">${escapeHtml(focusBadge)}</span>
-      </div>
-      ${selectionWarningMarkup}
-      ${model?.lineSummary ? `<p class="line-summary">${escapeHtml(model.lineSummary)}</p>` : ''}
-      <div class="bubble-list">${lineSuggestionMarkup}</div>
-    </section>
-    ` : ''}
-    <section class="file-suggestions">
-      <div class="section-title-row">
-        <h2>Recomendacion del archivo</h2>
-        <span class="badge">Global</span>
-      </div>
-      <div class="bubble-list">${fileSuggestionMarkup}</div>
-    </section>
-    <section class="history">
-      <div class="section-title-row">
-        <h2>Historial de recomendaciones</h2>
-        <span class="badge">${escapeHtml(`${history.length} guardadas`)}</span>
-      </div>
-      <div class="history-actions">
-        <a class="apply-button secondary" href="${escapeHtml(openHistoryUri)}">Ver historial completo</a>
-        ${history.length > 0 ? `<a class="apply-button secondary" href="${escapeHtml(clearHistoryUri)}">Limpiar historial</a>` : ''}
-      </div>
-      ${historyMarkup}
-    </section>
-	    ${showRagSection ? `
-	    <section class="rag">
-	      <div class="section-title-row">
-	        <h2>Fuentes RAG usadas</h2>
-	        <span class="badge">${escapeHtml(ragCourseCode ? `RAG ${ragCourseCode}` : 'RAG')}</span>
-      </div>
-      ${ragSources.length ? `<ul class="rag-list">${ragMarkup}</ul>` : `<p>${escapeHtml(ragEmptyText)}</p>`}
-	    </section>
-	    ` : ''}
-    ${model && !loading ? `
-    <section class="apply-action${applied ? ' is-applied' : ''}">
-      <div class="section-title-row">
-        <h2>${applied ? 'Ayuda aplicada' : 'Aceptar ayuda'}</h2>
-        <span class="badge">${escapeHtml(applied ? 'Aplicada' : applyModeLabel)}</span>
-      </div>
-      <p class="line-summary">${escapeHtml(applied ? (model.lineSummary || 'La ayuda se aplico y el contexto sigue disponible para validar.') : applyHelpText)}</p>
-      ${applied ? '' : `
-      <div class="apply-actions-row">
-        <a class="apply-button" href="${escapeHtml(applyCommandUri)}">Aplicar ${escapeHtml(applyModeLabel.toLowerCase())}</a>
-        <a class="apply-button secondary" href="${escapeHtml(insertCommandUri)}">Agregar debajo</a>
-        <a class="apply-button secondary" href="${escapeHtml(replaceCommandUri)}">Modificar ${escapeHtml(hasSelectionFocus ? 'seleccion' : 'linea')}</a>
-        ${applyMode === 'delete' ? `<a class="apply-button danger" href="${escapeHtml(deleteCommandUri)}">Eliminar ${escapeHtml(hasSelectionFocus ? 'seleccion' : 'linea')}</a>` : ''}
-      </div>
-      `}
-    </section>
-    ` : ''}
-	    <section>
-	      <h2>Continuar</h2>
-	      <ol class="steps">${nextSteps.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ol>
-	    </section>
-    <p class="meta">Fuente: ${escapeHtml(sourceLabel)}${model?.backendError ? ` | ${escapeHtml(model.backendError)}` : ''}</p>
+    ${errorMarkup}
+    ${nowMarkup}
+    ${fileMarkup}
+    ${ragMarkup}
+    ${historyMarkup}
   </main>
 </body>
 </html>`;
