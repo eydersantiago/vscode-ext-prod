@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.27",
+  "version": "0.0.28",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -29,7 +29,8 @@
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "test:unit": "npm run compile-tests && node --test \"out/unit-tests/*.test.js\""
   },
   "contributes": {
     "commands": [
@@ -132,17 +133,17 @@
         {
           "command": "adaceen.selectionWidget.insert",
           "group": "inline@1",
-          "when": "commentController == adaceen.selection"
+          "when": "commentController == adaceen.selection && commentThread == adaceen-suggestion"
         },
         {
           "command": "adaceen.selectionWidget.replace",
           "group": "inline@2",
-          "when": "commentController == adaceen.selection"
+          "when": "commentController == adaceen.selection && commentThread == adaceen-suggestion"
         },
         {
           "command": "adaceen.selectionWidget.delete",
           "group": "inline@3",
-          "when": "commentController == adaceen.selection"
+          "when": "commentController == adaceen.selection && commentThread == adaceen-suggestion"
         },
         {
           "command": "adaceen.selectionWidget.close",
@@ -270,6 +271,25 @@
           "type": "string",
           "default": "",
           "description": "Curso RAG activo para sugerencias en VS Code. Si queda vacío, el backend usa el curso permitido por la sesión."
+        },
+        "adaceen.triggers.blockingSeconds": {
+          "type": "number",
+          "minimum": 10,
+          "maximum": 3600,
+          "default": 90,
+          "description": "Segundos que el mismo error del editor (texto normalizado) debe seguir presente en el archivo activo para considerar que el estudiante está bloqueado. También cuenta como bloqueo que el mismo error aparezca 3 veces en 10 minutos."
+        },
+        "adaceen.triggers.suggestOnBlocking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Al detectar un bloqueo, pide automáticamente una sugerencia al tutor (trigger \"blocking\"). Si se desactiva, el bloqueo solo se registra como evento."
+        },
+        "adaceen.codeApplication.offlineMaxLines": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 12,
+          "description": "Si no se puede consultar al backend si está permitido aplicar un cambio del tutor (sin red), solo se aplican cambios de hasta este número de líneas. 0 = no aplicar nada sin confirmación del servidor."
         }
       }
     }

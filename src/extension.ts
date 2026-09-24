@@ -1,6 +1,35 @@
 import * as vscode from 'vscode';
-import { AdaceenSelectionWidget, SelectionWidgetModel } from './selection-widget';
+import {
+  AdaceenSelectionWidget,
+  SELECTION_WIDGET_ORIGIN,
+  SelectionWidgetModel,
+  sanitizeTutorMarkdown,
+} from './selection-widget';
 import { AdaceenQuizViewProvider, QuizHistoryItem } from './quiz-view';
+import { buildIdentityHeaders, currentClientId, initClientIdentity } from './client-identity';
+import {
+  SuggestionExposureTracker,
+  TelemetryCategory,
+  TelemetryClient,
+  TelemetryEventInput,
+} from './telemetry';
+import {
+  BlockingSignal,
+  DiagnosticLike,
+  DiagnosticsSummary,
+  ErrorSignal,
+  ErrorSignalTracker,
+  ERROR_TEXT_MAX_CHARS,
+  SuggestDiagnostic,
+  summarizeDiagnostics,
+} from './error-signals';
+import {
+  ApplyCheckRequest,
+  CodeApplicationGuardDeps,
+  CodeApplicationVerdict,
+  DEFAULT_OFFLINE_MAX_LINES,
+  guardCodeApplication,
+} from './code-application-guard';
 
 const DEFAULT_INCLUDE_GLOB =
   '**/*.{ts,tsx,js,jsx,mjs,cjs,py,java,cpp,c,h,hpp,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}';
@@ -42,6 +71,10 @@ const ACTIVE_SUGGESTION_HISTORY_STORAGE_KEY = 'adaceen.suggestionHistory.v1';
 const ACTIVE_SUGGESTION_HISTORY_LIMIT = 80;
 const ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT = 5;
 const WORKER_TICK_MS = 4000;
+const DEFAULT_BLOCKING_SECONDS = 90;
+const APPLY_CHECK_TIMEOUT_MS = 8000;
+/** Una senal de bloqueo pendiente marca las peticiones siguientes como trigger "blocking" durante este tiempo. */
+const BLOCKING_TRIGGER_TTL_MS = 10 * 60_000;
 const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md', 'markdown', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff']);
 
 type ScanMode = 'auto' | 'local' | 'codespace' | 'all';
@@ -140,6 +173,42 @@ type ActiveSuggestionSettings = {
   ragCourseCode: string;
 };
 
+/** Activacion por eventos definidos (bloqueo). */
+type TriggerSettings = {
+  blockingSeconds: number;
+  suggestOnBlocking: boolean;
+};
+
+type CodeApplicationSettings = {
+  /** Sin respuesta de apply-check solo se aplican cambios de hasta estas lineas. */
+  offlineMaxLines: number;
+};
+
+/** Origen real de una peticion a /suggest-tab (contrato: campo trigger). */
+type SuggestionTrigger = 'cursor_idle' | 'selection' | 'manual' | 'blocking' | 'file_open' | 'panel';
+
+/** policy_applied de /suggest-tab. */
+type SuggestionPolicyApplied = {
+  name: string;
+  eventType: string;
+  interventionType: string;
+  detailLevel: string;
+  helpStage: string;
+  blocked: boolean;
+  reason: string;
+  reasonCode: string;
+};
+
+/** code_application de /suggest-tab. */
+type SuggestionCodeApplication = {
+  allowed: boolean;
+  maxLines: number | null;
+  remaining: number | null;
+  requireConfirmation: boolean;
+  countsAsHint: boolean;
+  reason: string;
+};
+
 type ActiveSuggestionRagSource = {
   id: string;
   sourceId: string;
@@ -180,6 +249,8 @@ type ActiveEditorSnapshot = {
   generatedAt: string;
   fileSummaryCacheKey: string;
   cacheKey: string;
+  /** Errores y avisos del archivo activo al tomar la foto (para visibleError / diagnostics). */
+  diagnostics: DiagnosticsSummary;
 };
 
 type ActiveSuggestionModel = {
@@ -217,6 +288,16 @@ type ActiveSuggestionModel = {
   loading?: boolean;
   applied?: boolean;
   appliedMode?: SuggestionApplyMode;
+  /** decision_id que devolvio /suggest-tab (va en las metricas y en apply-check). */
+  decisionId?: string;
+  policyApplied?: SuggestionPolicyApplied | null;
+  codeApplication?: SuggestionCodeApplication | null;
+  /** La politica bloqueo la respuesta: solo mensaje del tutor, sin aplicar codigo. */
+  blocked?: boolean;
+  /** Markdown del tutor cuando blocked es true. */
+  tutorMessage?: string;
+  /** Origen real de la peticion que produjo esta sugerencia. */
+  trigger?: SuggestionTrigger;
 };
 
 type VscodeReplacementOption = {
@@ -264,6 +345,18 @@ type BackendSuggestionResult = {
   outputText: string;
   ragSources: ActiveSuggestionRagSource[];
   ragCourseCode: string;
+  decisionId: string;
+  blocked: boolean;
+  policyApplied: SuggestionPolicyApplied | null;
+  codeApplication: SuggestionCodeApplication | null;
+  /** Tiempo de ida y vuelta de /suggest-tab (null si salio de la cache local). */
+  latencyMs: number | null;
+};
+
+/** Datos de la peticion que no forman parte de la foto del editor. */
+type BackendSuggestionRequestContext = {
+  trigger: SuggestionTrigger;
+  clientSessionId: string;
 };
 
 type BackendSuggestionSettledResult =
@@ -373,6 +466,21 @@ function toPositiveInt(value: unknown): number | undefined {
   if (typeof value === 'string') {
     const parsed = Number.parseInt(value, 10);
     if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
+function toNonNegativeInt(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
       return parsed;
     }
   }
@@ -651,6 +759,35 @@ function resolveActiveSuggestionSettings(): ActiveSuggestionSettings {
       toOptionalString(getEnv('ADACEEN_RAG_COURSE_CODE')) ??
       '',
   };
+}
+
+function resolveTriggerSettings(): TriggerSettings {
+  const config = vscode.workspace.getConfiguration('adaceen');
+  const blockingSeconds = Math.min(
+    3600,
+    Math.max(
+      10,
+      toPositiveInt(config.get<number>('triggers.blockingSeconds')) ??
+        toPositiveInt(getEnv('ADACEEN_TRIGGERS_BLOCKING_SECONDS')) ??
+        DEFAULT_BLOCKING_SECONDS,
+    ),
+  );
+  const suggestOnBlocking =
+    toBoolean(config.get<boolean>('triggers.suggestOnBlocking')) ??
+    toBoolean(getEnv('ADACEEN_TRIGGERS_SUGGEST_ON_BLOCKING')) ??
+    true;
+  return { blockingSeconds, suggestOnBlocking };
+}
+
+function resolveCodeApplicationSettings(): CodeApplicationSettings {
+  const config = vscode.workspace.getConfiguration('adaceen');
+  const offlineMaxLines = Math.min(
+    5000,
+    toNonNegativeInt(config.get<number>('codeApplication.offlineMaxLines')) ??
+      toNonNegativeInt(getEnv('ADACEEN_CODE_APPLICATION_OFFLINE_MAX_LINES')) ??
+      DEFAULT_OFFLINE_MAX_LINES,
+  );
+  return { offlineMaxLines };
 }
 
 function selectFolders(
@@ -978,9 +1115,14 @@ async function fetchJsonWithTimeout(
   }
 }
 
+/**
+ * Cabeceras base de TODAS las llamadas al backend: worker y, siempre,
+ * x-adaceen-client-id (identidad sin sesion, ver client-identity.ts).
+ */
 function buildWorkerHeaders(settings: BackendSettings, includeJsonContentType: boolean): Record<string, string> {
   const headers: Record<string, string> = {
     'x-adaceen-worker-id': settings.workerId,
+    ...buildIdentityHeaders(),
   };
   if (settings.scanWorkerKey) {
     headers['x-adaceen-worker-key'] = settings.scanWorkerKey;
@@ -991,12 +1133,12 @@ function buildWorkerHeaders(settings: BackendSettings, includeJsonContentType: b
   return headers;
 }
 
+/** Como buildWorkerHeaders mas x-session-id cuando hay sesion compartida. */
 function buildSessionHeaders(settings: BackendSettings, includeJsonContentType: boolean): Record<string, string> {
-  const headers = buildWorkerHeaders(settings, includeJsonContentType);
-  if (settings.sessionId) {
-    headers['x-session-id'] = settings.sessionId;
-  }
-  return headers;
+  return {
+    ...buildWorkerHeaders(settings, includeJsonContentType),
+    ...buildIdentityHeaders(settings.sessionId),
+  };
 }
 
 function normalizeMetadata(value: unknown): Record<string, unknown> {
@@ -1624,12 +1766,59 @@ function normalizeRagSources(value: unknown): ActiveSuggestionRagSource[] {
     .slice(0, 5);
 }
 
-function normalizeBackendSuggestionResult(value: unknown): BackendSuggestionResult {
+function optionalFiniteInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : null;
+}
+
+function normalizePolicyApplied(value: unknown): SuggestionPolicyApplied | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
   const data = asRecord(value);
+  const text = (key: string) => (toOptionalString(data[key]) || '').slice(0, 200);
+  return {
+    name: text('name'),
+    eventType: text('eventType'),
+    interventionType: text('interventionType'),
+    detailLevel: text('detailLevel'),
+    helpStage: text('helpStage'),
+    blocked: data.blocked === true,
+    reason: (toOptionalString(data.reason) || '').slice(0, 600),
+    reasonCode: text('reasonCode'),
+  };
+}
+
+function normalizeSuggestionCodeApplication(value: unknown): SuggestionCodeApplication | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const data = asRecord(value);
+  return {
+    allowed: data.allowed !== false,
+    maxLines: optionalFiniteInt(data.maxLines),
+    remaining: optionalFiniteInt(data.remaining),
+    requireConfirmation: data.requireConfirmation === true,
+    countsAsHint: data.countsAsHint === true,
+    reason: (toOptionalString(data.reason) || '').slice(0, 600),
+  };
+}
+
+function normalizeBackendSuggestionResult(value: unknown, latencyMs: number | null = null): BackendSuggestionResult {
+  const data = asRecord(value);
+  const policyApplied = normalizePolicyApplied(data.policy_applied ?? data.policyApplied);
   return {
     outputText: toOptionalString(data.output_text) || toOptionalString(data.outputText) || '',
     ragSources: normalizeRagSources(data.rag_sources || data.ragSources),
     ragCourseCode: normalizeCourseCode(data.rag_course_code) || normalizeCourseCode(data.ragCourseCode),
+    decisionId: (toOptionalString(data.decision_id) || toOptionalString(data.decisionId) || '').slice(0, 80),
+    blocked: data.blocked === true || policyApplied?.blocked === true,
+    policyApplied,
+    codeApplication: normalizeSuggestionCodeApplication(data.code_application ?? data.codeApplication),
+    latencyMs,
   };
 }
 
@@ -1687,7 +1876,16 @@ function withActiveSuggestionDeadline<T>(promise: Promise<T>, timeoutMs: number)
 }
 
 function createEmptyBackendSuggestionResult(): BackendSuggestionResult {
-  return { outputText: '', ragSources: [], ragCourseCode: '' };
+  return {
+    outputText: '',
+    ragSources: [],
+    ragCourseCode: '',
+    decisionId: '',
+    blocked: false,
+    policyApplied: null,
+    codeApplication: null,
+    latencyMs: null,
+  };
 }
 
 async function settleBackendSuggestionResult(
@@ -2149,6 +2347,35 @@ function getSelectedEditorSnippet(editor: vscode.TextEditor, maxChars: number) {
   };
 }
 
+function diagnosticSeverityName(severity: vscode.DiagnosticSeverity): DiagnosticLike['severity'] {
+  switch (severity) {
+    case vscode.DiagnosticSeverity.Error:
+      return 'error';
+    case vscode.DiagnosticSeverity.Warning:
+      return 'warning';
+    case vscode.DiagnosticSeverity.Information:
+      return 'information';
+    default:
+      return 'hint';
+  }
+}
+
+/** Errores y avisos que VS Code muestra ahora mismo para el documento. */
+function collectDocumentDiagnostics(uri: vscode.Uri): DiagnosticsSummary {
+  let diagnostics: readonly vscode.Diagnostic[] = [];
+  try {
+    diagnostics = vscode.languages.getDiagnostics(uri);
+  } catch {
+    diagnostics = [];
+  }
+  return summarizeDiagnostics(diagnostics.map((item) => ({
+    message: typeof item.message === 'string' ? item.message : String(item.message),
+    severity: diagnosticSeverityName(item.severity),
+    line: item.range.start.line + 1,
+    character: item.range.start.character,
+  })));
+}
+
 async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Promise<ActiveEditorSnapshot | null> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || !isSupportedActiveDocument(editor.document)) {
@@ -2219,6 +2446,7 @@ async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettings): Pr
     generatedAt,
     fileSummaryCacheKey,
     cacheKey,
+    diagnostics: collectDocumentDiagnostics(document.uri),
   };
 }
 
@@ -2497,6 +2725,118 @@ function getSuggestionDeleteRange(editor: vscode.TextEditor, modelLineIndex: num
   return editor.document.lineAt(modelLineIndex).rangeIncludingLineBreak;
 }
 
+type SuggestionEditPlan =
+  | { ok: false; message: string }
+  | {
+    ok: true;
+    mode: SuggestionApplyMode;
+    /** Operacion real sobre el documento (insertar en una linea vacia es un replace). */
+    operation: 'delete' | 'replace' | 'insert';
+    /** Rango afectado; al insertar, rango vacio en el punto de insercion. */
+    range: vscode.Range;
+    /** Texto que se escribe tal cual (con el salto de linea previo al insertar). */
+    text: string;
+    /** Texto que desaparece del archivo. */
+    removedText: string;
+    /** Codigo propuesto por el tutor, sin el salto de linea previo. */
+    proposedText: string;
+    /** Codigo de contexto para el quiz tras aceptar. */
+    quizOriginalCode: string;
+  };
+
+/**
+ * Calcula que cambio hace "aplicar sugerencia" en el editor, sin tocarlo.
+ * Es la misma logica de siempre, separada para poder medir el cambio y
+ * pasarlo por el guard de aplicacion antes de editar.
+ */
+function planSuggestionEdit(
+  editor: vscode.TextEditor,
+  model: ActiveSuggestionModel,
+  mode: SuggestionApplyMode,
+): SuggestionEditPlan {
+  const document = editor.document;
+  const modelLineIndex = Math.max(
+    0,
+    Math.min(document.lineCount - 1, (Number(model.line) || editor.selection.active.line + 1) - 1),
+  );
+  const targetLine = document.lineAt(modelLineIndex);
+  const eol = getDocumentEol(document);
+
+  if (mode === 'delete') {
+    const range = getSuggestionDeleteRange(editor, modelLineIndex);
+    const deletedText = document.getText(range);
+    if (!deletedText.trim()) {
+      return { ok: false, message: 'ADACEEN: no hay codigo seleccionado o linea con contenido para eliminar.' };
+    }
+    return {
+      ok: true,
+      mode,
+      operation: 'delete',
+      range,
+      text: '',
+      removedText: deletedText,
+      proposedText: '',
+      quizOriginalCode: deletedText,
+    };
+  }
+
+  const rawCompletion = model.completionText || buildCompletionFallbackForModel(model, targetLine.text);
+  const completionText = normalizeCompletionTextForEditor(rawCompletion, lineIndent(targetLine.text), eol);
+  if (!completionText.trim()) {
+    return { ok: false, message: 'ADACEEN: la sugerencia no trae codigo aplicable.' };
+  }
+
+  if (mode === 'replace') {
+    const range = editor.selection.isEmpty
+      ? new vscode.Range(new vscode.Position(modelLineIndex, 0), targetLine.range.end)
+      : getSelectedFullLineRange(editor);
+    const originalCode = document.getText(range);
+    return {
+      ok: true,
+      mode,
+      operation: 'replace',
+      range,
+      text: completionText,
+      removedText: originalCode,
+      proposedText: completionText,
+      quizOriginalCode: originalCode,
+    };
+  }
+
+  const insertLineIndex = editor.selection.isEmpty
+    ? modelLineIndex
+    : Math.min(document.lineCount - 1, getSelectedFullLineRange(editor).end.line);
+  const insertLine = document.lineAt(insertLineIndex);
+  const quizOriginalCode = editor.selection.isEmpty
+    ? insertLine.text
+    : document.getText(getSelectedFullLineRange(editor));
+  if (editor.selection.isEmpty && !insertLine.text.trim()) {
+    const range = new vscode.Range(new vscode.Position(insertLineIndex, 0), insertLine.range.end);
+    return {
+      ok: true,
+      mode,
+      operation: 'replace',
+      range,
+      text: completionText,
+      removedText: document.getText(range),
+      proposedText: completionText,
+      quizOriginalCode,
+    };
+  }
+
+  const insertPosition = insertLine.range.end;
+  return {
+    ok: true,
+    mode,
+    operation: 'insert',
+    range: new vscode.Range(insertPosition, insertPosition),
+    text: `${eol}${completionText}`,
+    removedText: '',
+    proposedText: completionText,
+    quizOriginalCode,
+  };
+}
+
 function splitRelativePath(value: string) {
   const clean = value.replace(/\\/g, '/').replace(/^\/+/, '');
   const parts = clean.split('/').filter(Boolean);
@@ -2579,10 +2919,67 @@ function rangeForCodeActionFallback(editor: vscode.TextEditor, action: PendingCo
   return document.lineAt(activeLine).range;
 }
 
+/** La aplicacion no se hizo por decision del guard (politica, regla offline o cancelacion). */
+class CodeApplicationBlockedError extends Error {
+  constructor(message: string, readonly verdict: CodeApplicationVerdict) {
+    super(message);
+    this.name = 'CodeApplicationBlockedError';
+  }
+}
+
+/** POST /api/suggestions/apply-check. Lanza ante red caida, HTTP no 2xx o tiempo agotado. */
+async function requestApplyCheck(request: ApplyCheckRequest): Promise<unknown> {
+  const settings = resolveBackendSettings();
+  if (!settings.baseUrl) {
+    throw new Error('sin backend configurado (adaceen.backend.baseUrl)');
+  }
+  return fetchJsonWithTimeout(
+    `${settings.baseUrl}/api/suggestions/apply-check`,
+    {
+      method: 'POST',
+      headers: buildSessionHeaders(settings, true),
+      body: JSON.stringify(request),
+    },
+    APPLY_CHECK_TIMEOUT_MS,
+  );
+}
+
+/** Dependencias reales (VS Code + backend + telemetria) del guard de aplicacion de codigo. */
+function createCodeApplicationGuardDeps(
+  telemetry: TelemetryClient,
+  output: vscode.OutputChannel,
+): CodeApplicationGuardDeps {
+  return {
+    // Indicador discreto en la barra de estado mientras responde el backend.
+    requestApplyCheck: (request) => Promise.resolve(vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: 'ADACEEN: comprobando si se puede aplicar el cambio' },
+      () => requestApplyCheck(request),
+    )),
+    confirm: async (message, detail) => {
+      const accept = 'Aplicar';
+      const answer = await vscode.window.showInformationMessage(message, { modal: true, detail }, accept);
+      return answer === accept;
+    },
+    notify: (message) => {
+      void vscode.window.showInformationMessage(message);
+    },
+    track: (event: TelemetryEventInput) => {
+      telemetry.track({
+        pageContext: editorPageContext(),
+        branch: detectBranchName(),
+        ...event,
+      });
+    },
+    offlineMaxLines: () => resolveCodeApplicationSettings().offlineMaxLines,
+    log: (line) => output.appendLine(line),
+  };
+}
+
 async function applyPendingCodeAction(
   action: PendingCodeAction,
   settings: BackendSettings,
   output: vscode.OutputChannel,
+  guardDeps: CodeApplicationGuardDeps,
 ) {
   const uri = await resolveWorkspaceFileUri(action.filePath);
   if (!uri) {
@@ -2592,7 +2989,36 @@ async function applyPendingCodeAction(
   const document = await vscode.workspace.openTextDocument(uri);
   const editor = await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
   const label = truncateInline(action.title || 'Reemplazo sugerido', 80);
-  if (!settings.autoApplyCodeActions) {
+  const applyMode = actionTypeToApplyMode(action.actionType);
+  const planRange = () => {
+    const directMatch = applyMode === 'insert' ? null : rangeForFirstTextMatch(editor.document, action.originalText);
+    return { directMatch, target: directMatch || rangeForCodeActionFallback(editor, action) };
+  };
+
+  // Guard de aplicacion (A10.8): los reemplazos del navegador tambien pasan por apply-check.
+  const measured = planRange();
+  const verdict = await guardCodeApplication({
+    decisionId: toOptionalString(action.metadata.decisionId) || toOptionalString(action.metadata.decision_id),
+    filePath: action.filePath,
+    language: inferActiveLanguage(action.filePath, editor.document.languageId),
+    applyMode,
+    originalText: applyMode === 'insert' ? '' : editor.document.getText(measured.target),
+    newText: applyMode === 'delete' ? '' : action.replacementText,
+    trigger: toOptionalString(action.metadata.trigger) || 'browser_code_action',
+    origin: 'browser_code_action',
+    fileLabel: pathBaseName(action.filePath),
+    repoFullName: action.repoFullName,
+  }, guardDeps);
+  if (!verdict.allowed) {
+    throw new CodeApplicationBlockedError(
+      verdict.cancelled
+        ? 'Reemplazo omitido por el usuario en VS Code.'
+        : `Aplicacion bloqueada (${verdict.reasonCode}): ${verdict.reason}`,
+      verdict,
+    );
+  }
+
+  if (!verdict.confirmed && !settings.autoApplyCodeActions) {
     const answer = await vscode.window.showInformationMessage(
       `ADACEEN: ${label}`,
       { modal: false },
@@ -2604,9 +3030,8 @@ async function applyPendingCodeAction(
     }
   }
 
-  const applyMode = actionTypeToApplyMode(action.actionType);
-  const directRange = applyMode === 'insert' ? null : rangeForFirstTextMatch(document, action.originalText);
-  const range = directRange || rangeForCodeActionFallback(editor, action);
+  // El rango se calcula justo antes de editar, como antes (la confirmacion pudo tardar).
+  const { directMatch: directRange, target: range } = planRange();
   const eol = getDocumentEol(editor.document);
   let editStart = range.start;
   let appliedTextLength = action.replacementText.length;
@@ -2649,6 +3074,10 @@ async function applyPendingCodeAction(
     line: range.start.line + 1,
     character: range.start.character + 1,
     appliedAt: new Date().toISOString(),
+    linesChanged: verdict.linesChanged,
+    charsChanged: verdict.charsChanged,
+    applyCheck: verdict.offline ? 'offline' : 'server',
+    ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}),
   };
 }
 
@@ -2656,6 +3085,7 @@ async function processNextCodeActionForRepo(
   settings: BackendSettings,
   repoFullName: string,
   output: vscode.OutputChannel,
+  guardDeps: CodeApplicationGuardDeps,
   manual = false,
 ) {
   if (!settings.sessionId) {
@@ -2684,7 +3114,7 @@ async function processNextCodeActionForRepo(
 
   try {
     output.appendLine(`[CodeActions] Reemplazo reclamado: ${action.id} | ${action.filePath}.`);
-    const metadata = await applyPendingCodeAction(action, settings, output);
+    const metadata = await applyPendingCodeAction(action, settings, output, guardDeps);
     await completeCodeAction(settings, action.id, {
       ...action.metadata,
       ...metadata,
@@ -2694,12 +3124,14 @@ async function processNextCodeActionForRepo(
       vscode.window.showInformationMessage(`ADACEEN: reemplazo aplicado en ${action.filePath}.`);
     }
   } catch (error) {
-    const message = String(error);
+    const blockedByGuard = error instanceof CodeApplicationBlockedError;
+    const message = blockedByGuard ? error.message : String(error);
     output.appendLine(`[CodeActions] No se pudo aplicar ${action.id}: ${message}`);
     await failCodeAction(settings, action.id, message).catch((failError) => {
       output.appendLine(`[CodeActions] No se pudo reportar fallo ${action.id}: ${String(failError)}`);
     });
-    if (manual) {
+    // Si lo freno el guard, el estudiante ya vio el motivo (o cancelo el mismo).
+    if (manual && !blockedByGuard) {
       vscode.window.showWarningMessage(`ADACEEN: ${message}`);
     }
   }
@@ -2887,12 +3319,24 @@ function buildLocalActiveSuggestion(
   };
 }
 
+function formatDiagnosticsForPrompt(diagnostics: SuggestDiagnostic[], max = 5) {
+  if (!diagnostics.length) {
+    return '';
+  }
+  return [
+    'Errores y avisos del editor en este archivo:',
+    ...diagnostics.slice(0, max).map((item) => `- Linea ${item.line} (${item.severity === 'error' ? 'error' : 'aviso'}): ${item.message}`),
+  ].join('\n');
+}
+
 function buildBackendSuggestionContent(
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null = null,
   scope: BackendSuggestionRequestScope = 'file_summary',
+  trigger?: SuggestionTrigger,
 ) {
   const isFileSummary = scope === 'file_summary';
+  const blockingFocus = scope === 'cursor' && trigger === 'blocking';
   const selectionBlock = !isFileSummary && snapshot.selectionText.trim()
     ? [
       `Bloque seleccionado por el usuario: lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine}`,
@@ -2911,7 +3355,10 @@ function buildBackendSuggestionContent(
     `Archivo activo: ${snapshot.filePath}`,
     `Lenguaje: ${snapshot.language}`,
     isFileSummary ? '' : `Cursor: linea ${snapshot.line}, columna ${snapshot.column}`,
-    scope === 'cursor' ? 'Disparador: cursor quieto durante 3 segundos; posible bloqueo del estudiante.' : '',
+    blockingFocus
+      ? 'Disparador: bloqueo detectado; el mismo error del editor sigue presente o se repite.'
+      : scope === 'cursor' ? 'Disparador: cursor quieto durante 3 segundos; posible bloqueo del estudiante.' : '',
+    blockingFocus ? formatDiagnosticsForPrompt(snapshot.diagnostics.items) : '',
     selectionBlock,
     `Lineas del archivo: ${snapshot.lineCount}`,
     !isFileSummary && snapshot.currentLineText ? `Linea actual:\n${snapshot.currentLineText}` : '',
@@ -2921,11 +3368,26 @@ function buildBackendSuggestionContent(
   ].filter(Boolean).join('\n\n');
 }
 
-function buildBackendSuggestionQuestion(snapshot: ActiveEditorSnapshot, scope: BackendSuggestionRequestScope) {
+function buildBackendSuggestionQuestion(
+  snapshot: ActiveEditorSnapshot,
+  scope: BackendSuggestionRequestScope,
+  trigger?: SuggestionTrigger,
+) {
   if (scope === 'file_summary') {
     return [
       'Describe en 1 a 3 bullets que hace el archivo activo y cual parece ser su papel dentro del proyecto usando el mapa local del workspace.',
       'Despues da 3 sugerencias breves y accionables para continuar en ese archivo.',
+      'No des la solucion completa ni inventes datos que no esten en el contexto.',
+    ].join(' ');
+  }
+
+  const visibleError = snapshot.diagnostics.firstError;
+  if (trigger === 'blocking' && visibleError) {
+    return [
+      `El estudiante lleva un rato bloqueado con este error del editor en la linea ${visibleError.line}: "${truncateInline(visibleError.message, 300)}".`,
+      'Explica en 1 bullet la causa probable con palabras sencillas y da 2 pistas breves para que lo corrija por su cuenta.',
+      'Al final, si es seguro, incluye un unico bloque de codigo corto que ayude a corregirlo. Si no es seguro, usa un comentario TODO del lenguaje.',
+      'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
       'No des la solucion completa ni inventes datos que no esten en el contexto.',
     ].join(' ');
   }
@@ -2955,20 +3417,23 @@ async function fetchBackendSuggestionText(
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null = null,
   scope: BackendSuggestionRequestScope,
+  requestContext: BackendSuggestionRequestContext,
 ): Promise<BackendSuggestionResult> {
   const backend = resolveBackendSettings();
   if (!backend.baseUrl) {
-    return { outputText: '', ragSources: [], ragCourseCode: '' };
+    return createEmptyBackendSuggestionResult();
   }
 
+  const visibleError = snapshot.diagnostics.firstError?.message || '';
+  const startedAt = Date.now();
   const response = await fetchJsonWithTimeout(
     `${backend.baseUrl}/suggest-tab`,
     {
       method: 'POST',
       headers: buildSessionHeaders(backend, true),
       body: JSON.stringify({
-        tab_content: buildBackendSuggestionContent(snapshot, projectIndex, scope),
-        question: buildBackendSuggestionQuestion(snapshot, scope),
+        tab_content: buildBackendSuggestionContent(snapshot, projectIndex, scope, requestContext.trigger),
+        question: buildBackendSuggestionQuestion(snapshot, scope, requestContext.trigger),
         tab_title: snapshot.filePath,
         tab_url: `vscode://${snapshot.repoFullName || snapshot.workspaceName || 'workspace'}/${snapshot.filePath}`,
         suggestion_scope: scope,
@@ -2987,12 +3452,88 @@ async function fetchBackendSuggestionText(
         currentLineText: snapshot.currentLineText,
         courseCode: settings.ragCourseCode,
         ragCourseCode: settings.ragCourseCode,
+        // Contrato v1.1 (A9.10): origen real de la peticion y errores del editor.
+        trigger: requestContext.trigger,
+        ...(visibleError ? { visibleError: visibleError.slice(0, 2000) } : {}),
+        ...(snapshot.diagnostics.items.length ? { diagnostics: snapshot.diagnostics.items } : {}),
+        clientSessionId: requestContext.clientSessionId,
       }),
     },
     settings.backendTimeoutMs,
   );
 
-  return normalizeBackendSuggestionResult(response);
+  return normalizeBackendSuggestionResult(response, Date.now() - startedAt);
+}
+
+const DEFAULT_BLOCKED_TUTOR_MESSAGE =
+  'Tu docente configuró que en este momento el tutor responda sin código. Intenta el siguiente paso por tu cuenta y vuelve a pedir ayuda si sigues con dudas.';
+
+/**
+ * Respuesta bloqueada por la politica del docente (blocked=true): el
+ * output_text es un mensaje controlado en Markdown y no se ofrece aplicar
+ * codigo (completionText vacio, blocked=true).
+ */
+function buildBlockedSuggestionModel(
+  snapshot: ActiveEditorSnapshot,
+  projectIndex: WorkspaceProjectIndex | null,
+  scope: BackendSuggestionScope,
+  blockedResult: BackendSuggestionResult,
+  otherResult: BackendSuggestionResult,
+  backendError: string,
+  trigger?: SuggestionTrigger,
+): ActiveSuggestionModel {
+  const localFallback = buildLocalActiveSuggestion(snapshot, projectIndex);
+  const message = blockedResult.outputText.trim()
+    || blockedResult.policyApplied?.reason
+    || DEFAULT_BLOCKED_TUTOR_MESSAGE;
+  const sections = parseBackendSuggestionSections(message);
+  const lines = uniqueCompactStrings(sections.all.length ? sections.all : [message.replace(/\s+/g, ' ')], 5);
+  const headline = truncateInline(lines[0] || 'Mensaje del tutor', 260);
+  const otherSections = otherResult.outputText && !otherResult.blocked
+    ? parseBackendSuggestionSections(otherResult.outputText)
+    : null;
+  const otherLines = otherSections
+    ? (otherSections.sugerencias.length ? otherSections.sugerencias : otherSections.all)
+    : [];
+  const fileOverview = otherSections?.resumen.length
+    ? truncateInline(otherSections.resumen.join(' '), 420)
+    : localFallback.fileOverview;
+  const ragCourseCode = blockedResult.ragCourseCode || otherResult.ragCourseCode;
+  return {
+    ...localFallback,
+    title: `ADACEEN en ${snapshot.fileName}`,
+    summary: headline,
+    fileOverview,
+    lineSummary: scope === 'cursor' ? headline : '',
+    suggestions: lines,
+    fileSuggestions: scope === 'cursor'
+      ? uniqueCompactStrings(otherLines.length ? otherLines : localFallback.fileSuggestions, 4)
+      : lines.slice(0, 4),
+    lineSuggestions: scope === 'cursor' ? lines.slice(0, 3) : [],
+    nextSteps: lines.slice(1, 4).length ? lines.slice(1, 4) : localFallback.nextSteps,
+    source: 'backend',
+    backendError: backendError ? truncateInline(backendError, 180) : '',
+    ragSources: blockedResult.ragSources.length ? blockedResult.ragSources : otherResult.ragSources,
+    ragCourseCode,
+    updatedAt: new Date().toISOString(),
+    metricId: stableStringHash([
+      snapshot.cacheKey,
+      scope,
+      'blocked',
+      message,
+      blockedResult.decisionId,
+      ragCourseCode,
+    ].join('\n---adaceen-metric---\n')),
+    completionText: '',
+    triggerKind: scope === 'cursor' ? 'cursor' : 'file',
+    actionsVisible: false,
+    decisionId: blockedResult.decisionId || undefined,
+    policyApplied: blockedResult.policyApplied,
+    codeApplication: blockedResult.codeApplication,
+    blocked: true,
+    tutorMessage: message,
+    trigger,
+  };
 }
 
 function buildBackendActiveSuggestionModel(
@@ -3002,9 +3543,16 @@ function buildBackendActiveSuggestionModel(
   focusResult: BackendSuggestionResult,
   fileSummaryResult: BackendSuggestionResult = createEmptyBackendSuggestionResult(),
   backendError = '',
+  trigger?: SuggestionTrigger,
 ): ActiveSuggestionModel | null {
   const focusOutputText = focusResult.outputText;
   const fileSummaryOutputText = fileSummaryResult.outputText;
+  // La decision que manda es la del foco; si el foco fallo, la del resumen.
+  const primaryResult = focusOutputText || focusResult.blocked ? focusResult : fileSummaryResult;
+  if (primaryResult.blocked) {
+    const otherResult = primaryResult === focusResult ? fileSummaryResult : focusResult;
+    return buildBlockedSuggestionModel(snapshot, projectIndex, scope, primaryResult, otherResult, backendError, trigger);
+  }
   if (!focusOutputText && !fileSummaryOutputText) {
     return null;
   }
@@ -3089,7 +3637,34 @@ function buildBackendActiveSuggestionModel(
     applyMode,
     triggerKind: scope === 'cursor' ? 'cursor' : 'file',
     actionsVisible: false,
+    decisionId: primaryResult.decisionId || focusResult.decisionId || fileSummaryResult.decisionId || undefined,
+    policyApplied: primaryResult.policyApplied,
+    codeApplication: primaryResult.codeApplication,
+    blocked: false,
+    trigger,
   };
+}
+
+/** Se ofrece aplicar codigo para este modelo (no bloqueado y permitido por la politica). */
+function isSuggestionApplyOffered(model: ActiveSuggestionModel) {
+  return !model.blocked && model.codeApplication?.allowed !== false;
+}
+
+/** Nota discreta sobre la aplicacion de codigo para mostrar junto a la sugerencia. */
+function suggestionApplicationNote(model: ActiveSuggestionModel) {
+  const codeApplication = model.codeApplication;
+  if (!codeApplication || model.blocked) {
+    return '';
+  }
+  if (codeApplication.allowed === false) {
+    return codeApplication.reason || 'Tu docente no permite aplicar código aquí; úsalo como guía y escríbelo tú.';
+  }
+  if (codeApplication.remaining !== null) {
+    return codeApplication.remaining === 1
+      ? 'Te queda 1 aplicación en este archivo.'
+      : `Te quedan ${codeApplication.remaining} aplicaciones en este archivo.`;
+  }
+  return '';
 }
 
 function detectBranchName() {
@@ -3137,6 +3712,10 @@ function toSelectionWidgetModel(model: ActiveSuggestionModel | null): SelectionW
     ragCourseCode: model.ragCourseCode || '',
     loading: !!model.loading,
     applied: !!model.applied,
+    blocked: !!model.blocked,
+    tutorMessage: model.tutorMessage || '',
+    applyAllowed: isSuggestionApplyOffered(model),
+    applicationNote: suggestionApplicationNote(model),
   };
 }
 
@@ -3396,6 +3975,21 @@ function buildSuggestionMetricMetadata(
     })),
     suggestionPreview: truncateInline(primarySuggestionText(model), 240),
     backendError: model.backendError,
+    trigger: model.trigger || '',
+    blocked: !!model.blocked,
+    ...(model.policyApplied
+      ? {
+        policyName: model.policyApplied.name,
+        policyReasonCode: model.policyApplied.reasonCode,
+        helpStage: model.policyApplied.helpStage,
+      }
+      : {}),
+    ...(model.codeApplication
+      ? {
+        codeApplicationAllowed: model.codeApplication.allowed,
+        codeApplicationRemaining: model.codeApplication.remaining,
+      }
+      : {}),
     ...extra,
   };
 }
@@ -3453,6 +4047,10 @@ function actionOptionMetadata(
     generatedBy: model.source === 'backend'
       ? 'vscode_extension_agent_decision'
       : 'vscode_extension_local_fallback',
+    // Si el navegador devuelve esta opcion como reemplazo, VS Code la valida
+    // con apply-check usando la misma decision del tutor.
+    ...(model.decisionId ? { decisionId: model.decisionId } : {}),
+    ...(model.trigger ? { trigger: model.trigger } : {}),
   };
 }
 
@@ -3476,52 +4074,61 @@ function optionLabelForApplyMode(snapshot: ActiveEditorSnapshot, applyMode: Sugg
   return 'Agregar codigo o comentario';
 }
 
-async function recordVscodeSuggestionMetric(
-  settings: BackendSettings,
-  output: vscode.OutputChannel,
+/** Campos de primer nivel (contrato v1.1) que acompanan a una metrica de sugerencia. */
+type SuggestionMetricFields = {
+  category?: TelemetryCategory;
+  durationMs?: number | null;
+  latencyMs?: number | null;
+  count?: number | null;
+  /** Por defecto el decisionId del modelo. */
+  decisionId?: string;
+};
+
+function editorPageContext() {
+  return isCodespaceRuntime() ? 'codespace' : 'vscode';
+}
+
+/**
+ * Metrica de sugerencia hacia /api/behavior/events (telemetria v1.1).
+ * Ya no exige sesion: sin sesion viaja con x-adaceen-client-id. El cliente
+ * de telemetria agrega schemaVersion, seq y clientSessionId, y hace un
+ * reintento ante error de red.
+ */
+function recordVscodeSuggestionMetric(
+  telemetry: TelemetryClient,
   model: ActiveSuggestionModel,
   eventType: string,
   value = "",
   extra: Record<string, unknown> = {},
+  fields: SuggestionMetricFields = {},
 ) {
-  if (!settings.baseUrl || !settings.sessionId) {
-    return;
-  }
-
-  try {
-    await fetchJsonWithTimeout(
-      `${settings.baseUrl}/api/behavior/events`,
-      {
-        method: 'POST',
-        headers: buildSessionHeaders(settings, true),
-        body: JSON.stringify({
-          events: [{
-            source: 'vscode_extension',
-            category: 'suggestion',
-            eventType,
-            pageContext: isCodespaceRuntime() ? 'codespace' : 'vscode',
-            repoFullName: model.repoFullName,
-            branch: detectBranchName(),
-            filePath: model.filePath,
-            language: model.language,
-            subjectId: model.metricId,
-            value: value || model.applyMode,
-            metadata: buildSuggestionMetricMetadata(model, extra),
-            occurredAt: new Date().toISOString(),
-          }],
-        }),
-      },
-      8000,
-    );
-  } catch (error) {
-    output.appendLine(`[Metrics] No se pudo registrar ${eventType}: ${String(error)}`);
-  }
+  telemetry.track({
+    source: 'vscode_extension',
+    category: fields.category || 'suggestion',
+    eventType,
+    pageContext: editorPageContext(),
+    repoFullName: model.repoFullName,
+    branch: detectBranchName(),
+    filePath: model.filePath,
+    language: model.language,
+    subjectId: model.metricId,
+    value: value || model.applyMode,
+    decisionId: fields.decisionId || model.decisionId,
+    durationMs: fields.durationMs,
+    latencyMs: fields.latencyMs,
+    count: fields.count,
+    metadata: buildSuggestionMetricMetadata(model, extra),
+  });
 }
 
 function buildRackReplacementOptions(
   snapshot: ActiveEditorSnapshot,
   model: ActiveSuggestionModel,
 ): VscodeReplacementOption[] {
+  if (!isSuggestionApplyOffered(model)) {
+    // Respuesta bloqueada o aplicacion no permitida: el navegador tampoco ofrece reemplazos.
+    return [];
+  }
   const applyMode = model.applyMode || inferSuggestionApplyMode(snapshot, summarizeActiveSuggestion(model), model.completionText);
   const targetText = snapshot.selectionText.trim() ? snapshot.selectionText : snapshot.currentLineText;
   const actionCommentText = buildActionCommentText(snapshot, model);
@@ -3671,13 +4278,16 @@ class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvider, vsco
       this.model.actionsVisible &&
       !this.model.loading &&
       !this.model.applied &&
-      this.model.source !== 'local-fallback'
+      this.model.source !== 'local-fallback' &&
+      isSuggestionApplyOffered(this.model)
     ) {
       const recommendedMode = this.model.applyMode || 'insert';
+      const note = suggestionApplicationNote(this.model);
       lenses.push(new vscode.CodeLens(range, {
         title: `$(check) Aceptar ayuda: ${suggestionApplyModeLabel(recommendedMode)}`,
         command: 'adaceen.applySuggestionCompletion',
-        arguments: [recommendedMode],
+        arguments: [recommendedMode, 'codelens'],
+        ...(note ? { tooltip: note } : {}),
       }));
     }
     return lenses;
@@ -3735,7 +4345,7 @@ function buildSuggestionCodeActions(model: ActiveSuggestionModel) {
   action.command = {
     title: action.title,
     command: 'adaceen.applySuggestionCompletion',
-    arguments: [recommendedMode],
+    arguments: [recommendedMode, 'quick_fix'],
   };
   action.isPreferred = true;
   return [action];
@@ -3759,6 +4369,7 @@ class AdaceenSuggestionCodeActionProvider implements vscode.CodeActionProvider, 
       this.model.applied ||
       this.model.source === 'local-fallback' ||
       !this.model.actionsVisible ||
+      !isSuggestionApplyOffered(this.model) ||
       !isSuggestionCodeActionRequestFocused(this.model, document, range)
     ) {
       return [];
@@ -3794,6 +4405,7 @@ function isSuggestionInlineHintVisible(model: ActiveSuggestionModel, document: v
     model.loading ||
     model.applied ||
     model.source === 'local-fallback' ||
+    !isSuggestionApplyOffered(model) ||
     document.uri.toString() !== model.uriString
   ) {
     return false;
@@ -3854,7 +4466,7 @@ class AdaceenSuggestionInlayHintProvider implements vscode.InlayHintsProvider, v
     labelPart.command = {
       title: `ADACEEN: Aceptar ayuda (${modeLabel})`,
       command: 'adaceen.applySuggestionCompletion',
-      arguments: [applyMode],
+      arguments: [applyMode, 'inlay_hint'],
     };
 
     const hint = new vscode.InlayHint(position, [labelPart], vscode.InlayHintKind.Parameter);
@@ -3879,6 +4491,15 @@ type BackendOrigin = {
   reachable: boolean;
   /** Motivo cuando no se pudo consultar, para el tooltip. */
   detail: string;
+  /**
+   * El backend informa latidos (listening es un arreglo) y ningun worker
+   * esta vivo: la barra dice "GPU: sin worker activo".
+   */
+  noWorker: boolean;
+  /** alive_workers del backend; null si es un backend sin latidos. */
+  aliveWorkers: number | null;
+  /** Workers que el backend conoce (listening.length); null si no viene. */
+  listeningCount: number | null;
 };
 
 const UNKNOWN_BACKEND_ORIGIN: BackendOrigin = {
@@ -3888,10 +4509,32 @@ const UNKNOWN_BACKEND_ORIGIN: BackendOrigin = {
   provider: 'unknown',
   reachable: false,
   detail: '',
+  noWorker: false,
+  aliveWorkers: null,
+  listeningCount: null,
 };
 
+/**
+ * Lectura de listening / alive_workers de /api/agent/backend. Solo cuenta
+ * como "sin worker" si listening es un arreglo y alive_workers es 0; en modo
+ * local o azure no hay workers con latido, asi que no se avisa. Con un
+ * backend viejo (sin esos campos) todo sigue como antes.
+ */
+function readWorkerHeartbeat(data: Record<string, unknown>) {
+  const listening = Array.isArray(data.listening) ? data.listening : null;
+  const aliveRaw = data.alive_workers;
+  const aliveWorkers = typeof aliveRaw === 'number' && Number.isFinite(aliveRaw) ? Math.max(0, Math.floor(aliveRaw)) : null;
+  const mode = (toOptionalString(data.mode) || '').toLowerCase();
+  const heartbeatMode = mode !== 'local' && mode !== 'azure';
+  return {
+    listeningCount: listening ? listening.length : null,
+    aliveWorkers,
+    noWorker: !!listening && aliveWorkers === 0 && heartbeatMode,
+  };
+}
+
 function backendOriginIcon(origin: BackendOrigin): string {
-  if (!origin.reachable) {
+  if (!origin.reachable || origin.noWorker) {
     return '$(warning)';
   }
   switch (origin.provider) {
@@ -3929,13 +4572,19 @@ async function fetchBackendOrigin(settings: BackendSettings): Promise<BackendOri
     // worker es el ultimo job atendido; expected es lo que el backend espera
     // cuando todavia no ha pasado ninguno.
     const worker = asRecord(data.worker ?? data.expected);
+    const heartbeat = readWorkerHeartbeat(data);
     return {
       mode: toOptionalString(data.mode) ?? '',
-      label: toOptionalString(worker.label) ?? 'sin identificar',
+      label: heartbeat.noWorker ? 'sin worker activo' : toOptionalString(worker.label) ?? 'sin identificar',
       id: toOptionalString(worker.id) ?? '',
       provider: toOptionalString(worker.provider) ?? 'unknown',
       reachable: true,
-      detail: '',
+      detail: heartbeat.noWorker
+        ? 'Ningún worker de GPU ha mandado latido reciente al backend. Las sugerencias pueden tardar o salir del respaldo local hasta que un worker vuelva a conectarse.'
+        : '',
+      noWorker: heartbeat.noWorker,
+      aliveWorkers: heartbeat.aliveWorkers,
+      listeningCount: heartbeat.listeningCount,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -3957,15 +4606,18 @@ function updateBackendOriginStatusBar(
 ) {
   statusBar.text = `${backendOriginIcon(origin)} GPU: ${origin.label}`;
   statusBar.tooltip = [
-    `Origen de la inferencia: ${origin.label}`,
-    origin.id ? `Worker: ${origin.id}` : '',
+    origin.noWorker ? 'GPU: sin worker activo' : `Origen de la inferencia: ${origin.label}`,
+    origin.id ? `${origin.noWorker ? 'Ultimo worker conocido' : 'Worker'}: ${origin.id}` : '',
     origin.mode ? `Modo del backend: ${origin.mode}` : '',
+    origin.aliveWorkers !== null && origin.listeningCount !== null
+      ? `Workers con latido reciente: ${origin.aliveWorkers} de ${origin.listeningCount}`
+      : '',
     `Backend: ${settings.baseUrl}`,
     origin.detail,
   ]
     .filter(Boolean)
     .join('\n');
-  statusBar.backgroundColor = origin.reachable
+  statusBar.backgroundColor = origin.reachable && !origin.noWorker
     ? undefined
     : new vscode.ThemeColor('statusBarItem.warningBackground');
   statusBar.show();
@@ -4020,6 +4672,9 @@ function buildInlineSuggestionLabel(model: ActiveSuggestionModel) {
   if (model.applied) {
     return `ADACEEN aplicado: ${truncateInline(model.lineSummary || primarySuggestionText(model), 82)}`;
   }
+  if (model.blocked) {
+    return `ADACEEN tutor: ${truncateInline(primarySuggestionText(model), 82)}`;
+  }
   const action = suggestionApplyModeLabel(model.applyMode).toLowerCase();
   const focus = primarySuggestionText(model);
   const scope = model.selectionLineCount ? 'seleccion' : action;
@@ -4045,16 +4700,26 @@ function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
       `> Seleccion limitada: se analizaron las primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount || 'la seleccion'}.\n\n`,
     );
   }
-  markdown.appendMarkdown(`${escapeMarkdown(primarySuggestionText(model))}\n\n`);
-  markdown.appendMarkdown(`**Accion:** ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}\n\n`);
-
   const openPanelUri = buildCommandUri('adaceen.openAssistant');
-  const applyUri = buildCommandUri('adaceen.applySuggestionCompletion', [model.applyMode]);
-  markdown.appendMarkdown(`[Ver panel](${openPanelUri})`);
-  if (!model.loading && !model.applied && model.source !== 'local-fallback') {
-    markdown.appendMarkdown(` · [Aceptar ayuda: ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}](${applyUri})`);
-  } else if (model.applied) {
-    markdown.appendMarkdown(`\n\n_Ayuda aplicada. Mantengo el contexto para que puedas validar el cambio._`);
+  if (model.blocked) {
+    // Mensaje controlado del tutor: se muestra tal cual (Markdown) y sin enlace de aplicar.
+    markdown.appendMarkdown(`${sanitizeTutorMarkdown(model.tutorMessage || primarySuggestionText(model))}\n\n`);
+    markdown.appendMarkdown(`[Ver panel](${openPanelUri})`);
+  } else {
+    markdown.appendMarkdown(`${escapeMarkdown(primarySuggestionText(model))}\n\n`);
+    markdown.appendMarkdown(`**Accion:** ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}\n\n`);
+
+    const applyUri = buildCommandUri('adaceen.applySuggestionCompletion', [model.applyMode, 'hover']);
+    const applicationNote = suggestionApplicationNote(model);
+    markdown.appendMarkdown(`[Ver panel](${openPanelUri})`);
+    if (!model.loading && !model.applied && model.source !== 'local-fallback' && isSuggestionApplyOffered(model)) {
+      markdown.appendMarkdown(` · [Aceptar ayuda: ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}](${applyUri})`);
+    } else if (model.applied) {
+      markdown.appendMarkdown(`\n\n_Ayuda aplicada. Mantengo el contexto para que puedas validar el cambio._`);
+    }
+    if (applicationNote && !model.applied && !model.loading) {
+      markdown.appendMarkdown(`\n\n_${escapeMarkdown(applicationNote)}_`);
+    }
   }
 
   const ragSource = model.ragSources[0];
@@ -4102,7 +4767,7 @@ function applySuggestionDecoration(
   const range = model.selectionLineCount > 0 && buildSelectionRangeKey(editor) === model.selectionRangeKey
     ? editor.selection
     : new vscode.Range(line.range.end, line.range.end);
-  const showPassiveLabel = model.loading || model.applied || model.source === 'local-fallback';
+  const showPassiveLabel = model.loading || model.applied || model.source === 'local-fallback' || !!model.blocked;
   const decoration: vscode.DecorationOptions = {
     range,
     hoverMessage: buildSuggestionHoverMarkdown(model),
@@ -4126,10 +4791,30 @@ function applySuggestionDecoration(
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel('ADACEEN');
+  const safeLog = (line: string) => {
+    try {
+      output.appendLine(line);
+    } catch {
+      // Canal ya cerrado (desactivacion): se descarta la linea.
+    }
+  };
+  // Identidad unica para TODAS las llamadas al backend (x-adaceen-client-id);
+  // es el mismo id persistente que usaba la vista de quiz.
+  initClientIdentity(context.globalState);
+  const telemetry = new TelemetryClient({
+    getEndpoint: () => {
+      const settings = resolveBackendSettings();
+      return { baseUrl: settings.baseUrl, sessionId: settings.sessionId, clientId: currentClientId() };
+    },
+    log: safeLog,
+  });
+  const codeApplicationGuardDeps = createCodeApplicationGuardDeps(telemetry, output);
+  context.subscriptions.push({ dispose: () => telemetry.dispose() });
   const startupSettings = resolveBackendSettings();
   output.appendLine(
     `[Worker] Inicializado | auto=${startupSettings.autoWorkerEnabled} | backend=${startupSettings.baseUrl} | pollMs=${startupSettings.workerPollMs} | workerId=${startupSettings.workerId}`,
   );
+  output.appendLine(`[Identidad] clientId=${currentClientId()} | clientSessionId=${telemetry.clientSessionId}`);
 
   let latestSuggestionHistory = readSuggestionHistory(context.workspaceState);
   // Vista movible "Quiz y seguimiento" (reemplaza el panel de sugerencias):
@@ -4182,10 +4867,12 @@ export function activate(context: vscode.ExtensionContext) {
     const origin = await fetchBackendOrigin(settings);
     updateBackendOriginStatusBar(backendOriginStatusBar, origin, settings);
     if (announce) {
-      const message = origin.reachable
-        ? `ADACEEN: la inferencia sale de ${origin.label}${origin.id ? ` (${origin.id})` : ''}.`
-        : `ADACEEN: no se pudo consultar el backend. ${origin.detail}`;
-      if (origin.reachable) {
+      const message = !origin.reachable
+        ? `ADACEEN: no se pudo consultar el backend. ${origin.detail}`
+        : origin.noWorker
+          ? `ADACEEN: GPU sin worker activo. ${origin.detail}`
+          : `ADACEEN: la inferencia sale de ${origin.label}${origin.id ? ` (${origin.id})` : ''}.`;
+      if (origin.reachable && !origin.noWorker) {
         void vscode.window.showInformationMessage(message);
       } else {
         void vscode.window.showWarningMessage(message);
@@ -4241,6 +4928,18 @@ export function activate(context: vscode.ExtensionContext) {
     value: WorkspaceProjectIndex | null;
   } | null = null;
   let workspaceProjectIndexInFlight: Promise<WorkspaceProjectIndex | null> | null = null;
+  // Cuanto estuvo a la vista cada sugerencia, para vscode_suggestion_ignored.
+  const suggestionExposure = new SuggestionExposureTracker<ActiveSuggestionModel>();
+  // Origen real de las peticiones (trigger): archivo recien abierto y bloqueo pendiente.
+  let lastActiveDocumentUri = vscode.window.activeTextEditor?.document.uri.toString() || '';
+  let pendingFileOpenUri = lastActiveDocumentUri;
+  let pendingBlocking: { uriString: string; key: string; text: string; detectedAt: number } | null = null;
+  let applyInProgress = false;
+  let lastKnownRepoFullName = '';
+
+  const recordIgnoredSuggestion = (model: ActiveSuggestionModel, durationMs: number, reason: 'replaced' | 'dismissed' | 'closed') => {
+    recordVscodeSuggestionMetric(telemetry, model, 'vscode_suggestion_ignored', reason, { reason }, { durationMs });
+  };
 
   const maybeOpenSelectionInlinePanel = (model: ActiveSuggestionModel | null) => {
     const settings = resolveActiveSuggestionSettings();
@@ -4305,6 +5004,15 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   const publishSuggestionModel = (model: ActiveSuggestionModel | null, enabled = true) => {
+    // Una sugerencia mostrada que se reemplaza por otra o desaparece sin
+    // aplicarse cuenta como ignorada (con el tiempo que estuvo a la vista).
+    const ignored = suggestionExposure.onPublish(
+      model ? { id: model.metricId, loading: !!model.loading, applied: !!model.applied } : null,
+      Date.now(),
+    );
+    if (ignored) {
+      recordIgnoredSuggestion(ignored.item, ignored.durationMs, model ? 'replaced' : 'dismissed');
+    }
     activeSuggestionModel = model;
     updateSuggestionStatusBar(suggestionStatusBar, model, enabled);
     quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
@@ -4337,6 +5045,7 @@ export function activate(context: vscode.ExtensionContext) {
     value = "",
     extra: Record<string, unknown> = {},
     once = false,
+    fields: SuggestionMetricFields = {},
   ) => {
     if (!model || model.loading) {
       return;
@@ -4348,7 +5057,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (once) {
       recordedSuggestionMetricKeys.add(key);
     }
-    void recordVscodeSuggestionMetric(resolveBackendSettings(), output, model, eventType, value, extra);
+    recordVscodeSuggestionMetric(telemetry, model, eventType, value, extra, fields);
   };
 
   const clearWorkspaceProjectIndexCache = () => {
@@ -4366,6 +5075,7 @@ export function activate(context: vscode.ExtensionContext) {
     snapshot: ActiveEditorSnapshot,
     projectIndex: WorkspaceProjectIndex | null,
     scope: BackendSuggestionRequestScope,
+    trigger: SuggestionTrigger,
   ) => {
     const projectKey = projectIndex?.cacheKey || 'sin-mapa';
     const backend = resolveBackendSettings();
@@ -4374,7 +5084,9 @@ export function activate(context: vscode.ExtensionContext) {
     if (scope === 'file_summary') {
       return `${sessionKey}:${snapshot.fileSummaryCacheKey}:${projectKey}`;
     }
-    return `${sessionKey}:${snapshot.cacheKey}:${projectKey}`;
+    // Un bloqueo siempre llega al backend (su pregunta y su politica son otras).
+    const triggerKey = trigger === 'blocking' ? ':blocking' : '';
+    return `${sessionKey}:${snapshot.cacheKey}:${projectKey}${triggerKey}`;
   };
 
   const getBackendSuggestionText = async (
@@ -4382,17 +5094,19 @@ export function activate(context: vscode.ExtensionContext) {
     snapshot: ActiveEditorSnapshot,
     projectIndex: WorkspaceProjectIndex | null,
     scope: BackendSuggestionRequestScope,
-  ) => {
-    const cacheKey = buildBackendSuggestionTextCacheKey(snapshot, projectIndex, scope);
+    requestContext: BackendSuggestionRequestContext,
+  ): Promise<BackendSuggestionResult> => {
+    const cacheKey = buildBackendSuggestionTextCacheKey(snapshot, projectIndex, scope, requestContext.trigger);
     const cached = backendSuggestionCache[scope].get(cacheKey);
     if (cached) {
-      return cached;
+      // Sale de la cache local: no hubo viaje al backend, asi que no hay latencia que medir.
+      return { ...cached, latencyMs: null };
     }
 
     const inFlightKey = `${scope}:${cacheKey}`;
     let inFlight = backendSuggestionInFlight.get(inFlightKey);
     if (!inFlight) {
-      const request = fetchBackendSuggestionText(settings, snapshot, projectIndex, scope);
+      const request = fetchBackendSuggestionText(settings, snapshot, projectIndex, scope, requestContext);
       inFlight = { key: cacheKey, request };
       backendSuggestionInFlight.set(inFlightKey, inFlight);
       request.then(
@@ -4444,11 +5158,51 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  const resolveBackendScopeForSnapshot = (reason: string, snapshot: ActiveEditorSnapshot): BackendSuggestionScope => {
+  const resolveBackendScopeForSnapshot = (
+    reason: string,
+    snapshot: ActiveEditorSnapshot,
+    trigger?: SuggestionTrigger,
+  ): BackendSuggestionScope => {
     if (hasActiveSelection(snapshot)) {
       return 'cursor';
     }
-    return reason === 'cursor-idle' ? 'cursor' : 'file';
+    return reason === 'cursor-idle' || trigger === 'blocking' ? 'cursor' : 'file';
+  };
+
+  /** Hay un bloqueo detectado en este archivo que todavia no recibio su sugerencia. */
+  const hasPendingBlocking = (uriString: string) => {
+    if (!pendingBlocking) {
+      return false;
+    }
+    if (Date.now() - pendingBlocking.detectedAt >= BLOCKING_TRIGGER_TTL_MS || !resolveTriggerSettings().suggestOnBlocking) {
+      pendingBlocking = null;
+      return false;
+    }
+    return pendingBlocking.uriString === uriString;
+  };
+
+  /**
+   * Origen real de la peticion (campo trigger de /suggest-tab). Las acciones
+   * explicitas del estudiante mandan; despues un bloqueo pendiente, la
+   * seleccion, el archivo recien abierto y por ultimo el cursor quieto.
+   */
+  const resolveSuggestionTrigger = (reason: string, snapshot: ActiveEditorSnapshot): SuggestionTrigger => {
+    if (reason === 'manual-refresh') {
+      return 'manual';
+    }
+    if (reason === 'open-panel') {
+      return 'panel';
+    }
+    if (reason === 'blocking' || hasPendingBlocking(snapshot.uriString)) {
+      return 'blocking';
+    }
+    if (hasActiveSelection(snapshot)) {
+      return 'selection';
+    }
+    if (pendingFileOpenUri && pendingFileOpenUri === snapshot.uriString) {
+      return 'file_open';
+    }
+    return 'cursor_idle';
   };
 
   const publishActiveRackSnapshot = (
@@ -4486,8 +5240,21 @@ export function activate(context: vscode.ExtensionContext) {
       return null;
     }
 
-    const backendScope = resolveBackendScopeForSnapshot(reason, snapshot);
+    if (snapshot.repoFullName) {
+      lastKnownRepoFullName = snapshot.repoFullName;
+    }
+    const trigger = resolveSuggestionTrigger(reason, snapshot);
+    if (pendingFileOpenUri === snapshot.uriString) {
+      // "file_open" solo describe la primera peticion tras abrir el archivo.
+      pendingFileOpenUri = '';
+    }
+    const requestContext: BackendSuggestionRequestContext = {
+      trigger,
+      clientSessionId: telemetry.clientSessionId,
+    };
+    const backendScope = resolveBackendScopeForSnapshot(reason, snapshot, trigger);
     const backendStartedAt = Date.now();
+    let backendLatencyMs: number | null = null;
     const fallbackDelayMs = Math.min(settings.backendTimeoutMs, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS);
     let model = buildLocalActiveSuggestion(snapshot);
     model = {
@@ -4495,6 +5262,7 @@ export function activate(context: vscode.ExtensionContext) {
       triggerKind: backendScope === 'cursor' ? 'cursor' : 'file',
       actionsVisible: false,
       loading: settings.useBackend,
+      trigger,
     };
     publishSuggestionModel(model, true);
     publishActiveRackSnapshot(snapshot, model, null, `${reason}:local`);
@@ -4514,6 +5282,7 @@ export function activate(context: vscode.ExtensionContext) {
         triggerKind: backendScope === 'cursor' ? 'cursor' : 'file',
         actionsVisible: false,
         loading: true,
+        trigger,
       };
       publishSuggestionModel(model, true);
       publishActiveRackSnapshot(snapshot, model, projectIndex, `${reason}:indexed-local`);
@@ -4525,7 +5294,7 @@ export function activate(context: vscode.ExtensionContext) {
         const fileSummaryRequest = selectedFocus
           ? null
           : withActiveSuggestionDeadline(
-            getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary'),
+            getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary', requestContext),
             fallbackDelayMs,
           );
         let focusResult: BackendSuggestionResult;
@@ -4534,7 +5303,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (backendScope === 'cursor') {
           const cursorRequest = withActiveSuggestionDeadline(
-            getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor'),
+            getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext),
             fallbackDelayMs,
           );
           const cursorSettled = await settleBackendSuggestionResult(cursorRequest);
@@ -4569,6 +5338,7 @@ export function activate(context: vscode.ExtensionContext) {
         } else {
           focusResult = await fileSummaryRequest!;
         }
+        backendLatencyMs = focusResult.latencyMs ?? fileSummaryResult.latencyMs;
 
         const backendModel = buildBackendActiveSuggestionModel(
           snapshot,
@@ -4577,6 +5347,7 @@ export function activate(context: vscode.ExtensionContext) {
           focusResult,
           fileSummaryResult,
           partialBackendError,
+          trigger,
         );
         if (backendModel) {
           model = backendModel;
@@ -4613,19 +5384,42 @@ export function activate(context: vscode.ExtensionContext) {
       && (activeSuggestionModel.selectionRangeKey
         ? activeSuggestionModel.selectionRangeKey === snapshot.selectionRangeKey
         : activeSuggestionModel.line === snapshot.line && activeSuggestionModel.column === snapshot.column);
-    const finalModel = keepVisibleActions ? { ...model, actionsVisible: true } : model;
+    const finalModel = keepVisibleActions && isSuggestionApplyOffered(model) ? { ...model, actionsVisible: true } : model;
+    const shownLatencyMs = Date.now() - backendStartedAt;
     publishSuggestionModel(finalModel, true);
+    if (!finalModel.blocked) {
+      // Un mensaje bloqueado no se puede aplicar: no cuenta para "ignorada".
+      suggestionExposure.markShown(finalModel.metricId, finalModel, Date.now());
+    }
     recordSuggestionMetric(finalModel, 'vscode_suggestion_shown', finalModel.applyMode, {
       reason,
       cacheNamespace: backendScope,
       projectIndexKey: projectIndex?.cacheKey || '',
-    }, true);
+      backendLatencyMs,
+      visibleErrorLine: snapshot.diagnostics.firstError?.line ?? null,
+    }, true, { latencyMs: shownLatencyMs });
+    if (finalModel.blocked) {
+      recordSuggestionMetric(
+        finalModel,
+        'vscode_suggestion_blocked_by_policy',
+        finalModel.policyApplied?.reasonCode || 'controlled_message',
+        { reason },
+        true,
+        { category: 'tutor' },
+      );
+    }
+    if (trigger === 'blocking' && finalModel.source === 'backend' && pendingBlocking?.uriString === finalModel.uriString) {
+      // El bloqueo ya recibio su sugerencia; las siguientes vuelven a su trigger normal.
+      pendingBlocking = null;
+    }
     publishActiveRackSnapshot(snapshot, finalModel, projectIndex, `${reason}:final`);
     if (backendScope === 'file' && settings.autoRevealPanel && autoRevealedSuggestionUri !== finalModel.uriString) {
       void quizView.reveal(true);
       autoRevealedSuggestionUri = finalModel.uriString;
     }
-    output.appendLine(`[Suggestions] ${finalModel.filePath} | scope=${backendScope} | fuente=${finalModel.source} | linea=${finalModel.line}`);
+    output.appendLine(
+      `[Suggestions] ${finalModel.filePath} | scope=${backendScope} | trigger=${trigger} | fuente=${finalModel.source} | linea=${finalModel.line}${finalModel.decisionId ? ` | decision=${finalModel.decisionId}` : ''}${finalModel.blocked ? ' | bloqueada por politica' : ''}`,
+    );
     return finalModel;
   };
 
@@ -4683,6 +5477,10 @@ export function activate(context: vscode.ExtensionContext) {
     if (!model || !isCursorIdleAnchorStillActive(anchor)) {
       return;
     }
+    if (!isSuggestionApplyOffered(model)) {
+      // Respuesta bloqueada o sin permiso para aplicar: no hay acciones que revelar.
+      return;
+    }
 
     const visibleModel = { ...model, actionsVisible: true, triggerKind: 'cursor' as const };
     publishSuggestionModel(visibleModel, true);
@@ -4697,6 +5495,11 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   const isAutoRefreshSuppressed = () => {
+    if (applyInProgress) {
+      // Mientras se consulta apply-check o se espera la confirmacion, la
+      // sugerencia que el estudiante eligio no debe cambiar por debajo.
+      return true;
+    }
     const editor = vscode.window.activeTextEditor;
     return !!editor
       && Date.now() < suppressSuggestionRefreshUntil
@@ -4783,7 +5586,13 @@ export function activate(context: vscode.ExtensionContext) {
     });
   };
 
-  const applySuggestionCompletion = async (modeOverride?: SuggestionApplyMode) => {
+  /**
+   * Aplica la sugerencia activa. Todos los caminos del editor pasan por aqui
+   * (ventana flotante, CodeLens "Aceptar ayuda", quick fix, inlay hint, hover,
+   * panel y paleta de comandos) y, antes de editar, por el guard de
+   * aplicacion (apply-check).
+   */
+  const applySuggestionCompletionNow = async (modeOverride: SuggestionApplyMode | undefined, origin: string) => {
     const model = activeSuggestionModel;
     const editor = model ? await resolveEditorForSuggestion(model) : undefined;
     if (!editor || !model || editor.document.uri.toString() !== model.uriString) {
@@ -4794,103 +5603,100 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage('ADACEEN: esta ayuda ya fue aplicada. Valida el cambio o actualiza la sugerencia.');
       return;
     }
+    if (model.blocked) {
+      vscode.window.showInformationMessage('ADACEEN: esta respuesta del tutor no trae código para aplicar.');
+      return;
+    }
 
-    const modelLineIndex = Math.max(
-      0,
-      Math.min(editor.document.lineCount - 1, (Number(model.line) || editor.selection.active.line + 1) - 1),
-    );
-    const targetLine = editor.document.lineAt(modelLineIndex);
-    const eol = getDocumentEol(editor.document);
     const mode = modeOverride || model.applyMode || 'insert';
     output.appendLine(
       `[Apply] ${model.fileName}: modo=${mode} (${modeOverride ? 'elegido' : 'recomendado'}) | `
       + `seleccion=${editor.selection.isEmpty ? 'no' : `${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`}`,
     );
-    if (mode === 'delete') {
-      const range = getSuggestionDeleteRange(editor, modelLineIndex);
-      const deletedText = editor.document.getText(range);
-      if (!deletedText.trim()) {
-        vscode.window.showInformationMessage('ADACEEN: no hay codigo seleccionado o linea con contenido para eliminar.');
-        return;
-      }
-
-      suppressAutoRefreshForActiveApply(model.uriString);
-      const appliedDelete = await editor.edit((editBuilder) => {
-        editBuilder.delete(range);
-      });
-      if (!appliedDelete) {
-        suppressSuggestionRefreshUntil = 0;
-        vscode.window.showWarningMessage('ADACEEN: no se pudo aplicar la eliminacion en el editor.');
-        return;
-      }
-
-      editor.selection = new vscode.Selection(range.start, range.start);
-      recordSuggestionMetric(model, 'suggestion_completion_applied', 'delete', {
-        appliedMode: 'delete',
-        deletedCharacters: deletedText.length,
-      });
-      publishSuggestionModel(buildAppliedSuggestionModel(model, 'delete', range.start), true);
-      notifyQuizOfAcceptedChange(model, 'delete', deletedText, '');
+    let plan = planSuggestionEdit(editor, model, mode);
+    if (!plan.ok) {
+      vscode.window.showInformationMessage(plan.message);
       return;
     }
 
-    const rawCompletion = model.completionText || buildCompletionFallbackForModel(model, targetLine.text);
-    const completionText = normalizeCompletionTextForEditor(rawCompletion, lineIndent(targetLine.text), eol);
-    if (!completionText.trim()) {
-      vscode.window.showInformationMessage('ADACEEN: la sugerencia no trae codigo aplicable.');
+    const versionBeforeCheck = editor.document.version;
+    const verdict = await guardCodeApplication({
+      decisionId: model.decisionId,
+      filePath: model.filePath,
+      language: model.language,
+      applyMode: mode,
+      originalText: plan.removedText,
+      newText: plan.proposedText,
+      trigger: model.trigger,
+      origin,
+      fileLabel: model.fileName,
+      repoFullName: model.repoFullName,
+    }, codeApplicationGuardDeps);
+    if (!verdict.allowed) {
       return;
     }
+    if (editor.document.version !== versionBeforeCheck) {
+      // El archivo cambio mientras se consultaba o confirmaba: se recalcula sobre el texto actual.
+      plan = planSuggestionEdit(editor, model, mode);
+      if (!plan.ok) {
+        vscode.window.showInformationMessage(plan.message);
+        return;
+      }
+    }
 
-    let editStart: vscode.Position;
-    let insertedText = completionText;
-    // Lo que habia antes (o la linea de contexto al insertar), para el quiz.
-    let originalCode = '';
+    const readyPlan = plan;
     suppressAutoRefreshForActiveApply(model.uriString);
     const applied = await editor.edit((editBuilder) => {
-      if (mode === 'replace') {
-        const range = editor.selection.isEmpty
-          ? new vscode.Range(new vscode.Position(modelLineIndex, 0), targetLine.range.end)
-          : getSelectedFullLineRange(editor);
-        editStart = range.start;
-        originalCode = editor.document.getText(range);
-        editBuilder.replace(range, completionText);
-        return;
+      if (readyPlan.operation === 'delete') {
+        editBuilder.delete(readyPlan.range);
+      } else if (readyPlan.operation === 'insert') {
+        editBuilder.insert(readyPlan.range.start, readyPlan.text);
+      } else {
+        editBuilder.replace(readyPlan.range, readyPlan.text);
       }
-
-      const insertLineIndex = editor.selection.isEmpty
-        ? modelLineIndex
-        : Math.min(editor.document.lineCount - 1, getSelectedFullLineRange(editor).end.line);
-      const insertLine = editor.document.lineAt(insertLineIndex);
-      originalCode = editor.selection.isEmpty
-        ? insertLine.text
-        : editor.document.getText(getSelectedFullLineRange(editor));
-      if (editor.selection.isEmpty && !insertLine.text.trim()) {
-        const range = new vscode.Range(new vscode.Position(insertLineIndex, 0), insertLine.range.end);
-        editStart = range.start;
-        editBuilder.replace(range, completionText);
-        return;
-      }
-
-      editStart = insertLine.range.end;
-      insertedText = `${eol}${completionText}`;
-      editBuilder.insert(editStart, insertedText);
     });
-
     if (!applied) {
       suppressSuggestionRefreshUntil = 0;
-      vscode.window.showWarningMessage('ADACEEN: no se pudo aplicar la sugerencia en el editor.');
+      vscode.window.showWarningMessage(mode === 'delete'
+        ? 'ADACEEN: no se pudo aplicar la eliminacion en el editor.'
+        : 'ADACEEN: no se pudo aplicar la sugerencia en el editor.');
       return;
     }
 
-    const finalOffset = editor.document.offsetAt(editStart!) + insertedText.length;
-    const finalPosition = editor.document.positionAt(finalOffset);
+    const finalPosition = readyPlan.operation === 'delete'
+      ? readyPlan.range.start
+      : editor.document.positionAt(editor.document.offsetAt(readyPlan.range.start) + readyPlan.text.length);
     editor.selection = new vscode.Selection(finalPosition, finalPosition);
+    const shownAt = suggestionExposure.shownAt(model.metricId);
     recordSuggestionMetric(model, 'suggestion_completion_applied', mode, {
       appliedMode: mode,
-      insertedCharacters: insertedText.length,
+      ...(mode === 'delete'
+        ? { deletedCharacters: readyPlan.removedText.length }
+        : { insertedCharacters: readyPlan.text.length }),
+      linesChanged: verdict.linesChanged,
+      charsChanged: verdict.charsChanged,
+      origin,
+      applyCheck: verdict.offline ? 'offline' : 'server',
+      confirmedByStudent: verdict.confirmed,
+    }, false, {
+      decisionId: verdict.decisionId || model.decisionId,
+      durationMs: shownAt === null ? null : Date.now() - shownAt,
     });
     publishSuggestionModel(buildAppliedSuggestionModel(model, mode, finalPosition), true);
-    notifyQuizOfAcceptedChange(model, mode, originalCode, completionText);
+    notifyQuizOfAcceptedChange(model, mode, readyPlan.quizOriginalCode, mode === 'delete' ? '' : readyPlan.proposedText);
+  };
+
+  const applySuggestionCompletion = async (modeOverride?: SuggestionApplyMode, origin = 'command') => {
+    if (applyInProgress) {
+      // Doble clic mientras se consulta apply-check o se espera la confirmacion.
+      return;
+    }
+    applyInProgress = true;
+    try {
+      await applySuggestionCompletionNow(modeOverride, origin);
+    } finally {
+      applyInProgress = false;
+    }
   };
 
   // Botones de la ventana flotante. Reciben el hilo de comentarios como
@@ -4898,10 +5704,18 @@ export function activate(context: vscode.ExtensionContext) {
   // va sobre la sugerencia activa.
   const selectionWidgetDisposables = [
     selectionWidget,
-    vscode.commands.registerCommand('adaceen.selectionWidget.insert', () => applySuggestionCompletion('insert')),
-    vscode.commands.registerCommand('adaceen.selectionWidget.replace', () => applySuggestionCompletion('replace')),
-    vscode.commands.registerCommand('adaceen.selectionWidget.delete', () => applySuggestionCompletion('delete')),
-    vscode.commands.registerCommand('adaceen.selectionWidget.close', () => selectionWidget.hide()),
+    vscode.commands.registerCommand('adaceen.selectionWidget.insert', () => applySuggestionCompletion('insert', SELECTION_WIDGET_ORIGIN)),
+    vscode.commands.registerCommand('adaceen.selectionWidget.replace', () => applySuggestionCompletion('replace', SELECTION_WIDGET_ORIGIN)),
+    vscode.commands.registerCommand('adaceen.selectionWidget.delete', () => applySuggestionCompletion('delete', SELECTION_WIDGET_ORIGIN)),
+    vscode.commands.registerCommand('adaceen.selectionWidget.close', () => {
+      // Cerrar la ventana sin aplicar cuenta como sugerencia descartada.
+      const model = activeSuggestionModel;
+      const dismissed = model ? suggestionExposure.dismiss(model.metricId, Date.now()) : null;
+      if (dismissed) {
+        recordIgnoredSuggestion(dismissed.item, dismissed.durationMs, 'closed');
+      }
+      selectionWidget.hide();
+    }),
   ];
   context.subscriptions.push(...selectionWidgetDisposables);
 
@@ -4982,10 +5796,12 @@ export function activate(context: vscode.ExtensionContext) {
 
   const applySuggestionCompletionDisposable = vscode.commands.registerCommand(
     'adaceen.applySuggestionCompletion',
-    async (mode?: string) => {
+    async (mode?: string, origin?: unknown) => {
       const normalizedMode: SuggestionApplyMode | undefined =
         mode === 'insert' || mode === 'replace' || mode === 'delete' ? mode : undefined;
-      await applySuggestionCompletion(normalizedMode);
+      // origin lo ponen la ventana flotante, el CodeLens, el quick fix... (solo para metricas).
+      const normalizedOrigin = typeof origin === 'string' && /^[a-z_]{1,40}$/.test(origin) ? origin : 'command';
+      await applySuggestionCompletion(normalizedMode, normalizedOrigin);
     },
   );
 
@@ -5063,7 +5879,7 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    await processNextCodeActionForRepo(resolveBackendSettings(), repoFullName, output, true);
+    await processNextCodeActionForRepo(resolveBackendSettings(), repoFullName, output, codeApplicationGuardDeps, true);
   });
 
   const scanWorkspaceDisposable = vscode.commands.registerCommand(
@@ -5092,6 +5908,113 @@ export function activate(context: vscode.ExtensionContext) {
       );
     },
   );
+
+  // --- Senales de error y bloqueo (A6.2): activacion por eventos definidos ---
+  const errorSignalSettingsFromConfig = () => ({ blockingMs: resolveTriggerSettings().blockingSeconds * 1000 });
+  const errorSignalTracker = new ErrorSignalTracker(errorSignalSettingsFromConfig());
+  const lastEditAtByUri = new Map<string, number>();
+  let errorSignalTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearErrorSignalTimer = () => {
+    if (errorSignalTimer) {
+      clearTimeout(errorSignalTimer);
+      errorSignalTimer = null;
+    }
+  };
+
+  const rememberEdit = (uriString: string) => {
+    lastEditAtByUri.delete(uriString);
+    lastEditAtByUri.set(uriString, Date.now());
+    while (lastEditAtByUri.size > 50) {
+      lastEditAtByUri.delete(lastEditAtByUri.keys().next().value as string);
+    }
+  };
+
+  const recordErrorSignal = (signal: ErrorSignal, document: vscode.TextDocument, errorCount: number) => {
+    const filePath = vscode.workspace.asRelativePath(document.uri, false).replace(/\\/g, '/');
+    const base: TelemetryEventInput = {
+      source: 'vscode_extension',
+      category: 'signal',
+      eventType: signal.type,
+      pageContext: editorPageContext(),
+      repoFullName: lastKnownRepoFullName || undefined,
+      branch: detectBranchName(),
+      filePath,
+      language: inferActiveLanguage(filePath, document.languageId),
+      // El backend lo convierte en errorHash y no guarda el texto.
+      errorText: signal.text.slice(0, ERROR_TEXT_MAX_CHARS),
+    };
+    if (signal.type === 'compile_error_detected') {
+      telemetry.track({ ...base, metadata: { line: signal.line, errorCount } });
+      return;
+    }
+    telemetry.track({
+      ...base,
+      durationMs: signal.durationMs,
+      count: signal.count,
+      metadata: {
+        line: signal.line,
+        reason: signal.reason,
+        blockingSeconds: resolveTriggerSettings().blockingSeconds,
+        errorCount,
+      },
+    });
+  };
+
+  /** Pide una sugerencia con trigger "blocking" (si adaceen.triggers.suggestOnBlocking lo permite). */
+  const requestBlockingSuggestion = (signal: BlockingSignal, document: vscode.TextDocument) => {
+    if (!resolveTriggerSettings().suggestOnBlocking || !resolveActiveSuggestionSettings().enabled) {
+      return;
+    }
+    // Las peticiones siguientes de este archivo salen con trigger "blocking" hasta que una responda.
+    pendingBlocking = { uriString: document.uri.toString(), key: signal.key, text: signal.text, detectedAt: Date.now() };
+    if (isAutoRefreshSuppressed()) {
+      return;
+    }
+    if (cursorIdleSuggestionTimer) {
+      clearTimeout(cursorIdleSuggestionTimer);
+      cursorIdleSuggestionTimer = null;
+    }
+    void refreshActiveSuggestion('blocking');
+  };
+
+  /** Relee los errores del archivo activo y emite compile_error_detected / blocking_detected. */
+  const evaluateErrorSignals = () => {
+    clearErrorSignalTimer();
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || !isSupportedActiveDocument(editor.document)) {
+      return;
+    }
+    const document = editor.document;
+    const uriString = document.uri.toString();
+    const summary = collectDocumentDiagnostics(document.uri);
+    const now = Date.now();
+    const lastEditAt = lastEditAtByUri.get(uriString) ?? Number.NEGATIVE_INFINITY;
+    const signals = errorSignalTracker.observe(uriString, summary.errors, now, lastEditAt);
+    if (pendingBlocking?.uriString === uriString && !errorSignalTracker.isPresent(pendingBlocking.key)) {
+      // El error que causo el bloqueo ya se corrigio.
+      pendingBlocking = null;
+    }
+    let firstBlocking: BlockingSignal | null = null;
+    for (const signal of signals) {
+      recordErrorSignal(signal, document, summary.errors.length);
+      if (signal.type === 'blocking_detected') {
+        output.appendLine(
+          `[Signals] Bloqueo en ${vscode.workspace.asRelativePath(document.uri, false)}:${signal.line} (${signal.reason === 'persistent' ? `${Math.round(signal.durationMs / 1000)} s con el mismo error` : `${signal.count} apariciones en 10 min`}): ${truncateInline(signal.text, 140)}`,
+        );
+        firstBlocking = firstBlocking || signal;
+      }
+    }
+    if (firstBlocking) {
+      // Una sola peticion aunque en la misma lectura se bloqueen varios errores.
+      requestBlockingSuggestion(firstBlocking, document);
+    }
+    // Los diagnosticos pueden no cambiar mas: se vuelve a mirar cuando venza el siguiente plazo.
+    const deadline = errorSignalTracker.nextDeadline(now, lastEditAt);
+    if (deadline !== null) {
+      errorSignalTimer = setTimeout(evaluateErrorSignals, Math.min(10 * 60_000, Math.max(250, deadline - now + 50)));
+    }
+  };
 
   const textDocumentSelector: vscode.DocumentSelector = [
     { scheme: 'file' },
@@ -5131,9 +6054,16 @@ export function activate(context: vscode.ExtensionContext) {
       if (editor.document.uri.toString() !== selectionWidget.uriString) {
         selectionWidget.hide();
       }
+      const activeUri = editor.document.uri.toString();
+      if (activeUri !== lastActiveDocumentUri) {
+        // La primera peticion de este archivo sale con trigger "file_open".
+        lastActiveDocumentUri = activeUri;
+        pendingFileOpenUri = activeUri;
+      }
       suggestionInlayHintProvider.update(activeSuggestionModel);
       applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
       scheduleCursorIdleSuggestionRefresh();
+      evaluateErrorSignals();
     }),
     vscode.window.onDidChangeTextEditorSelection((event) => {
       selectionWidget.onSelectionChanged(event.textEditor);
@@ -5145,9 +6075,18 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (vscode.window.activeTextEditor?.document.uri.toString() === event.document.uri.toString()) {
+        if (event.contentChanges.length > 0) {
+          rememberEdit(event.document.uri.toString());
+        }
         suggestionInlayHintProvider.update(activeSuggestionModel);
         applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
         scheduleCursorIdleSuggestionRefresh();
+      }
+    }),
+    vscode.languages.onDidChangeDiagnostics((event) => {
+      const activeUri = vscode.window.activeTextEditor?.document.uri.toString();
+      if (activeUri && event.uris.some((uri) => uri.toString() === activeUri)) {
+        evaluateErrorSignals();
       }
     }),
     vscode.workspace.onDidSaveTextDocument(() => {
@@ -5167,6 +6106,10 @@ export function activate(context: vscode.ExtensionContext) {
         clearWorkspaceProjectIndexCache();
         scheduleCursorIdleSuggestionRefresh();
       }
+      if (event.affectsConfiguration('adaceen.triggers')) {
+        errorSignalTracker.updateSettings(errorSignalSettingsFromConfig());
+        evaluateErrorSignals();
+      }
     }),
     {
       dispose: () => {
@@ -5175,6 +6118,7 @@ export function activate(context: vscode.ExtensionContext) {
           suggestionTimer = null;
         }
         clearCursorSuggestionTimers();
+        clearErrorSignalTimer();
         if (selectionInlinePanelTimer) {
           clearTimeout(selectionInlinePanelTimer);
           selectionInlinePanelTimer = null;
@@ -5229,7 +6173,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
       missingRepoPollCount = 0;
 
-      const processedCodeAction = await processNextCodeActionForRepo(settings, repoFullName, output, false);
+      const processedCodeAction = await processNextCodeActionForRepo(settings, repoFullName, output, codeApplicationGuardDeps, false);
       if (processedCodeAction) {
         idlePollCount = 0;
         return;
@@ -5304,6 +6248,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   scheduleCursorIdleSuggestionRefresh();
+  evaluateErrorSignals();
   void runWorkerCycle();
 }
 

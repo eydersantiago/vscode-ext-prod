@@ -40,7 +40,17 @@ La extension expone estas opciones:
 - `adaceen.backend.baseUrl`: URL base del backend ADACEEN
 - `adaceen.backend.sessionId`: sesion compartida con el overlay del navegador
 - `adaceen.backend.codeActionsEnabled`: consulta reemplazos enviados desde el navegador
-- `adaceen.backend.autoApplyCodeActions`: aplica reemplazos sin confirmacion
+- `adaceen.backend.autoApplyCodeActions`: aplica reemplazos sin confirmacion (salvo que la politica del docente pida confirmar)
+- `adaceen.triggers.blockingSeconds`: segundos que el mismo error debe seguir presente para considerar un bloqueo (defecto 90; tambien cuenta que aparezca 3 veces en 10 minutos)
+- `adaceen.triggers.suggestOnBlocking`: al detectar un bloqueo, pide una sugerencia con `trigger: "blocking"` (defecto `true`)
+- `adaceen.codeApplication.offlineMaxLines`: si no se puede consultar `apply-check`, solo se aplican cambios de hasta estas lineas (defecto 12)
+
+## Tutor: bloqueo y aplicacion de codigo
+
+- Todas las llamadas al backend llevan `x-adaceen-client-id` (id persistente de esta instalacion) y `x-session-id` cuando hay sesion compartida, asi que las metricas funcionan tambien sin sesion.
+- Con errores en el archivo activo se registran `compile_error_detected` y, si el estudiante se queda atascado, `blocking_detected`. El texto del error solo viaja para que el backend calcule su hash; no se guarda.
+- Antes de aplicar cualquier cambio del tutor se consulta `POST /api/suggestions/apply-check`: si la politica del docente no lo permite, no se aplica y se muestra el motivo.
+- Pruebas unitarias (sin descargar VS Code): `npm run test:unit`.
 
 ## Sincronizacion con navegador
 

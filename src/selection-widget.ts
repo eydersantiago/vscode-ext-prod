@@ -41,10 +41,25 @@ export type SelectionWidgetModel = {
   ragCourseCode: string;
   loading: boolean;
   applied: boolean;
+  /**
+   * La politica del docente bloqueo la respuesta: se muestra tutorMessage
+   * (Markdown del backend) y no se ofrece aplicar codigo.
+   */
+  blocked?: boolean;
+  tutorMessage?: string;
+  /** false cuando el backend dice que no se puede aplicar codigo aqui (code_application.allowed). */
+  applyAllowed?: boolean;
+  /** Nota discreta bajo las acciones, p. ej. "Te quedan 3 aplicaciones en este archivo". */
+  applicationNote?: string;
 };
 
 export const SELECTION_WIDGET_CONTROLLER_ID = 'adaceen.selection';
+/** Hilo con acciones de aplicar (los botones del titulo dependen de este valor en package.json). */
 const THREAD_CONTEXT = 'adaceen-suggestion';
+/** Hilo solo de lectura: respuesta bloqueada o aplicacion no permitida. */
+const THREAD_CONTEXT_READONLY = 'adaceen-suggestion-readonly';
+/** Origen que se registra en las metricas al aplicar desde la ventana flotante. */
+export const SELECTION_WIDGET_ORIGIN = 'selection_widget';
 
 const MODE_LABEL: Record<SelectionWidgetMode, string> = {
   insert: 'Insertar debajo',
@@ -64,6 +79,23 @@ function commandUri(command: string, args: unknown[] = []) {
 
 function escapeMarkdown(text: string) {
   return text.replace(/([\\`*_{}[\]()#+\-!|<>])/g, '\\$1');
+}
+
+/**
+ * El Markdown que llega del backend se pinta en un MarkdownString con
+ * comandos habilitados: se desactivan los enlaces command: que pudiera traer
+ * para que un texto del servidor nunca pueda disparar "aplicar" ni otro comando.
+ */
+export function sanitizeTutorMarkdown(text: string) {
+  return String(text || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/command:/gi, 'command​:')
+    .trim();
+}
+
+/** La ventana ofrece Insertar / Modificar / Eliminar para este modelo. */
+export function selectionWidgetOffersApply(model: SelectionWidgetModel) {
+  return !model.blocked && model.applyAllowed !== false;
 }
 
 function safeFence(code: string) {
@@ -101,16 +133,31 @@ export function buildSelectionWidgetMarkdown(model: SelectionWidgetModel) {
   const rango = model.startLine === model.endLine
     ? `linea ${model.startLine}`
     : `lineas ${model.startLine}-${model.endLine}`;
-  lines.push(`**Sugerencia para la seleccion** (${rango}) · ${sourceLabel(model)}`);
+  const title = model.blocked && !model.loading ? 'Mensaje del tutor' : 'Sugerencia para la seleccion';
+  lines.push(`**${title}** (${rango}) · ${sourceLabel(model)}`);
   lines.push('');
 
-  if (model.headline) {
+  if (model.headline && !model.blocked) {
     lines.push(escapeMarkdown(model.headline));
     lines.push('');
   }
 
   if (model.loading) {
     lines.push('_Cuando llegue la respuesta aparecen aqui el codigo y las acciones._');
+    md.appendMarkdown(lines.join('\n'));
+    return md;
+  }
+
+  const secondaryActions = [
+    `[$(list-flat) Ver panel](${commandUri('adaceen.openAssistant')})`,
+    `[$(refresh) Otra sugerencia](${commandUri('adaceen.refreshSuggestions')})`,
+  ];
+
+  if (model.blocked) {
+    // Mensaje controlado del tutor (ya viene en Markdown) y ninguna accion de aplicar.
+    lines.push(sanitizeTutorMarkdown(model.tutorMessage || '') || '_El tutor no propone codigo para este bloque._');
+    lines.push('');
+    lines.push(secondaryActions.join(' · '));
     md.appendMarkdown(lines.join('\n'));
     return md;
   }
@@ -126,16 +173,26 @@ export function buildSelectionWidgetMarkdown(model: SelectionWidgetModel) {
     lines.push('');
   }
 
+  if (!selectionWidgetOffersApply(model)) {
+    // El docente no permite aplicar codigo aqui: el codigo queda como guia.
+    lines.push(secondaryActions.join(' · '));
+    lines.push('');
+    lines.push(`_${escapeMarkdown(model.applicationNote || 'Usa el codigo como guia y escribelo tu.')}_`);
+    md.appendMarkdown(lines.join('\n'));
+    return md;
+  }
+
   const actions = (['insert', 'replace', 'delete'] as SelectionWidgetMode[]).map((mode) => {
     const label = `${MODE_ICON[mode]} ${MODE_LABEL[mode]}`;
-    const link = `[${label}](${commandUri('adaceen.applySuggestionCompletion', [mode])})`;
+    const link = `[${label}](${commandUri('adaceen.applySuggestionCompletion', [mode, SELECTION_WIDGET_ORIGIN])})`;
     return mode === model.recommendedMode ? `**${link}** (recomendada)` : link;
   });
-  actions.push(`[$(list-flat) Ver panel](${commandUri('adaceen.openAssistant')})`);
-  actions.push(`[$(refresh) Otra sugerencia](${commandUri('adaceen.refreshSuggestions')})`);
+  actions.push(...secondaryActions);
   lines.push(actions.join(' · '));
   lines.push('');
-  lines.push('_Todo se puede deshacer con Ctrl+Z._');
+  lines.push(model.applicationNote
+    ? `_Todo se puede deshacer con Ctrl+Z. ${escapeMarkdown(model.applicationNote)}_`
+    : '_Todo se puede deshacer con Ctrl+Z._');
 
   md.appendMarkdown(lines.join('\n'));
   return md;
@@ -185,10 +242,18 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       model.recommendedMode,
       model.headline,
       model.completionText,
+      model.blocked ? 'blocked' : 'open',
+      model.tutorMessage || '',
+      model.applyAllowed === false ? 'readonly' : 'apply',
+      model.applicationNote || '',
     ].join('\u0000');
     if (key === this.currentKey && this.thread) {
       return;
     }
+    const contextValue = model.loading || selectionWidgetOffersApply(model) ? THREAD_CONTEXT : THREAD_CONTEXT_READONLY;
+    const threadLabel = model.loading
+      ? 'ADACEEN · cargando'
+      : model.blocked ? 'ADACEEN · tutor' : 'ADACEEN · sugerencia';
 
     let uri: vscode.Uri;
     try {
@@ -206,8 +271,12 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       author: { name: 'ADACEEN' },
       body: buildSelectionWidgetMarkdown(model),
       mode: vscode.CommentMode.Preview,
-      contextValue: THREAD_CONTEXT,
-      label: model.loading ? 'cargando' : MODE_LABEL[model.recommendedMode].toLowerCase(),
+      contextValue,
+      label: model.loading
+        ? 'cargando'
+        : model.blocked
+          ? 'mensaje del tutor'
+          : selectionWidgetOffersApply(model) ? MODE_LABEL[model.recommendedMode].toLowerCase() : 'solo guia',
     };
 
     const sameAnchor = this.thread
@@ -218,14 +287,15 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
     if (sameAnchor && this.thread) {
       // Mismo sitio, contenido nuevo: se actualiza en el sitio para no cerrar y abrir.
       this.thread.comments = [comment];
-      this.thread.label = model.loading ? 'ADACEEN · cargando' : 'ADACEEN · sugerencia';
+      this.thread.label = threadLabel;
+      this.thread.contextValue = contextValue;
     } else {
       this.hide();
       const thread = this.controller.createCommentThread(uri, range, [comment]);
       thread.canReply = false;
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
-      thread.label = model.loading ? 'ADACEEN · cargando' : 'ADACEEN · sugerencia';
-      thread.contextValue = THREAD_CONTEXT;
+      thread.label = threadLabel;
+      thread.contextValue = contextValue;
       this.thread = thread;
     }
     this.currentKey = key;

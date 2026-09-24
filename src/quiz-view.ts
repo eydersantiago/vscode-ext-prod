@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { CLIENT_ID_HEADER, getOrCreateClientId } from './client-identity';
 
 /**
  * Panel "Quiz y seguimiento".
@@ -76,7 +77,6 @@ type QuizViewOptions = {
   openAllHistory: () => void;
 };
 
-const CLIENT_ID_KEY = 'adaceen.quiz.clientId';
 const ACCEPT_COUNT_KEY = 'adaceen.quiz.acceptCount';
 const PENDING_POLL_MS = 30000;
 const GENERATE_TIMEOUT_MS = 150000;
@@ -254,13 +254,9 @@ export class AdaceenQuizViewProvider implements vscode.WebviewViewProvider, vsco
     this.setState({ phase: 'error', message: `${message} ${detail}`.trim(), busy: false });
   }
 
+  /** Mismo id persistente que usan el resto de llamadas (client-identity.ts). */
   private clientId() {
-    let id = this.options.memento.get<string>(CLIENT_ID_KEY) || '';
-    if (!/^[a-z0-9]{8,80}$/.test(id)) {
-      id = `vsc${randomId(24)}`;
-      void this.options.memento.update(CLIENT_ID_KEY, id);
-    }
-    return id;
+    return getOrCreateClientId(this.options.memento);
   }
 
   private async request(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -275,7 +271,7 @@ export class AdaceenQuizViewProvider implements vscode.WebviewViewProvider, vsco
         method,
         headers: {
           ...context.headers,
-          'x-adaceen-client-id': this.clientId(),
+          [CLIENT_ID_HEADER]: this.clientId(),
           ...(body ? { 'Content-Type': 'application/json' } : {}),
         },
         body: body ? JSON.stringify(body) : undefined,
