@@ -2365,7 +2365,10 @@ function normalizeActionProbe(value: string) {
   return value
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
+    .replace(/[\u0300-\u036f]/g, '')
+    // "insert_after_line" -> "insert after line": sin esto \b no separa
+    // "insert" de "_after" y la accion se aplicaba como reemplazo.
+    .replace(/[_-]+/g, ' ');
 }
 
 function actionModeFromText(value: string): SuggestionApplyMode | '' {
@@ -2615,7 +2618,11 @@ async function applyPendingCodeAction(
     }
 
     if (applyMode === 'insert') {
-      const line = document.lineAt(range.end.line);
+      const selectionEndLine = Number(action.metadata.selectionEndLine) || 0;
+      const anchorLine = selectionEndLine > 0
+        ? Math.min(document.lineCount - 1, selectionEndLine - 1)
+        : range.end.line;
+      const line = document.lineAt(anchorLine);
       const insertPosition = line.range.end;
       const prefix = line.text.trim() ? eol : '';
       const insertedText = `${prefix}${action.replacementText}`;
@@ -4795,6 +4802,10 @@ export function activate(context: vscode.ExtensionContext) {
     const targetLine = editor.document.lineAt(modelLineIndex);
     const eol = getDocumentEol(editor.document);
     const mode = modeOverride || model.applyMode || 'insert';
+    output.appendLine(
+      `[Apply] ${model.fileName}: modo=${mode} (${modeOverride ? 'elegido' : 'recomendado'}) | `
+      + `seleccion=${editor.selection.isEmpty ? 'no' : `${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`}`,
+    );
     if (mode === 'delete') {
       const range = getSuggestionDeleteRange(editor, modelLineIndex);
       const deletedText = editor.document.getText(range);
