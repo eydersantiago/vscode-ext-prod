@@ -9,7 +9,9 @@ import {
   generateClientId,
   getOrCreateClientId,
   isValidClientId,
+  rejectedSessionId,
   SESSION_ID_HEADER,
+  SESSION_STATUS_HEADER,
 } from '../client-identity';
 
 function memoryStore(initial: Record<string, unknown> = {}) {
@@ -66,5 +68,17 @@ describe('client-identity', () => {
       [SESSION_ID_HEADER]: 'sesion-1',
     });
     assert.deepEqual(buildIdentityHeaders('sesion-1', 'mal id'), { [SESSION_ID_HEADER]: 'sesion-1' });
+  });
+
+  it('rejectedSessionId: la sesion enviada solo si la respuesta dice invalid', () => {
+    const sent = { 'X-Session-Id': ' sesion-1 ', [CLIENT_ID_HEADER]: 'vscabcdefgh123' };
+    const invalid = { get: (name: string) => (name === SESSION_STATUS_HEADER ? 'Invalid' : null) };
+    assert.equal(rejectedSessionId(sent, invalid), 'sesion-1');
+    assert.equal(rejectedSessionId(sent, { [SESSION_STATUS_HEADER]: 'invalid' }), 'sesion-1');
+    assert.equal(rejectedSessionId(sent, { get: () => null }), '');
+    assert.equal(rejectedSessionId(sent, { get: () => 'valid' }), '');
+    assert.equal(rejectedSessionId({ [CLIENT_ID_HEADER]: 'vscabcdefgh123' }, invalid), '');
+    assert.equal(rejectedSessionId(sent, undefined), '');
+    assert.equal(rejectedSessionId(sent, { get: () => { throw new Error('cabeceras rotas'); } }), '');
   });
 });

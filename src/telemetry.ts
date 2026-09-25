@@ -1,4 +1,4 @@
-import { buildIdentityHeaders, CLIENT_ID_HEADER, randomToken, SESSION_ID_HEADER } from './client-identity';
+import { buildIdentityHeaders, CLIENT_ID_HEADER, randomToken, rejectedSessionId, SESSION_ID_HEADER } from './client-identity';
 
 /**
  * Telemetria v1.1 hacia POST /api/behavior/events.
@@ -249,7 +249,7 @@ type FetchLike = (url: string, init: {
   headers: Record<string, string>;
   body: string;
   signal?: AbortSignal;
-}) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+}) => Promise<{ ok: boolean; status: number; text(): Promise<string>; headers?: { get(name: string): string | null } }>;
 
 export type TelemetryClientOptions = {
   getEndpoint: () => TelemetryEndpoint | null;
@@ -259,6 +259,8 @@ export type TelemetryClientOptions = {
    */
   baseMetadata?: () => Record<string, unknown>;
   log?: (line: string) => void;
+  /** El backend respondio x-adaceen-session: invalid a esta sesion (src/editor-session.ts). */
+  onSessionInvalid?: (sessionId: string) => void;
   fetchImpl?: FetchLike;
   /** Espera para juntar eventos casi simultaneos en un solo POST. */
   flushDelayMs?: number;
@@ -280,7 +282,7 @@ export class TelemetryClient {
   private pending: TelemetryEventPayload[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private consecutiveFailures = 0;
-  private readonly options: Required<Omit<TelemetryClientOptions, 'log' | 'fetchImpl' | 'random' | 'baseMetadata'>> & TelemetryClientOptions;
+  private readonly options: Required<Omit<TelemetryClientOptions, 'log' | 'fetchImpl' | 'random' | 'baseMetadata' | 'onSessionInvalid'>> & TelemetryClientOptions;
 
   constructor(options: TelemetryClientOptions) {
     this.options = {
@@ -382,6 +384,14 @@ export class TelemetryClient {
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
       const response = await fetchImpl(url, { method: 'POST', headers, body, signal: controller.signal });
+      const rejected = rejectedSessionId(headers, response.headers);
+      if (rejected) {
+        try {
+          this.options.onSessionInvalid?.(rejected);
+        } catch {
+          // Quien escucha no debe romper el envio.
+        }
+      }
       const text = await response.text().catch(() => '');
       if (response.ok) {
         return { ok: true, status: response.status, networkError: false, error: '' };

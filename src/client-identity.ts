@@ -18,6 +18,11 @@
 export const CLIENT_ID_STORAGE_KEY = 'adaceen.quiz.clientId';
 export const CLIENT_ID_HEADER = 'x-adaceen-client-id';
 export const SESSION_ID_HEADER = 'x-session-id';
+/**
+ * Con la que el backend avisa que el x-session-id enviado es invalido, esta
+ * inactivo o vencio (valor "invalid"). Contrato: docs/arquitectura/acceso-simplificado.md.
+ */
+export const SESSION_STATUS_HEADER = 'x-adaceen-session';
 /** Mismo patron que valida el backend. */
 export const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,80}$/;
 
@@ -90,4 +95,37 @@ export function buildIdentityHeaders(sessionId = '', clientId: string = activeCl
     headers[SESSION_ID_HEADER] = cleanSession;
   }
   return headers;
+}
+
+type HeaderSource = { get(name: string): string | null } | Record<string, unknown> | null | undefined;
+
+function readHeader(headers: HeaderSource, name: string): string {
+  if (!headers) {
+    return '';
+  }
+  try {
+    if (typeof (headers as { get?: unknown }).get === 'function') {
+      return String((headers as { get(name: string): string | null }).get(name) ?? '').trim();
+    }
+    const wanted = name.toLowerCase();
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === wanted && typeof value === 'string') {
+        return value.trim();
+      }
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+/**
+ * Si la respuesta trae x-adaceen-session: invalid, devuelve el x-session-id
+ * que se envio en la peticion (para olvidarlo); si no, ''.
+ */
+export function rejectedSessionId(sentHeaders: HeaderSource, responseHeaders: HeaderSource): string {
+  if (readHeader(responseHeaders, SESSION_STATUS_HEADER).toLowerCase() !== 'invalid') {
+    return '';
+  }
+  return readHeader(sentHeaders, SESSION_ID_HEADER);
 }

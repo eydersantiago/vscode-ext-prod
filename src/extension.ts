@@ -6,7 +6,9 @@ import {
   sanitizeTutorMarkdown,
 } from './selection-widget';
 import { AdaceenQuizViewProvider, QuizHistoryItem } from './quiz-view';
-import { buildIdentityHeaders, currentClientId, initClientIdentity } from './client-identity';
+import { buildIdentityHeaders, currentClientId, initClientIdentity, rejectedSessionId } from './client-identity';
+import { EditorConnection } from './editor-connect';
+import { ragViewerUrl } from './rag-viewer-url';
 import {
   SuggestionExposureTracker,
   TelemetryCategory,
@@ -55,6 +57,8 @@ const DEFAULT_MAX_DOCUMENTS = 12;
 const DEFAULT_MAX_DOCUMENT_BYTES = 1024 * 1024;
 // Backend: local si esta corriendo en esta maquina, si no produccion (src/backend-url.ts).
 let localBackendDetected: boolean | null = null;
+// Sesion (x-session-id): emparejada, archivo del tunel o ajuste heredado (src/editor-session.ts).
+let editorConnection: EditorConnection | null = null;
 const DEFAULT_WORKER_POLL_MS = 8000;
 const DEFAULT_ACTIVE_SUGGESTION_DEBOUNCE_MS = 900;
 const DEFAULT_ACTIVE_SUGGESTION_MAX_CODE_CHARS = 24000;
@@ -665,24 +669,44 @@ function resolveScanOptions(args: ScanCommandArgs | undefined): ScanOptions {
   };
 }
 
-function resolveBackendSettings(): BackendSettings {
-  const config = vscode.workspace.getConfiguration('adaceen');
-  const { baseUrl, source: baseUrlSource } = resolveBackendBaseUrl({
+function resolveCurrentBackendBaseUrl(config = vscode.workspace.getConfiguration('adaceen')) {
+  return resolveBackendBaseUrl({
     configured: getConfiguredString(config, 'backend.baseUrl'),
     envUrl: getEnv('ADACEEN_BACKEND_URL'),
     codespace: isCodespaceRuntime(),
     localBackendDetected,
   });
+}
+
+/**
+ * adaceen.backend.baseUrl escrito en el espacio de trabajo abierto
+ * (.vscode/settings.json del repo), no por el usuario ni la maquina.
+ */
+function backendUrlSetByWorkspace(config = vscode.workspace.getConfiguration('adaceen')) {
+  const inspected = config.inspect<string>('backend.baseUrl');
+  return Boolean(
+    toOptionalString(inspected?.workspaceFolderLanguageValue) ??
+    toOptionalString(inspected?.workspaceFolderValue) ??
+    toOptionalString(inspected?.workspaceLanguageValue) ??
+    toOptionalString(inspected?.workspaceValue),
+  );
+}
+
+function resolveBackendSettings(): BackendSettings {
+  const config = vscode.workspace.getConfiguration('adaceen');
+  const { baseUrl, source: baseUrlSource } = resolveCurrentBackendBaseUrl(config);
 
   const scanWorkerKey =
     toOptionalString(config.get<string>('backend.scanWorkerKey')) ??
     toOptionalString(getEnv('ADACEEN_SCAN_WORKER_KEY')) ??
     '';
 
-  const sessionId =
-    toOptionalString(config.get<string>('backend.sessionId')) ??
-    toOptionalString(getEnv('ADACEEN_SESSION_ID')) ??
-    '';
+  // SecretStorage -> ~/.adaceen/editor-session.json -> ajuste heredado -> ADACEEN_SESSION_ID.
+  const sessionId = editorConnection
+    ? editorConnection.sessions.currentSessionId()
+    : toOptionalString(config.get<string>('backend.sessionId')) ??
+      toOptionalString(getEnv('ADACEEN_SESSION_ID')) ??
+      '';
 
   const autoWorkerEnabled =
     toBoolean(config.get<boolean>('backend.autoWorkerEnabled')) ??
@@ -1098,6 +1122,20 @@ function renderScanOutput(output: vscode.OutputChannel, scan: ScanComputation) {
   output.appendLine(JSON.stringify(scan.payload, null, 2));
 }
 
+/**
+ * x-adaceen-session: invalid en una respuesta: la sesion enviada ya no vale
+ * (logout, vencida). editor-session.ts la olvida y busca otra.
+ */
+function reportRejectedSession(sentHeaders: unknown, responseHeaders: unknown) {
+  const rejected = rejectedSessionId(
+    sentHeaders as Record<string, unknown> | undefined,
+    responseHeaders as { get(name: string): string | null } | undefined,
+  );
+  if (rejected) {
+    editorConnection?.sessions.reportInvalid(rejected);
+  }
+}
+
 async function fetchJsonWithTimeout(
   url: string,
   init: RequestInit,
@@ -1110,6 +1148,7 @@ async function fetchJsonWithTimeout(
       ...init,
       signal: controller.signal,
     });
+    reportRejectedSession(init.headers, response.headers);
     const text = await response.text();
     let data: unknown = {};
     if (text) {
@@ -2232,26 +2271,9 @@ function buildCommandUri(command: string, args: unknown[] = []) {
   return `command:${command}?${encodeURIComponent(JSON.stringify(args))}`;
 }
 
-function withRagViewerSessionParam(rawUrl: string) {
-  const text = toOptionalString(rawUrl) || '';
-  if (!text) {
-    return '';
-  }
-  const settings = resolveBackendSettings();
-  try {
-    const parsed = new URL(text, settings.baseUrl || undefined);
-    const isAdaceenViewer = /\/api\/rag\/sources\/[^/]+\/view\b/i.test(parsed.pathname);
-    if (isAdaceenViewer && settings.sessionId && !parsed.searchParams.get('sessionId')) {
-      parsed.searchParams.set('sessionId', settings.sessionId);
-    }
-    return isAdaceenViewer ? parsed.toString() : text;
-  } catch {
-    return text;
-  }
-}
-
 function buildRagSourceTargetUrl(source: ActiveSuggestionRagSource) {
-  const rawUrl = withRagViewerSessionParam(toOptionalString(source.url) || '');
+  // Sin sessionId: el visor no la usa y la URL queda en el historial y en la telemetria.
+  const rawUrl = ragViewerUrl(toOptionalString(source.url) || '', resolveCurrentBackendBaseUrl().baseUrl);
   if (!rawUrl || !/^[a-z][a-z0-9+.-]*:/i.test(rawUrl)) {
     return '';
   }
@@ -3117,9 +3139,13 @@ async function processNextCodeActionForRepo(
 ) {
   if (!settings.sessionId) {
     if (manual) {
-      vscode.window.showWarningMessage(
-        'ADACEEN: configura adaceen.backend.sessionId para sincronizar reemplazos con el navegador.',
-      );
+      if (editorConnection) {
+        editorConnection.warnNotConnected('sincronizar reemplazos con el navegador');
+      } else {
+        vscode.window.showWarningMessage(
+          'ADACEEN: configura adaceen.backend.sessionId para sincronizar reemplazos con el navegador.',
+        );
+      }
     }
     return false;
   }
@@ -4839,9 +4865,6 @@ export async function activate(context: vscode.ExtensionContext) {
       // Canal ya cerrado (desactivacion): se descarta la linea.
     }
   };
-  // Antes de la primera llamada: backend local si esta corriendo, si no produccion.
-  // Sin nada escuchando en el 3000 la prueba termina al instante (maximo 800 ms).
-  await refreshLocalBackendDetection();
   // Identidad unica para TODAS las llamadas al backend (x-adaceen-client-id);
   // es el mismo id persistente que usaba la vista de quiz.
   initClientIdentity(context.globalState);
@@ -4850,6 +4873,32 @@ export async function activate(context: vscode.ExtensionContext) {
     editorHost: detectEditorHost({ remoteName: vscode.env.remoteName, codespace: isCodespaceRuntime() }),
     editorUi: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
   };
+  // Sesion de ADACEEN: SecretStorage, archivo del tunel o ajuste heredado (src/editor-connect.ts).
+  const connection = new EditorConnection({
+    context,
+    log: safeLog,
+    backendUrl: () => resolveCurrentBackendBaseUrl().baseUrl,
+    // Para el canje: vscode.dev sin tunel es "web".
+    editorHost: () => (editorMetadata.editorHost === 'local' && editorMetadata.editorUi === 'web' ? 'web' : editorMetadata.editorHost),
+    detectWorkspaceRepo: (folders) => detectRepoFullName(folders),
+    readRepoOfFolder: async (uri) => {
+      const text = await readGitConfigText({ uri, name: '', index: 0 });
+      return text ? parseRepoFromGitConfig(text) : undefined;
+    },
+    getEnv,
+    // Un repo clonado por enlace puede traer su propio adaceen.backend.baseUrl:
+    // a ese backend no se le manda en silencio el token de GitHub de VS Code.
+    silentGithubAllowed: () => !backendUrlSetByWorkspace(),
+  });
+  editorConnection = connection;
+  context.subscriptions.push(connection);
+  // Antes de la primera llamada: backend local si esta corriendo, si no produccion
+  // (sin nada escuchando en el 3000 la prueba termina al instante, maximo 800 ms),
+  // y despues la sesion guardada (SecretStorage y ~/.adaceen/editor-session.json):
+  // la emparejada solo vale en su backend, asi que primero hay que saber cual es.
+  await refreshLocalBackendDetection();
+  await connection.initialize();
+  const reportInvalidSession = (sessionId: string) => connection.sessions.reportInvalid(sessionId);
   const telemetry = new TelemetryClient({
     getEndpoint: () => {
       const settings = resolveBackendSettings();
@@ -4857,6 +4906,7 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     baseMetadata: () => editorMetadata,
     log: safeLog,
+    onSessionInvalid: reportInvalidSession,
   });
   const codeApplicationGuardDeps = createCodeApplicationGuardDeps(telemetry, output);
   context.subscriptions.push({ dispose: () => telemetry.dispose() });
@@ -4885,6 +4935,7 @@ export async function activate(context: vscode.ExtensionContext) {
     openAllHistory: () => {
       void vscode.commands.executeCommand('adaceen.openSuggestionHistory');
     },
+    onSessionInvalid: reportInvalidSession,
   });
   quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
   context.subscriptions.push(
@@ -4920,6 +4971,8 @@ export async function activate(context: vscode.ExtensionContext) {
     if (await refreshLocalBackendDetection()) {
       const switched = resolveBackendSettings();
       safeLog(`[Backend] Cambia a ${switched.baseUrl} (${describeBackendUrlSource(switched.baseUrlSource)})`);
+      // La sesion emparejada solo vale en su backend: la barra y la cache se actualizan.
+      connection.sessions.refresh();
     }
     const settings = resolveBackendSettings();
     const origin = await fetchBackendOrigin(settings);
@@ -4956,6 +5009,15 @@ export async function activate(context: vscode.ExtensionContext) {
   backendOriginTimer = setInterval(() => {
     void refreshBackendOrigin();
   }, 30000);
+
+  // Barra «ADACEEN: sin conectar / <nombre>», «ADACEEN: Conectar», enlaces
+  // vscode://adaceen.adaceen/... y, sin sesion, GitHub de VS Code en silencio.
+  // Un fallo aqui no debe dejar sin sugerencias ni telemetria.
+  try {
+    connection.start();
+  } catch (error) {
+    safeLog(`[Sesion] No se pudo iniciar la conexion con la cuenta: ${String(error)}`);
+  }
   const suggestionDecorationType = vscode.window.createTextEditorDecorationType({
     after: {
       color: new vscode.ThemeColor('editorCodeLens.foreground'),
@@ -5903,25 +5965,16 @@ export async function activate(context: vscode.ExtensionContext) {
     });
   });
 
-  const setBackendSessionIdDisposable = vscode.commands.registerCommand('adaceen.setBackendSessionId', async () => {
-    const current = resolveBackendSettings().sessionId;
-    const sessionId = await vscode.window.showInputBox({
-      title: 'ADACEEN: Configurar sesión compartida',
-      prompt: 'Pega el sessionId copiado desde el overlay del navegador.',
-      value: current,
-      ignoreFocusOut: true,
-      password: false,
-      validateInput: (value) => value.trim().length > 0 ? undefined : 'El sessionId no puede estar vacio.',
-    });
-    if (sessionId === undefined) {
-      return;
+  // Sigue existiendo: acepta un codigo XXXX-XXXX (lo canjea) o el UUID de antes.
+  // La sesion va a SecretStorage (no a settings), por encima del ajuste heredado.
+  const setBackendSessionIdDisposable = vscode.commands.registerCommand('adaceen.setBackendSessionId', () =>
+    connection.promptLegacySession(),
+  );
+  // Con otra sesion cambian la cache de sugerencias y lo que se sincroniza con el navegador.
+  connection.onDidChangeSession((_session, idChanged) => {
+    if (idChanged) {
+      scheduleCursorIdleSuggestionRefresh();
     }
-
-    await vscode.workspace
-      .getConfiguration('adaceen')
-      .update('backend.sessionId', sessionId.trim(), vscode.ConfigurationTarget.Global);
-    vscode.window.showInformationMessage('ADACEEN: sesión compartida configurada.');
-    scheduleCursorIdleSuggestionRefresh();
   });
 
   const applyNextCodeActionDisposable = vscode.commands.registerCommand('adaceen.applyNextCodeAction', async () => {

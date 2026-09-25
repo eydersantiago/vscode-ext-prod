@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { CLIENT_ID_HEADER, getOrCreateClientId } from './client-identity';
+import { CLIENT_ID_HEADER, getOrCreateClientId, rejectedSessionId } from './client-identity';
 
 /**
  * Panel "Quiz y seguimiento".
@@ -75,6 +75,8 @@ type QuizViewOptions = {
   getRequestContext: () => QuizRequestContext | null;
   openHistoryEntry: (id: string) => void;
   openAllHistory: () => void;
+  /** El backend respondio x-adaceen-session: invalid a esta sesion (src/editor-session.ts). */
+  onSessionInvalid?: (sessionId: string) => void;
 };
 
 const ACCEPT_COUNT_KEY = 'adaceen.quiz.acceptCount';
@@ -277,6 +279,10 @@ export class AdaceenQuizViewProvider implements vscode.WebviewViewProvider, vsco
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
+      const rejected = rejectedSessionId(context.headers, response.headers);
+      if (rejected) {
+        this.options.onSessionInvalid?.(rejected);
+      }
       const data = await response.json().catch(() => ({})) as Record<string, unknown>;
       if (!response.ok && response.status !== 409) {
         const failure = new Error(String(data.error || `HTTP ${response.status}`)) as Error & { status?: number };

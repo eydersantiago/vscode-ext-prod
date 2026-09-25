@@ -157,6 +157,31 @@ describe('TelemetryClient', () => {
     assert.equal(calls[0].headers['x-adaceen-client-id'], 'vscabcdefgh123');
   });
 
+  it('avisa cuando el backend responde x-adaceen-session: invalid', async () => {
+    const rejected: string[] = [];
+    const impl = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '{"ok":true}',
+      headers: { get: (name: string) => (name === 'x-adaceen-session' ? 'invalid' : null) },
+    });
+    const withSession = new TelemetryClient({
+      getEndpoint: () => ({ ...endpoint, sessionId: 'ses-vieja-1' }),
+      fetchImpl: impl,
+      flushDelayMs: 5,
+      onSessionInvalid: (sessionId) => rejected.push(sessionId),
+    });
+    withSession.track({ category: 'signal', eventType: 'blocking_detected' });
+    await withSession.flush();
+    assert.deepEqual(rejected, ['ses-vieja-1']);
+
+    // Sin sesion enviada no hay nada que olvidar.
+    const anonymous = new TelemetryClient({ getEndpoint: () => endpoint, fetchImpl: impl, flushDelayMs: 5, onSessionInvalid: (sessionId) => rejected.push(sessionId) });
+    anonymous.track({ category: 'signal', eventType: 'blocking_detected' });
+    await anonymous.flush();
+    assert.deepEqual(rejected, ['ses-vieja-1']);
+  });
+
   it('reintenta una sola vez ante error de red', async () => {
     const { impl, calls } = fakeFetch(['network-error', 'network-error']);
     const logs: string[] = [];

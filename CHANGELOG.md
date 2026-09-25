@@ -4,6 +4,31 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.31] - 2026-09-25
+
+Acceso simplificado (contrato `docs/arquitectura/acceso-simplificado.md` de PDC, sección 3): el estudiante ya no copia ni pega la sesión.
+
+### Añadido
+
+- La sesión de ADACEEN se resuelve en este orden (`src/editor-session.ts`): 1) la sesión emparejada en este equipo, guardada en el llavero de VS Code (SecretStorage `adaceen.editorSession`, nunca en settings); 2) `~/.adaceen/editor-session.json`, que escribe la VM de editores al preparar el túnel (cero clics; se relee al arrancar, al volver a la ventana, cuando el archivo cambia y cuando el backend rechaza la sesión; en la extensión web no se lee); 3) el ajuste heredado `adaceen.backend.sessionId` y `ADACEEN_SESSION_ID`. Todas las llamadas (sugerencias, métricas, apply-check, cola del navegador, rack, quiz y el visor de fuentes RAG) usan la sesión resuelta.
+- La sesión emparejada solo se usa con el backend donde se obtuvo: no viaja al backend local de la Mac ni a un `adaceen.backend.baseUrl` que traiga un repositorio, y vuelve a valer sola al volver a su backend. En el túnel, un `editor-session.json` escrito después de guardar la sesión emparejada gana (la VM es del estudiante; el llavero de vscode.dev puede ser de un perfil compartido).
+- Sin sesión, al arrancar se intenta en silencio la cuenta de GitHub que VS Code ya tiene (`read:user`) y se canjea en `POST /api/auth/editor/github`: cero clics cuando la extensión ya tenía permiso. El token de GitHub no se guarda ni se registra. No se hace si en este equipo se cerró sesión o se desconectó VS Code (marca en `globalState` que quita la siguiente conexión hecha a mano), si `adaceen.backend.baseUrl` lo fija el espacio de trabajo abierto, ni pisa una conexión que termine antes (enlace, código o archivo del túnel).
+- Barra de estado «ADACEEN: sin conectar» / «ADACEEN: <nombre>» y comando **ADACEEN: Conectar** con tres opciones: «Con mi cuenta de GitHub (recomendado)» (un clic en «Permitir»), «Tengo un código del navegador» (`XXXX-XXXX`, canje en `POST /api/auth/editor/claim`; también acepta el UUID de antes) y «Pegar sesión».
+- Cuando el backend responde `x-adaceen-session: invalid` (por ejemplo, cerraste sesión en el navegador): se olvida esa sesión, se relee el archivo del túnel y, si no queda otra, una sola advertencia por ventana con el botón «Conectar» (en el túnel sugiere volver a «Abrir mi editor»). No se vuelve a conectar en silencio con GitHub: en una Mac compartida esa cuenta puede ser de otro estudiante. Al arrancar, la sesión que hay se comprueba con `GET /api/auth/me` (así también se detectan sesiones muertas en un backend anterior y se muestra el nombre). Una sesión que vence con la ventana abierta se detecta en la revisión de cada 20 s (barra y advertencia). Si el llavero de VS Code tarda más de 3 s, la sesión guardada se aplica cuando conteste y el arranque la espera antes de probar GitHub.
+- «ADACEEN: Conectar» ofrece «Desconectar este equipo» cuando hay sesión guardada. Si un enlace del navegador reemplaza la sesión de otra persona, el aviso lo dice («¿No eres tú?») con el botón «Desconectar».
+- Enlaces del navegador para VS Code de escritorio (Mac del laboratorio): `vscode://adaceen.adaceen/abrir?code=XXXX-XXXX&repo=owner/repo` y `vscode://adaceen.adaceen/conectar?code=XXXX-XXXX`. El código se canjea contra el backend ya resuelto por la extensión (un parámetro `backend` distinto se ignora). Con `repo`, abre la carpeta recordada si ya se clonó en este equipo o pide la carpeta padre, clona `https://github.com/<owner>/<repo>.git` y la abre; si falta git, lo explica y ofrece el comando de instalación (`xcode-select --install` en la Mac). Nueva activación `onUri`. Los enlaces se atienden de a uno y, si llega otro mientras tanto (doble clic: cada clic pide un código nuevo e invalida el anterior), se atiende el último en vez de descartarlo; los avisos que no bloquean (falta git, carpeta ocupada) ya no retienen los enlaces siguientes.
+- 66 pruebas unitarias nuevas (136 en total): archivo de sesión (versión, campos, vencida), códigos y UUID, orden de resolución y reacción a sesiones inválidas con dependencias falsas, carreras entre GitHub en silencio y el enlace, llavero lento, vencimiento con la ventana abierta, «Desconectar», canjes, cola de enlaces, visor RAG y cabecera `x-adaceen-session`.
+
+### Cambiado
+
+- «ADACEEN: Configurar sesión compartida» sigue existiendo: ahora acepta un código `XXXX-XXXX` (lo canjea) o el UUID de antes, y guarda la sesión en el llavero de VS Code en lugar de `adaceen.backend.sessionId`.
+- El backend sigue eligiéndose como en la 0.0.30 (`src/backend-url.ts`); la detección del backend local termina antes de leer la sesión guardada.
+- El enlace al visor de fuentes RAG ya no lleva `sessionId` en la URL (el visor no la usa y quedaba en el historial del navegador, en los logs de acceso y en la métrica `vscode_rag_source_opened`); también se quita si viene del backend.
+
+### Compatibilidad
+
+- El canje con código o con GitHub y la cabecera `x-adaceen-session` requieren el backend de la rama `claude/serene-heisenberg-0te9s9` de PDC. Con un backend anterior, «Pegar sesión» y el ajuste heredado funcionan como antes, y una sesión muerta se detecta igual por el 401 de `/api/auth/me`.
+
 ## [0.0.30] - 2026-09-24
 
 ### Cambiado
