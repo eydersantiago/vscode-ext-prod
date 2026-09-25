@@ -4,6 +4,18 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.29] - 2026-09-24
+
+### Añadido
+
+- Fin de los episodios de bloqueo (A3.3 ADACEEN-43, base del KPI P1): nuevo evento `blocking_resolved` cuando desaparece del archivo el error que causó un bloqueo. `durationMs` es el tiempo hasta desbloqueo (desde que apareció el error hasta que desapareció) y la metadata lleva `line`, `blockedForMs` (desde la señal de bloqueo), `resolvedWhileAway` y `errorCount`. Si el error se corrigió mientras el estudiante estaba en otro archivo, el episodio se cierra al volver, pasado el tiempo de estabilidad de los diagnósticos, con `resolvedWhileAway: true` (el tiempo es una cota superior). Si vuelve a un archivo con el error todavía presente, sigue el mismo episodio. Los episodios que no se cierran no emiten nada (en el análisis quedan censurados). Se recuerdan hasta 50 episodios abiertos.
+- El canal ADACEEN registra cada desbloqueo (`[Signals] Desbloqueo en …`).
+- 5 pruebas unitarias nuevas de episodios (59 en total).
+
+### Compatibilidad
+
+- Requiere un backend que acepte `blocking_resolved` y las claves `blockedForMs` y `resolvedWhileAway` (rama `feat/segunda-tanda-jira` de PDC). Un backend anterior guarda el evento, pero descarta de la metadata las claves que no conoce.
+
 ## [0.0.28] - 2026-09-24
 
 ### Añadido

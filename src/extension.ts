@@ -5948,6 +5948,20 @@ export function activate(context: vscode.ExtensionContext) {
       telemetry.track({ ...base, metadata: { line: signal.line, errorCount } });
       return;
     }
+    if (signal.type === 'blocking_resolved') {
+      // Cierra el episodio de bloqueo: su duracion es el tiempo hasta desbloqueo (A3.3).
+      telemetry.track({
+        ...base,
+        durationMs: signal.durationMs,
+        metadata: {
+          line: signal.line,
+          blockedForMs: signal.blockedForMs,
+          resolvedWhileAway: signal.resolvedWhileAway,
+          errorCount,
+        },
+      });
+      return;
+    }
     telemetry.track({
       ...base,
       durationMs: signal.durationMs,
@@ -5998,6 +6012,12 @@ export function activate(context: vscode.ExtensionContext) {
     let firstBlocking: BlockingSignal | null = null;
     for (const signal of signals) {
       recordErrorSignal(signal, document, summary.errors.length);
+      if (signal.type === 'blocking_resolved') {
+        output.appendLine(
+          `[Signals] Desbloqueo en ${vscode.workspace.asRelativePath(document.uri, false)}:${signal.line} tras ${Math.round(signal.durationMs / 1000)} s${signal.resolvedWhileAway ? ' (corregido desde otro archivo)' : ''}.`,
+        );
+        continue;
+      }
       if (signal.type === 'blocking_detected') {
         output.appendLine(
           `[Signals] Bloqueo en ${vscode.workspace.asRelativePath(document.uri, false)}:${signal.line} (${signal.reason === 'persistent' ? `${Math.round(signal.durationMs / 1000)} s con el mismo error` : `${signal.count} apariciones en 10 min`}): ${truncateInline(signal.text, 140)}`,

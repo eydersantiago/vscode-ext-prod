@@ -9,6 +9,12 @@
  *     por texto normalizado durante 60 s.
  *   - blocking_detected: el mismo error (texto normalizado) sigue presente
  *     >= blockingSeconds (90 s por defecto) o aparece 3 veces en 10 minutos.
+ *   - blocking_resolved: el error que causo un bloqueo desaparece del archivo.
+ *     Cierra el episodio y da el "tiempo hasta desbloqueo" (A3.3): desde que
+ *     el error aparecio hasta que desaparecio. Si el estudiante estaba en otro
+ *     archivo cuando se corrigio, se registra al volver, con
+ *     resolvedWhileAway = true (el tiempo es una cota superior). Los episodios
+ *     que nunca se cierran no emiten nada: en el analisis quedan censurados.
  *
  * Para no confundir errores de tecleo con errores reales, un error solo
  * "aparece" (cuenta para las repeticiones y para compile_error_detected)
@@ -51,6 +57,8 @@ export const DIAGNOSTIC_MESSAGE_MAX_CHARS = 300;
 export const MAX_SUGGEST_DIAGNOSTICS = 10;
 const MAX_TRACKED_ERRORS = 25;
 const MAX_REMEMBERED_KEYS = 200;
+/** Episodios de bloqueo abiertos que se recuerdan por archivo (para cerrarlos al volver). */
+const MAX_OPEN_EPISODES = 50;
 
 export function compactDiagnosticMessage(message: string, max = DIAGNOSTIC_MESSAGE_MAX_CHARS) {
   return String(message || '').replace(/\s+/g, ' ').trim().slice(0, Math.max(0, max));
@@ -156,7 +164,24 @@ export type BlockingSignal = {
   reason: 'persistent' | 'repeated';
 };
 
-export type ErrorSignal = CompileErrorSignal | BlockingSignal;
+export type BlockingResolvedSignal = {
+  type: 'blocking_resolved';
+  key: string;
+  text: string;
+  line: number;
+  /** Duracion del episodio: desde que el error aparecio hasta que desaparecio. */
+  durationMs: number;
+  /** Desde la senal de bloqueo hasta que el error desaparecio. */
+  blockedForMs: number;
+  /**
+   * El error ya no estaba al volver al archivo: se corrigio mientras el
+   * estudiante estaba en otro (por ejemplo, en la cabecera o en otra clase).
+   * El momento exacto no se conoce; durationMs es una cota superior.
+   */
+  resolvedWhileAway: boolean;
+};
+
+export type ErrorSignal = CompileErrorSignal | BlockingSignal | BlockingResolvedSignal;
 
 type Presence = {
   key: string;
@@ -168,7 +193,29 @@ type Presence = {
   countsAsAppearance: boolean;
   reported: boolean;
   blocked: boolean;
+  /** Momento de la senal de bloqueo, si la hubo. */
+  blockedAt?: number;
 };
+
+/** Episodio de bloqueo que sigue abierto (el error no ha desaparecido). */
+type OpenEpisode = {
+  documentKey: string;
+  key: string;
+  text: string;
+  line: number;
+  firstSeenAt: number;
+  blockedAt: number;
+  /**
+   * El error no estaba al volver al archivo. Se espera stableMs antes de
+   * cerrar el episodio, porque al abrir un archivo los diagnosticos pueden
+   * tardar en llegar y verse vacios un momento.
+   */
+  absentSince?: number;
+};
+
+function episodeId(documentKey: string, key: string) {
+  return `${documentKey}\u0000${key}`;
+}
 
 export class ErrorSignalTracker {
   private settings: ErrorSignalSettings;
@@ -179,6 +226,8 @@ export class ErrorSignalTracker {
   private readonly appearances = new Map<string, number[]>();
   private readonly lastDetectedAt = new Map<string, number>();
   private readonly lastBlockingAt = new Map<string, number>();
+  /** Episodios de bloqueo abiertos de todos los archivos vistos. */
+  private readonly openEpisodes = new Map<string, OpenEpisode>();
 
   constructor(settings: Partial<ErrorSignalSettings> = {}) {
     this.settings = { ...DEFAULT_ERROR_SIGNAL_SETTINGS, ...settings };
@@ -218,7 +267,43 @@ export class ErrorSignalTracker {
 
     for (const key of [...this.presences.keys()]) {
       if (!current.has(key)) {
+        const gone = this.presences.get(key);
         this.presences.delete(key);
+        if (gone?.blocked && gone.blockedAt !== undefined) {
+          // El error del bloqueo se corrigio con el archivo a la vista.
+          this.openEpisodes.delete(episodeId(documentKey, key));
+          signals.push({
+            type: 'blocking_resolved',
+            key,
+            text: gone.text,
+            line: gone.line,
+            durationMs: Math.max(0, now - gone.firstSeenAt),
+            blockedForMs: Math.max(0, now - gone.blockedAt),
+            resolvedWhileAway: false,
+          });
+        }
+      }
+    }
+    // Episodios de este archivo cuyo error no esta al volver: se cierran si
+    // sigue sin aparecer pasado stableMs (ver OpenEpisode.absentSince).
+    for (const [id, episode] of [...this.openEpisodes]) {
+      if (episode.documentKey !== documentKey || current.has(episode.key)) {
+        continue;
+      }
+      if (episode.absentSince === undefined) {
+        episode.absentSince = now;
+      }
+      if (now - episode.absentSince >= settings.stableMs) {
+        this.openEpisodes.delete(id);
+        signals.push({
+          type: 'blocking_resolved',
+          key: episode.key,
+          text: episode.text,
+          line: episode.line,
+          durationMs: Math.max(0, episode.absentSince - episode.firstSeenAt),
+          blockedForMs: Math.max(0, episode.absentSince - episode.blockedAt),
+          resolvedWhileAway: true,
+        });
       }
     }
     for (const [key, error] of current) {
@@ -226,6 +311,23 @@ export class ErrorSignalTracker {
       if (presence) {
         presence.text = error.text;
         presence.line = safeLine(error.line);
+        continue;
+      }
+      const episode = this.openEpisodes.get(episodeId(documentKey, key));
+      if (episode) {
+        // Vuelve a un archivo con un bloqueo abierto: sigue el mismo episodio.
+        episode.absentSince = undefined;
+        this.presences.set(key, {
+          key,
+          text: error.text,
+          line: safeLine(error.line),
+          firstSeenAt: episode.firstSeenAt,
+          confirmed: true,
+          countsAsAppearance: false,
+          reported: true,
+          blocked: true,
+          blockedAt: episode.blockedAt,
+        });
         continue;
       }
       this.presences.set(key, {
@@ -281,7 +383,16 @@ export class ErrorSignalTracker {
         continue;
       }
       presence.blocked = true;
+      presence.blockedAt = now;
       this.lastBlockingAt.set(key, now);
+      this.rememberEpisode({
+        documentKey,
+        key,
+        text: presence.text,
+        line: presence.line,
+        firstSeenAt: presence.firstSeenAt,
+        blockedAt: now,
+      });
       signals.push({
         type: 'blocking_detected',
         key,
@@ -314,7 +425,26 @@ export class ErrorSignalTracker {
         next = Math.min(next, Math.max(presence.firstSeenAt + settings.blockingMs, cooldownEnd));
       }
     }
+    for (const episode of this.openEpisodes.values()) {
+      if (episode.documentKey === this.documentKey && episode.absentSince !== undefined) {
+        next = Math.min(next, episode.absentSince + settings.stableMs);
+      }
+    }
     return Number.isFinite(next) ? Math.max(next, now) : null;
+  }
+
+  /** Episodios de bloqueo abiertos (para pruebas y diagnostico). */
+  openEpisodeCount() {
+    return this.openEpisodes.size;
+  }
+
+  private rememberEpisode(episode: OpenEpisode) {
+    const id = episodeId(episode.documentKey, episode.key);
+    this.openEpisodes.delete(id);
+    this.openEpisodes.set(id, episode);
+    while (this.openEpisodes.size > MAX_OPEN_EPISODES) {
+      this.openEpisodes.delete(this.openEpisodes.keys().next().value as string);
+    }
   }
 
   private prune(now: number) {

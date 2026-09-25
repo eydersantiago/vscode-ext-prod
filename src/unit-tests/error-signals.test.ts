@@ -192,6 +192,86 @@ describe('ErrorSignalTracker', () => {
     assert.ok(blocking(tracker.observe(DOC, [SEMICOLON], 390 * SECOND)));
   });
 
+  it('cuando desaparece el error de un bloqueo emite blocking_resolved con la duracion del episodio', () => {
+    const tracker = new ErrorSignalTracker({ blockingMs: 90 * SECOND });
+    tracker.observe(DOC, [SEMICOLON], 0);
+    assert.ok(blocking(tracker.observe(DOC, [SEMICOLON], 90 * SECOND)));
+    assert.equal(tracker.openEpisodeCount(), 1);
+    const signals = tracker.observe(DOC, [], 150 * SECOND);
+    assert.deepEqual(signals, [{
+      type: 'blocking_resolved',
+      key: normalizeErrorText(SEMICOLON.text),
+      text: SEMICOLON.text,
+      line: 12,
+      durationMs: 150 * SECOND,
+      blockedForMs: 60 * SECOND,
+      resolvedWhileAway: false,
+    }]);
+    assert.equal(tracker.openEpisodeCount(), 0);
+    // Se cierra una sola vez.
+    assert.deepEqual(tracker.observe(DOC, [], 200 * SECOND), []);
+  });
+
+  it('un error que desaparece sin haber bloqueado no emite blocking_resolved', () => {
+    const tracker = new ErrorSignalTracker();
+    tracker.observe(DOC, [SEMICOLON], 0);
+    tracker.observe(DOC, [SEMICOLON], 6 * SECOND);
+    assert.deepEqual(types(tracker.observe(DOC, [], 30 * SECOND)), []);
+  });
+
+  it('un bloqueo sigue abierto al cambiar de archivo y se cierra al corregirlo despues de volver', () => {
+    const tracker = new ErrorSignalTracker({ blockingMs: 90 * SECOND });
+    const other = 'file:///proyecto/Otro.java';
+    tracker.observe(DOC, [SEMICOLON], 0);
+    assert.ok(blocking(tracker.observe(DOC, [SEMICOLON], 90 * SECOND)));
+    tracker.observe(other, [], 100 * SECOND);
+    // Vuelve y el error sigue: mismo episodio, sin compile_error ni bloqueo nuevo.
+    assert.deepEqual(tracker.observe(DOC, [SEMICOLON], 200 * SECOND), []);
+    assert.deepEqual(tracker.observe(DOC, [SEMICOLON], 600 * SECOND), []);
+    const [resolved] = tracker.observe(DOC, [], 620 * SECOND);
+    assert.equal(resolved.type, 'blocking_resolved');
+    if (resolved.type === 'blocking_resolved') {
+      assert.equal(resolved.durationMs, 620 * SECOND);
+      assert.equal(resolved.blockedForMs, 530 * SECOND);
+      assert.equal(resolved.resolvedWhileAway, false);
+    }
+  });
+
+  it('si el error se corrigio desde otro archivo, se cierra al volver con resolvedWhileAway', () => {
+    const tracker = new ErrorSignalTracker({ blockingMs: 90 * SECOND });
+    const other = 'file:///proyecto/Otro.java';
+    tracker.observe(DOC, [SEMICOLON], 0);
+    assert.ok(blocking(tracker.observe(DOC, [SEMICOLON], 90 * SECOND)));
+    tracker.observe(other, [], 100 * SECOND);
+    // Al volver los diagnosticos pueden llegar vacios un instante: no se cierra todavia.
+    assert.deepEqual(tracker.observe(DOC, [], 300 * SECOND), []);
+    assert.equal(tracker.nextDeadline(300 * SECOND), 305 * SECOND);
+    const [resolved] = tracker.observe(DOC, [], 305 * SECOND);
+    assert.equal(resolved.type, 'blocking_resolved');
+    if (resolved.type === 'blocking_resolved') {
+      assert.equal(resolved.resolvedWhileAway, true);
+      // Cota superior: hasta que volvio al archivo.
+      assert.equal(resolved.durationMs, 300 * SECOND);
+      assert.equal(resolved.blockedForMs, 210 * SECOND);
+    }
+    assert.equal(tracker.openEpisodeCount(), 0);
+  });
+
+  it('si al volver los diagnosticos llegan tarde, el episodio sigue abierto', () => {
+    const tracker = new ErrorSignalTracker({ blockingMs: 90 * SECOND });
+    const other = 'file:///proyecto/Otro.java';
+    tracker.observe(DOC, [SEMICOLON], 0);
+    assert.ok(blocking(tracker.observe(DOC, [SEMICOLON], 90 * SECOND)));
+    tracker.observe(other, [], 100 * SECOND);
+    assert.deepEqual(tracker.observe(DOC, [], 300 * SECOND), []);
+    // Llegan los diagnosticos con el mismo error: no es un error nuevo.
+    assert.deepEqual(tracker.observe(DOC, [SEMICOLON], 302 * SECOND), []);
+    assert.deepEqual(tracker.observe(DOC, [SEMICOLON], 320 * SECOND), []);
+    assert.equal(tracker.openEpisodeCount(), 1);
+    const [resolved] = tracker.observe(DOC, [], 400 * SECOND);
+    assert.equal(resolved.type === 'blocking_resolved' && resolved.resolvedWhileAway, false);
+  });
+
   it('isPresent sigue la presencia del error normalizado', () => {
     const tracker = new ErrorSignalTracker();
     tracker.observe(DOC, [SEMICOLON], 0);
