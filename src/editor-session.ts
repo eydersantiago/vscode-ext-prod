@@ -4,13 +4,14 @@
  * La sesion que viaja en x-session-id sale de, en este orden:
  *
  *   1. SecretStorage adaceen.editorSession: la sesion emparejada en este
- *      equipo (cuenta de GitHub de VS Code, codigo del navegador o sesion
- *      pegada). Nunca va en settings y el token de GitHub no se guarda.
+ *      equipo (cuenta de GitHub de VS Code, codigo del navegador o ID de
+ *      sesion pegado). Nunca va en settings y el token de GitHub no se guarda.
  *   2. ~/.adaceen/editor-session.json: lo escribe la VM de editores (tunel)
  *      cada vez que el estudiante prepara su editor. Solo existe en el host
  *      Node de la extension; la extension web no tiene disco.
  *   3. Ajuste heredado adaceen.backend.sessionId y variable ADACEEN_SESSION_ID
- *      («Configurar sesion compartida» sigue existiendo).
+ *      («Configurar sesion compartida» sigue en la paleta: abre la misma caja
+ *      que «Tengo un codigo o sesion» y guarda en SecretStorage).
  *
  * La sesion emparejada solo se usa con el backend donde se obtuvo. En el
  * tunel, un archivo escrito despues de guardarla gana (la VM es del estudiante).
@@ -67,7 +68,7 @@ export type EditorSessionSource = 'secret' | 'file' | 'setting' | 'env';
  *   codigo        codigo XXXX-XXXX escrito a mano
  *   vscode-local  boton «Abrir en VS Code de este equipo» del navegador
  *   tunnel        archivo que escribe la VM de editores
- *   manual        sesion pegada (UUID de «Copiar sesion»)
+ *   manual        ID de sesion pegado (UUID que copiaba «Copiar sesion»)
  *   heredada      ajuste adaceen.backend.sessionId o ADACEEN_SESSION_ID
  */
 export type EditorSessionLabel = 'github' | 'codigo' | 'vscode-local' | 'tunnel' | 'manual' | 'heredada';
@@ -299,9 +300,9 @@ export type ConnectInput =
   | { kind: 'invalid' };
 
 /**
- * Lo que el estudiante escribe o pega en «Tengo un codigo», «Pegar sesion» o
- * «Configurar sesion compartida»: un codigo XXXX-XXXX (se canjea) o, por
- * compatibilidad, el UUID de sesion que copiaba el navegador.
+ * Lo que el estudiante escribe o pega en «Tengo un codigo o sesion» (o en
+ * «Configurar sesion compartida», que abre la misma caja): un codigo XXXX-XXXX
+ * (se canjea) o, por compatibilidad, el UUID de sesion que copiaba el navegador.
  */
 export function classifyConnectInput(value: unknown): ConnectInput {
   const text = String(value ?? '').trim().replace(/^["'`]+|["'`]+$/g, '').trim();
@@ -331,6 +332,89 @@ export function connectInputProblem(value: string): string | undefined {
   return input.kind === 'empty'
     ? undefined
     : 'El código tiene 8 letras o números (XXXX-XXXX). También sirve el ID de sesión copiado del navegador.';
+}
+
+// ---------------------------------------------------------------------------
+// Textos de «ADACEEN: Conectar» y del aviso de sesion perdida (editor-connect.ts
+// los muestra; aqui se prueban sin vscode)
+
+export type ConnectChoiceId = 'github' | 'code' | 'disconnect';
+
+export type ConnectChoice = {
+  id: ConnectChoiceId;
+  /** Con icono de VS Code ($(...)); la guia cita el texto sin el icono. */
+  label: string;
+  detail: string;
+};
+
+/** Opcion de «ADACEEN: Conectar» para escribir o pegar (sin el icono). */
+export const CONNECT_CODE_CHOICE = 'Tengo un código o sesión';
+
+/** Caja de texto de «Tengo un codigo o sesion» (y de «Configurar sesion compartida»). */
+export const CONNECT_CODE_PROMPT = {
+  // Literal (no con CONNECT_CODE_CHOICE): la guia y sus pruebas buscan el texto tal cual.
+  title: 'ADACEEN: Tengo un código o sesión',
+  prompt: 'Escribe el código de 8 caracteres que muestra el navegador (por ejemplo K7P4-M2QX). También puedes pegar un ID de sesión de versiones anteriores.',
+  placeHolder: 'XXXX-XXXX o ID de sesión',
+} as const;
+
+/**
+ * Opciones de «ADACEEN: Conectar». Escribir o pegar es una sola opcion
+ * («Tengo un codigo o sesion»): la caja acepta el codigo XXXX-XXXX o el ID de
+ * sesion de antes (classifyConnectInput decide). «Desconectar este equipo» solo
+ * aparece si la sesion vigente esta guardada en este VS Code.
+ */
+export function connectChoices(options: { canDisconnect: boolean }): ConnectChoice[] {
+  const choices: ConnectChoice[] = [
+    {
+      id: 'github',
+      label: '$(github) Con mi cuenta de GitHub (recomendado)',
+      detail: 'Un clic en «Permitir». Usa la cuenta de GitHub que conectaste en ADACEEN.',
+    },
+    {
+      id: 'code',
+      label: '$(key) Tengo un código o sesión',
+      detail: 'El código XXXX-XXXX que muestra el overlay de ADACEEN (dura 10 minutos). También acepta el ID de sesión de versiones anteriores.',
+    },
+  ];
+  if (options.canDisconnect) {
+    choices.push({
+      id: 'disconnect',
+      label: '$(debug-disconnect) Desconectar este equipo',
+      detail: 'Olvida la sesión guardada en VS Code (por ejemplo, en un equipo compartido o si no eres tú).',
+    });
+  }
+  return choices;
+}
+
+/**
+ * Botones del aviso «ADACEEN: no se pudo conectar…». Un docente que probo con
+ * GitHub (staff_requires_code) no tiene nada que reintentar: su boton abre
+ * directamente la caja del codigo.
+ */
+export function connectFailureActions(error: string, canRetry: boolean): string[] {
+  if (error === 'staff_requires_code') {
+    return [CONNECT_CODE_CHOICE];
+  }
+  return canRetry ? ['Reintentar', 'Conectar de otra forma'] : ['Conectar de otra forma'];
+}
+
+/** Boton del aviso de sesion perdida (abre «ADACEEN: Conectar»). */
+export const SESSION_LOST_ACTION = 'Conectar';
+
+/**
+ * Aviso unico cuando la sesion deja de valer. El texto nombra el boton que
+ * ofrece («Conectar»); en el tunel recuerda ademas que «Abrir mi editor» en el
+ * navegador escribe una sesion nueva y VS Code la toma solo.
+ */
+export function sessionLostWarning(fromTunnel: boolean): { message: string; action: string } {
+  const lead = 'ADACEEN: tu sesión dejó de valer (por ejemplo, cerraste sesión en el navegador).';
+  return {
+    message: fromTunnel
+      ? `${lead} Pulsa «${SESSION_LOST_ACTION}» o vuelve a pulsar «Abrir mi editor» en el navegador para que tus sugerencias y métricas queden a tu nombre.`
+      : `${lead} Pulsa «${SESSION_LOST_ACTION}» para que tus sugerencias y métricas queden a tu nombre.`,
+    action: SESSION_LOST_ACTION,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +574,8 @@ export type EditorClaimError =
   | 'missing_token'
   | 'github_token_invalid'
   | 'github_login_not_linked'
+  /** github_login_not_linked con reason staff_requires_code: docente o administrador. */
+  | 'staff_requires_code'
   | 'backend_outdated'
   | 'network'
   | 'backend_error';
@@ -522,8 +608,12 @@ export function describeClaimError(error: EditorClaimError, backendUrl = '') {
       return 'GitHub no aceptó el permiso de VS Code. Vuelve a intentarlo y pulsa «Permitir».';
     case 'github_login_not_linked':
       return 'Conecta tu cuenta de GitHub en ADACEEN (overlay del navegador) y vuelve a intentar.';
+    case 'staff_requires_code':
+      // El comienzo es el del backend (STAFF_REQUIRES_CODE_MESSAGE), que cita la guia; el resto
+      // nombra los botones de hoy (el backend cita la opcion de la 0.0.31, «Tengo un codigo del navegador»).
+      return 'Las cuentas de docente y administrador se vinculan con un codigo del navegador: en el overlay pulsa «Copiar codigo para VS Code» (o «Abrir en VS Code de este equipo» en la Mac) y aquí elige «Tengo un código o sesión».';
     case 'backend_outdated':
-      return `El backend${where} todavía no permite conectar VS Code así. Usa «Pegar sesión» con el ID que copia el navegador.`;
+      return `El backend${where} todavía no permite conectar VS Code así. Usa «Tengo un código o sesión» con el ID de sesión que copia el navegador.`;
     case 'network':
       return `No se pudo contactar al backend${where}. Revisa tu conexión y vuelve a intentar.`;
     default:
@@ -563,6 +653,11 @@ export function interpretClaimResponse(
         label: context.label,
       },
     };
+  }
+  if (errorCode === 'github_login_not_linked' && cleanText(data.reason, 80) === 'staff_requires_code') {
+    // Docente o administrador: GitHub no vale, solo el codigo del navegador. Texto local, que
+    // no depende de la version del backend y nombra la opcion que existe en este VS Code.
+    return { ok: false, error: 'staff_requires_code', message: describeClaimError('staff_requires_code'), status };
   }
   if (CLAIM_ERRORS.has(errorCode)) {
     const error = errorCode as EditorClaimError;

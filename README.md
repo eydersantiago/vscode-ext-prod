@@ -24,7 +24,7 @@ ADACEEN escanea archivos del workspace en VS Code (local o Codespaces), genera u
 - `ADACEEN: Abrir sugerencias del archivo activo`
 - `ADACEEN: Actualizar sugerencias del archivo activo`
 - `ADACEEN: Conectar` (tambien desde la barra de estado «ADACEEN: sin conectar»)
-- `ADACEEN: Configurar sesión compartida`
+- `ADACEEN: Configurar sesión compartida` (compatibilidad: abre la misma caja que «Tengo un código o sesión»; el navegador aun lo cita)
 - `ADACEEN: Aplicar siguiente reemplazo del navegador`
 
 Ejecutalos desde la paleta de comandos (`Ctrl+Shift+P`).
@@ -41,7 +41,7 @@ La extension expone estas opciones:
 - `adaceen.backend.baseUrl`: URL base del backend ADACEEN. Vacio (por defecto): el backend local `http://127.0.0.1:3000` si esta corriendo en el equipo (`npm run dev:local`) y, si no, produccion; en Codespaces, produccion
 - `adaceen.backend.sessionId`: (heredado) sesion compartida con el overlay del navegador; solo se usa si no hay sesion emparejada ni archivo del tunel (ver «Sesion»)
 - `adaceen.backend.codeActionsEnabled`: consulta reemplazos enviados desde el navegador
-- `adaceen.backend.autoApplyCodeActions`: aplica reemplazos sin confirmacion (salvo que la politica del docente pida confirmar)
+- `adaceen.backend.autoApplyCodeActions`: los reemplazos recien elegidos en el overlay que VS Code encuentra donde el estudiante los vio ya se aplican sin preguntar (el clic es la confirmacion); este ajuste solo decide si tambien se aplican sin preguntar los demas (esperaron mas de 10 minutos en la cola o no se encontro su codigo); si la politica del docente pide confirmar, esos preguntan igual
 - `adaceen.triggers.blockingSeconds`: segundos que el mismo error debe seguir presente para considerar un bloqueo (defecto 90; tambien cuenta que aparezca 3 veces en 10 minutos)
 - `adaceen.triggers.suggestOnBlocking`: al detectar un bloqueo, pide una sugerencia con `trigger: "blocking"` (defecto `true`)
 - `adaceen.codeApplication.offlineMaxLines`: si no se puede consultar `apply-check`, solo se aplican cambios de hasta estas lineas (defecto 12)
@@ -51,6 +51,8 @@ La extension expone estas opciones:
 - Todas las llamadas al backend llevan `x-adaceen-client-id` (id persistente de esta instalacion) y `x-session-id` cuando hay sesion (ver «Sesion»), asi que las metricas funcionan tambien sin sesion.
 - Con errores en el archivo activo se registran `compile_error_detected` y, si el estudiante se queda atascado, `blocking_detected`. El texto del error solo viaja para que el backend calcule su hash; no se guarda.
 - Antes de aplicar cualquier cambio del tutor se consulta `POST /api/suggestions/apply-check`: si la politica del docente no lo permite, no se aplica y se muestra el motivo.
+- Si la politica pide confirmar (`requireConfirmation`), en un cambio de hasta 5 lineas que no borra codigo la confirmacion es el clic explicito del estudiante sobre la accion (ventana flotante, «Aceptar ayuda» del CodeLens, pista o hover, arreglo rapido abierto con `Ctrl+.`, comando o un reemplazo recien elegido en el overlay): no se abre un segundo dialogo. El modal «Aplicar» queda para las aplicaciones automaticas, los cambios mas grandes y las eliminaciones.
+- Mientras la ventana flotante esta abierta, el CodeLens no repite «Aceptar ayuda» y la pista en linea se oculta. Si el estudiante la cierra con la X, esa sugerencia no se vuelve a ofrecer hasta que llegue otra.
 - Pruebas unitarias (sin descargar VS Code): `npm run test:unit`.
 
 ## Sesion
@@ -64,11 +66,10 @@ La extension resuelve la sesion de ADACEEN (`x-session-id`) en este orden (`src/
 Sin sesion, al arrancar se intenta en silencio la cuenta de GitHub que VS Code ya tiene (`POST /api/auth/editor/github`), salvo que en este equipo se haya cerrado sesion o desconectado VS Code (hasta la siguiente conexion hecha a mano) o que `adaceen.backend.baseUrl` venga del espacio de trabajo abierto. La barra de estado muestra «ADACEEN: sin conectar» o «ADACEEN: <nombre>»; con un clic abre `ADACEEN: Conectar`:
 
 - «Con mi cuenta de GitHub (recomendado)»: un clic en «Permitir». Requiere haber conectado esa cuenta de GitHub en el overlay del navegador.
-- «Tengo un código del navegador»: el codigo `XXXX-XXXX` de un solo uso (dura 10 minutos). Tambien acepta el UUID de sesion de antes.
-- «Pegar sesión»: el ID de sesion copiado del overlay.
+- «Tengo un código o sesión»: el codigo `XXXX-XXXX` de un solo uso que muestra el overlay (dura 10 minutos). Tambien acepta el ID de sesion de versiones anteriores.
 - «Desconectar este equipo» (si hay sesion guardada): la olvida y no vuelve a conectar en silencio.
 
-Si el backend responde `x-adaceen-session: invalid` (por ejemplo, se cerro sesion en el navegador), la extension olvida esa sesion, relee el archivo y, si no queda otra, avisa una vez por ventana con el boton «Conectar». No vuelve a conectar en silencio con GitHub (en un equipo compartido esa cuenta puede ser de otro estudiante). Una sesion que vence con la ventana abierta se detecta en la revision de cada 20 s. El token de GitHub no se guarda ni se registra, y el canal ADACEEN nunca muestra ids de sesion ni codigos.
+Si el backend responde `x-adaceen-session: invalid` (por ejemplo, se cerro sesion en el navegador), la extension olvida esa sesion, relee el archivo y, si no queda otra, avisa una vez por ventana con el boton «Conectar» (el aviso lo nombra; en el tunel tambien sirve volver a pulsar «Abrir mi editor» en el navegador). No vuelve a conectar en silencio con GitHub (en un equipo compartido esa cuenta puede ser de otro estudiante). Una sesion que vence con la ventana abierta se detecta en la revision de cada 20 s. El token de GitHub no se guarda ni se registra, y el canal ADACEEN nunca muestra ids de sesion ni codigos.
 
 ### Enlaces desde el navegador (VS Code de escritorio)
 
@@ -84,7 +85,7 @@ El codigo se canjea contra el backend ya resuelto por la extension (un parametro
 1. Inicia sesion en el overlay ADACEEN del navegador.
 2. Conecta VS Code: en el tunel ya viene conectado; en la Mac del laboratorio, usa «Abrir en VS Code de este equipo» del overlay; en otros casos, `ADACEEN: Conectar`.
 3. Abre un archivo del proyecto. La extension publica el archivo activo, el fragmento cercano al cursor y las opciones de reemplazo hacia el backend.
-4. Desde el navegador elige una opcion de reemplazo. VS Code la reclama y la aplica con confirmacion, salvo que `adaceen.backend.autoApplyCodeActions` este activo.
+4. Desde el navegador elige una opcion de reemplazo. VS Code la reclama y, si encuentra el codigo que elegiste donde lo viste, la aplica sin volver a preguntar (tu clic es la confirmacion; la politica del docente se consulta igual y un cambio grande o que borra codigo pide su dialogo). Si el reemplazo espero mas de 10 minutos en la cola (VS Code estaba cerrado) o su codigo ya no esta (o aparece varias veces lejos del cursor), VS Code pregunta antes de aplicarlo y dice donde caera: el dialogo del docente si su politica pide confirmar o, si no, «Aplicar reemplazo» / «Omitir» (salvo que `adaceen.backend.autoApplyCodeActions` este activo). «ADACEEN: Aplicar siguiente reemplazo del navegador» tambien pregunta por un reemplazo viejo.
 
 ## Desarrollo local
 

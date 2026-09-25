@@ -2,6 +2,11 @@ import * as vscode from 'vscode';
 import { buildIdentityHeaders } from './client-identity';
 import {
   classifyConnectInput,
+  CONNECT_CODE_CHOICE,
+  CONNECT_CODE_PROMPT,
+  connectChoices,
+  ConnectChoiceId,
+  connectFailureActions,
   connectInputProblem,
   ConnectOutcome,
   describeSessionStatus,
@@ -17,6 +22,7 @@ import {
   requestEditorClaim,
   requestSessionCheck,
   ResolvedEditorSession,
+  sessionLostWarning,
 } from './editor-session';
 import {
   AdaceenUriRequest,
@@ -38,8 +44,10 @@ import {
  * (docs/arquitectura/acceso-simplificado.md, seccion 3):
  *
  *   - barra de estado «ADACEEN: sin conectar» / «ADACEEN: <nombre>»;
- *   - comando «ADACEEN: Conectar» (GitHub de VS Code, codigo del navegador o
- *     sesion pegada) y «Configurar sesion compartida», que sigue existiendo;
+ *   - comando «ADACEEN: Conectar» (GitHub de VS Code o «Tengo un codigo o
+ *     sesion», que acepta el codigo del navegador o el ID de sesion de antes);
+ *     «Configurar sesion compartida» sigue en la paleta por compatibilidad (el
+ *     navegador aun lo cita) y abre esa misma caja;
  *   - enlaces vscode://adaceen.adaceen/abrir y /conectar del navegador
  *     (Mac del laboratorio): canjean el codigo y clonan o abren el repo;
  *   - lectura y vigilancia de ~/.adaceen/editor-session.json (tunel).
@@ -204,9 +212,14 @@ export class EditorConnection implements vscode.Disposable {
     this.listeners.push(listener);
   }
 
-  /** «ADACEEN: Configurar sesion compartida»: acepta un codigo o el UUID de antes. */
+  /**
+   * «ADACEEN: Configurar sesion compartida» (compatibilidad): lo mismo que
+   * «Tengo un codigo o sesion». Sigue en la paleta porque el overlay (con un
+   * backend sin emparejamiento) y versiones anteriores del navegador mandan a
+   * buscarlo con F1.
+   */
   promptLegacySession() {
-    return this.promptForCode('legacy');
+    return this.promptForCode();
   }
 
   /** Mensaje para quien quiere sincronizar con el navegador y no esta conectado. */
@@ -317,14 +330,10 @@ export class EditorConnection implements vscode.Disposable {
   }
 
   private warnSessionLost(lost: ResolvedEditorSession | null) {
-    // En el tunel la sesion la escribe la VM: basta con volver a «Abrir mi editor».
-    const fromTunnel = lost?.source === 'file';
-    void vscode.window.showWarningMessage(
-      fromTunnel
-        ? 'ADACEEN: tu sesión dejó de valer (por ejemplo, cerraste sesión en el navegador). Vuelve a pulsar «Abrir mi editor» en el navegador para que tus sugerencias y métricas queden a tu nombre.'
-        : 'ADACEEN: tu sesión dejó de valer (por ejemplo, cerraste sesión en el navegador). Conecta de nuevo para que tus sugerencias y métricas queden a tu nombre.',
-      'Conectar',
-    ).then((choice) => {
+    // En el tunel la sesion la escribe la VM: tambien sirve volver a «Abrir mi editor».
+    // El texto nombra el boton del aviso («Conectar»).
+    const warning = sessionLostWarning(lost?.source === 'file');
+    void vscode.window.showWarningMessage(warning.message, warning.action).then((choice) => {
       if (choice) {
         void this.connect();
       }
@@ -335,33 +344,11 @@ export class EditorConnection implements vscode.Disposable {
   // «ADACEEN: Conectar»
 
   async connect() {
-    type ConnectItem = vscode.QuickPickItem & { id: 'github' | 'code' | 'paste' | 'disconnect' };
-    const items: ConnectItem[] = [
-      {
-        id: 'github',
-        label: '$(github) Con mi cuenta de GitHub (recomendado)',
-        detail: 'Un clic en «Permitir». Usa la cuenta de GitHub que conectaste en ADACEEN.',
-      },
-      {
-        id: 'code',
-        label: '$(key) Tengo un código del navegador',
-        detail: 'El código XXXX-XXXX que muestra el overlay de ADACEEN (dura 10 minutos).',
-      },
-      {
-        id: 'paste',
-        label: '$(clippy) Pegar sesión',
-        detail: 'El ID de sesión que copia el overlay del navegador.',
-      },
-    ];
+    type ConnectItem = vscode.QuickPickItem & { id: ConnectChoiceId };
     const current = this.sessions.current();
     const name = current ? current.userName || current.userEmail : '';
-    if (current?.source === 'secret') {
-      items.push({
-        id: 'disconnect',
-        label: '$(debug-disconnect) Desconectar este equipo',
-        detail: 'Olvida la sesión guardada en VS Code (por ejemplo, en un equipo compartido o si no eres tú).',
-      });
-    }
+    // Una sola opcion para escribir o pegar: el codigo XXXX-XXXX o el ID de sesion de antes.
+    const items: ConnectItem[] = connectChoices({ canDisconnect: current?.source === 'secret' });
     const pick = await vscode.window.showQuickPick(items, {
       title: 'ADACEEN: Conectar',
       placeHolder: current
@@ -380,7 +367,7 @@ export class EditorConnection implements vscode.Disposable {
       await this.disconnect();
       return;
     }
-    await this.promptForCode(pick.id);
+    await this.promptForCode();
   }
 
   /** Olvida la sesion emparejada y dice si queda otra (tunel o ajuste heredado). */
@@ -397,21 +384,15 @@ export class EditorConnection implements vscode.Disposable {
       { location: vscode.ProgressLocation.Notification, title: 'ADACEEN: conectando con tu cuenta de GitHub…' },
       () => this.sessions.connectWithGithub('interactive'),
     );
-    this.reportOutcome(outcome, false, () => this.connectWithGithub());
+    this.reportOutcome(outcome, () => this.connectWithGithub());
   }
 
-  private async promptForCode(mode: 'code' | 'paste' | 'legacy') {
-    const titles = {
-      code: 'ADACEEN: Tengo un código del navegador',
-      paste: 'ADACEEN: Pegar sesión',
-      legacy: 'ADACEEN: Configurar sesión compartida',
-    };
+  /** «Tengo un codigo o sesion»: el codigo XXXX-XXXX se canjea; un ID de sesion se comprueba. */
+  private async promptForCode() {
     const value = await vscode.window.showInputBox({
-      title: titles[mode],
-      prompt: mode === 'code'
-        ? 'Escribe el código de 8 caracteres que muestra el navegador (por ejemplo K7P4-M2QX).'
-        : 'Pega el ID de sesión copiado del overlay del navegador (o un código XXXX-XXXX).',
-      placeHolder: mode === 'code' ? 'XXXX-XXXX' : 'Código XXXX-XXXX o ID de sesión',
+      title: CONNECT_CODE_PROMPT.title,
+      prompt: CONNECT_CODE_PROMPT.prompt,
+      placeHolder: CONNECT_CODE_PROMPT.placeHolder,
       ignoreFocusOut: true,
       validateInput: (text) => connectInputProblem(text),
     });
@@ -428,25 +409,25 @@ export class EditorConnection implements vscode.Disposable {
         ? this.sessions.connectWithCode(input.code, 'codigo')
         : this.sessions.connectWithSessionId(input.sessionId),
     );
-    this.reportOutcome(outcome, mode === 'legacy');
+    this.reportOutcome(outcome);
   }
 
-  private reportOutcome(outcome: ConnectOutcome, legacy: boolean, retry?: () => Promise<void>) {
+  private reportOutcome(outcome: ConnectOutcome, retry?: () => Promise<void>) {
     if (outcome.ok) {
       const name = outcome.session.userName || outcome.session.userEmail;
-      const connected = name ? `Conectado como ${name}.` : 'VS Code quedó conectado.';
-      void vscode.window.showInformationMessage(
-        legacy ? `ADACEEN: sesión compartida configurada. ${connected}` : `ADACEEN: ${connected}`,
-      );
+      void vscode.window.showInformationMessage(`ADACEEN: ${name ? `Conectado como ${name}.` : 'VS Code quedó conectado.'}`);
       return;
     }
     if (outcome.error === 'cancelled') {
       return;
     }
-    const actions = retry ? ['Reintentar', 'Conectar de otra forma'] : ['Conectar de otra forma'];
+    // Un docente con GitHub no tiene nada que reintentar: su boton abre la caja del codigo.
+    const actions = connectFailureActions(outcome.error, !!retry);
     void vscode.window.showWarningMessage(`ADACEEN: no se pudo conectar. ${outcome.message}`, ...actions).then((choice) => {
       if (choice === 'Reintentar' && retry) {
         void retry();
+      } else if (choice === CONNECT_CODE_CHOICE) {
+        void this.promptForCode();
       } else if (choice) {
         void this.connect();
       }

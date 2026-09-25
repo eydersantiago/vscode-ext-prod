@@ -202,6 +202,12 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
   private readonly controller: vscode.CommentController;
   private thread: vscode.CommentThread | null = null;
   private currentKey = '';
+  private readonly visibilityEmitter = new vscode.EventEmitter<void>();
+  /**
+   * Se abrio, se cerro o se movio a otro documento. Con la ventana abierta, el
+   * CodeLens y la pista en linea no repiten «Aceptar ayuda» (suggestion-surfaces.ts).
+   */
+  readonly onDidChangeVisibility = this.visibilityEmitter.event;
 
   constructor() {
     this.controller = vscode.comments.createCommentController(SELECTION_WIDGET_CONTROLLER_ID, 'ADACEEN');
@@ -290,23 +296,37 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       this.thread.label = threadLabel;
       this.thread.contextValue = contextValue;
     } else {
-      this.hide();
+      const previousUri = this.uriString;
+      this.disposeThread();
       const thread = this.controller.createCommentThread(uri, range, [comment]);
       thread.canReply = false;
       thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
       thread.label = threadLabel;
       thread.contextValue = contextValue;
       this.thread = thread;
+      if (previousUri !== uri.toString()) {
+        // Se abrio (o paso a otro documento): el CodeLens y la pista se recalculan.
+        this.visibilityEmitter.fire();
+      }
     }
     this.currentKey = key;
   }
 
   hide() {
+    if (this.disposeThread()) {
+      this.visibilityEmitter.fire();
+    }
+  }
+
+  /** Cierra el hilo sin avisar; true si habia uno. */
+  private disposeThread() {
+    const had = !!this.thread;
     if (this.thread) {
       this.thread.dispose();
       this.thread = null;
     }
     this.currentKey = '';
+    return had;
   }
 
   /**
@@ -334,7 +354,8 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
   }
 
   dispose() {
-    this.hide();
+    this.disposeThread();
     this.controller.dispose();
+    this.visibilityEmitter.dispose();
   }
 }

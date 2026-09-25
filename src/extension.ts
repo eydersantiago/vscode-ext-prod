@@ -30,8 +30,25 @@ import {
   CodeApplicationGuardDeps,
   CodeApplicationVerdict,
   DEFAULT_OFFLINE_MAX_LINES,
+  describeQueuedTarget,
   guardCodeApplication,
+  insertAnchorMatches,
+  isExplicitClickOrigin,
+  isFreshOverlayClick,
+  pickTextMatch,
+  queuedActionSummary,
+  queuedCodeActionAgeMs,
+  queuedCodeActionNeedsPrompt,
+  QueuedTargetCheck,
+  queuedTargetVerified,
+  quickFixOrigin,
 } from './code-application-guard';
+import {
+  codeLensOffersApply,
+  inlineSurfaceModel,
+  SelectionWidgetPresence,
+  selectionWidgetPresence as selectionWidgetPresenceFor,
+} from './suggestion-surfaces';
 import {
   BackendUrlSource,
   describeBackendUrlSource,
@@ -432,6 +449,11 @@ type PendingCodeAction = {
   originalText: string;
   replacementText: string;
   metadata: Record<string, unknown>;
+  /** 'browser_extension' si lo pidio el overlay (clic del estudiante). */
+  source: string;
+  /** Horas del servidor (ISO): cuando se pidio en el navegador y cuando VS Code lo reclamo. */
+  requestedAt: string;
+  claimedAt: string;
 };
 
 function hasActiveSelection(snapshot: Pick<ActiveEditorSnapshot, 'selectionText'>) {
@@ -1469,6 +1491,9 @@ async function claimNextCodeAction(
     originalText: toOptionalString(action.originalText) || '',
     replacementText,
     metadata: normalizeMetadata(action.metadata),
+    source: toOptionalString(action.source) || '',
+    requestedAt: toOptionalString(action.requestedAt) || '',
+    claimedAt: toOptionalString(action.claimedAt) || '',
   };
 }
 
@@ -2928,17 +2953,22 @@ async function resolveWorkspaceFileUri(filePath: string): Promise<vscode.Uri | n
   return null;
 }
 
-function rangeForFirstTextMatch(document: vscode.TextDocument, needle: string): vscode.Range | null {
-  if (!needle) {
-    return null;
-  }
-  const index = document.getText().indexOf(needle);
-  if (index < 0) {
-    return null;
-  }
-  const start = document.positionAt(index);
-  const end = document.positionAt(index + needle.length);
-  return new vscode.Range(start, end);
+/**
+ * Donde esta `needle` en el archivo (pickTextMatch): si aparece varias veces,
+ * la copia que toca el cursor o la seleccion; si ninguna, la primera.
+ */
+function findTextMatch(editor: vscode.TextEditor, needle: string) {
+  const document = editor.document;
+  const match = pickTextMatch(
+    document.getText(),
+    needle,
+    document.offsetAt(editor.selection.start),
+    document.offsetAt(editor.selection.end),
+  );
+  const range = match.index < 0
+    ? null
+    : new vscode.Range(document.positionAt(match.index), document.positionAt(match.index + needle.length));
+  return { range, count: match.count, atFocus: match.atFocus };
 }
 
 function metadataLineNumber(metadata: Record<string, unknown>) {
@@ -3024,11 +3054,49 @@ function createCodeApplicationGuardDeps(
   };
 }
 
+/**
+ * Linea (0-based) debajo de la que se inserta un reemplazo del navegador: la
+ * ultima de la seleccion que mando VS Code (metadata.selectionEndLine) o el
+ * final del rango de respaldo (linea del cursor o seleccion).
+ */
+function insertAnchorLineFor(document: vscode.TextDocument, action: PendingCodeAction, range: vscode.Range) {
+  const selectionEndLine = Number(action.metadata.selectionEndLine) || 0;
+  return selectionEndLine > 0
+    ? Math.min(document.lineCount - 1, selectionEndLine - 1)
+    : range.end.line;
+}
+
+/** Texto de las lineas alrededor del punto de insercion (para insertAnchorMatches). */
+function insertAnchorText(editor: vscode.TextEditor, action: PendingCodeAction, anchorLine: number) {
+  const document = editor.document;
+  let startLine = anchorLine;
+  let endLine = anchorLine;
+  const selectionStartLine = Number(action.metadata.selectionStartLine) || 0;
+  if (selectionStartLine > 0) {
+    startLine = Math.min(startLine, Math.min(document.lineCount - 1, selectionStartLine - 1));
+  }
+  if (!editor.selection.isEmpty) {
+    startLine = Math.min(startLine, editor.selection.start.line);
+    endLine = Math.max(endLine, editor.selection.end.line);
+  }
+  return document.getText(new vscode.Range(startLine, 0, endLine, document.lineAt(endLine).range.end.character));
+}
+
+/**
+ * Aplica un reemplazo que llego del navegador. explicitClick: el estudiante lo
+ * acaba de elegir en el overlay (isFreshOverlayClick). Ese clic es la
+ * confirmacion, sin «Aplicar reemplazo»/«Omitir» ni el dialogo de
+ * requireConfirmation, solo si VS Code encuentra el cambio donde el estudiante
+ * lo vio (queuedTargetVerified); si no, se pregunta diciendo donde caera. La
+ * politica del docente se consulta igual y un cambio grande o que borra codigo
+ * abre el dialogo del docente aunque haya clic.
+ */
 async function applyPendingCodeAction(
   action: PendingCodeAction,
   settings: BackendSettings,
   output: vscode.OutputChannel,
   guardDeps: CodeApplicationGuardDeps,
+  explicitClick: boolean,
 ) {
   const uri = await resolveWorkspaceFileUri(action.filePath);
   if (!uri) {
@@ -3039,13 +3107,42 @@ async function applyPendingCodeAction(
   const editor = await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
   const label = truncateInline(action.title || 'Reemplazo sugerido', 80);
   const applyMode = actionTypeToApplyMode(action.actionType);
+  const fileLabel = pathBaseName(action.filePath);
   const planRange = () => {
-    const directMatch = applyMode === 'insert' ? null : rangeForFirstTextMatch(editor.document, action.originalText);
-    return { directMatch, target: directMatch || rangeForCodeActionFallback(editor, action) };
+    const match = applyMode === 'insert' ? null : findTextMatch(editor, action.originalText);
+    const directMatch = match?.range || null;
+    return {
+      directMatch,
+      target: directMatch || rangeForCodeActionFallback(editor, action),
+      matchCount: match?.count || 0,
+      matchAtFocus: !!match?.atFocus,
+    };
   };
 
   // Guard de aplicacion (A10.8): los reemplazos del navegador tambien pasan por apply-check.
   const measured = planRange();
+  // ¿Cae donde el estudiante lo vio? Si no, su clic en el overlay no basta: se pregunta.
+  const measuredAnchorLine = insertAnchorLineFor(editor.document, action, measured.target);
+  const targetCheck: QueuedTargetCheck = {
+    applyMode,
+    matchCount: measured.matchCount,
+    matchAtFocus: measured.matchAtFocus,
+    anchorMatches: applyMode === 'insert'
+      ? insertAnchorMatches(insertAnchorText(editor, action, measuredAnchorLine), action.originalText)
+      : false,
+    line: (applyMode === 'insert' ? measuredAnchorLine : measured.target.start.line) + 1,
+    fileLabel,
+  };
+  const targetVerified = queuedTargetVerified(targetCheck);
+  const clickConfirms = explicitClick && targetVerified;
+  const summary = queuedActionSummary({
+    label,
+    ageMs: queuedCodeActionAgeMs(action),
+    targetNote: describeQueuedTarget(targetCheck),
+  });
+  if (explicitClick && !targetVerified) {
+    output.appendLine(`[CodeActions] ${action.id}: el destino no se pudo comprobar (${targetCheck.matchCount} coincidencia(s)); se pregunta.`);
+  }
   const verdict = await guardCodeApplication({
     decisionId: toOptionalString(action.metadata.decisionId) || toOptionalString(action.metadata.decision_id),
     filePath: action.filePath,
@@ -3055,8 +3152,10 @@ async function applyPendingCodeAction(
     newText: applyMode === 'delete' ? '' : action.replacementText,
     trigger: toOptionalString(action.metadata.trigger) || 'browser_code_action',
     origin: 'browser_code_action',
-    fileLabel: pathBaseName(action.filePath),
+    fileLabel,
     repoFullName: action.repoFullName,
+    explicitClick: clickConfirms,
+    confirmDetail: clickConfirms ? '' : summary,
   }, guardDeps);
   if (!verdict.allowed) {
     throw new CodeApplicationBlockedError(
@@ -3067,9 +3166,17 @@ async function applyPendingCodeAction(
     );
   }
 
-  if (!verdict.confirmed && !settings.autoApplyCodeActions) {
+  // Solo un reemplazo que nadie confirmo (espero mas de 10 min en la cola, sin
+  // origen del overlay o sin destino comprobado) pregunta aqui; el clic reciente
+  // en el overlay sobre un destino comprobado ya confirmo.
+  const prompted = queuedCodeActionNeedsPrompt({
+    explicitClick: clickConfirms,
+    confirmedByGuard: verdict.confirmed,
+    autoApply: settings.autoApplyCodeActions,
+  });
+  if (prompted) {
     const answer = await vscode.window.showInformationMessage(
-      `ADACEEN: ${label}`,
+      `ADACEEN: ${summary}`,
       { modal: false },
       DEFAULT_CODE_ACTION_CONFIRM_LABEL,
       'Omitir',
@@ -3079,8 +3186,14 @@ async function applyPendingCodeAction(
     }
   }
 
-  // El rango se calcula justo antes de editar, como antes (la confirmacion pudo tardar).
-  const { directMatch: directRange, target: range } = planRange();
+  // Justo antes de editar (la confirmacion pudo tardar): el codigo elegido donde
+  // se midio si sigue ahi, o donde este ahora; si no esta, el mismo rango de
+  // respaldo que se anuncio (no la linea a la que el estudiante movio el cursor
+  // mientras decidia).
+  const measuredStillThere = !!measured.directMatch
+    && editor.document.getText(editor.document.validateRange(measured.directMatch)) === action.originalText;
+  const directRange = measuredStillThere ? measured.directMatch : planRange().directMatch;
+  const range = directRange || editor.document.validateRange(measured.target);
   const eol = getDocumentEol(editor.document);
   let editStart = range.start;
   let appliedTextLength = action.replacementText.length;
@@ -3092,10 +3205,7 @@ async function applyPendingCodeAction(
     }
 
     if (applyMode === 'insert') {
-      const selectionEndLine = Number(action.metadata.selectionEndLine) || 0;
-      const anchorLine = selectionEndLine > 0
-        ? Math.min(document.lineCount - 1, selectionEndLine - 1)
-        : range.end.line;
+      const anchorLine = insertAnchorLineFor(document, action, range);
       const line = document.lineAt(anchorLine);
       const insertPosition = line.range.end;
       const prefix = line.text.trim() ? eol : '';
@@ -3120,12 +3230,14 @@ async function applyPendingCodeAction(
   return {
     filePath: action.filePath,
     replacedByMatch: !!directRange,
+    targetVerified,
     line: range.start.line + 1,
     character: range.start.character + 1,
     appliedAt: new Date().toISOString(),
     linesChanged: verdict.linesChanged,
     charsChanged: verdict.charsChanged,
     applyCheck: verdict.offline ? 'offline' : 'server',
+    confirmedBy: verdict.confirmedBy || (prompted ? 'dialog' : clickConfirms ? 'click' : 'auto'),
     ...(verdict.decisionId ? { decisionId: verdict.decisionId } : {}),
   };
 }
@@ -3167,7 +3279,10 @@ async function processNextCodeActionForRepo(
 
   try {
     output.appendLine(`[CodeActions] Reemplazo reclamado: ${action.id} | ${action.filePath}.`);
-    const metadata = await applyPendingCodeAction(action, settings, output, guardDeps);
+    // Solo el clic reciente en el overlay confirma. El comando pedido a mano no:
+    // el estudiante no ve cual es el siguiente de la cola (puede tener dias).
+    const explicitClick = isFreshOverlayClick(action);
+    const metadata = await applyPendingCodeAction(action, settings, output, guardDeps, explicitClick);
     await completeCodeAction(settings, action.id, {
       ...action.metadata,
       ...metadata,
@@ -4303,8 +4418,22 @@ class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvider, vsco
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeCodeLenses = this.changeEmitter.event;
 
+  /**
+   * widget: donde esta abierta la ventana flotante (ahi ella ofrece «Aceptar ayuda»).
+   * dismissedMetricId: sugerencia que el estudiante descarto con la X de la ventana.
+   */
+  constructor(
+    private readonly widget: () => SelectionWidgetPresence,
+    private readonly dismissedMetricId: () => string = () => '',
+  ) {}
+
   update(model: ActiveSuggestionModel | null) {
     this.model = model;
+    this.changeEmitter.fire();
+  }
+
+  /** Se abrio o cerro la ventana flotante: se recalculan los CodeLens. */
+  refresh() {
     this.changeEmitter.fire();
   }
 
@@ -4327,13 +4456,20 @@ class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvider, vsco
         },
       ),
     ];
-    if (
-      this.model.actionsVisible &&
+    const applyOffered = !!this.model.actionsVisible &&
       !this.model.loading &&
       !this.model.applied &&
       this.model.source !== 'local-fallback' &&
-      isSuggestionApplyOffered(this.model)
-    ) {
+      isSuggestionApplyOffered(this.model);
+    // Con la ventana flotante abierta en este archivo, ella ofrece la accion: sin repetirla aqui.
+    // Tampoco si el estudiante cerro la ventana de esta sugerencia con la X.
+    if (codeLensOffersApply({
+      applyOffered,
+      documentUri: document.uri.toString(),
+      widget: this.widget(),
+      metricId: this.model.metricId,
+      dismissedMetricId: this.dismissedMetricId(),
+    })) {
       const recommendedMode = this.model.applyMode || 'insert';
       const note = suggestionApplicationNote(this.model);
       lenses.push(new vscode.CodeLens(range, {
@@ -4388,7 +4524,7 @@ function suggestionCodeActionTitle(mode: SuggestionApplyMode, focusLabel: string
   return `ADACEEN: Aceptar ayuda - agregar debajo${suffix}`;
 }
 
-function buildSuggestionCodeActions(model: ActiveSuggestionModel) {
+function buildSuggestionCodeActions(model: ActiveSuggestionModel, origin: 'quick_fix' | 'quick_fix_auto') {
   const recommendedMode = model.applyMode || 'insert';
   const focusLabel = model.selectionLineCount ? 'seleccion' : 'linea';
   const action = new vscode.CodeAction(
@@ -4398,7 +4534,7 @@ function buildSuggestionCodeActions(model: ActiveSuggestionModel) {
   action.command = {
     title: action.title,
     command: 'adaceen.applySuggestionCompletion',
-    arguments: [recommendedMode, 'quick_fix'],
+    arguments: [recommendedMode, origin],
   };
   action.isPreferred = true;
   return [action];
@@ -4406,6 +4542,13 @@ function buildSuggestionCodeActions(model: ActiveSuggestionModel) {
 
 class AdaceenSuggestionCodeActionProvider implements vscode.CodeActionProvider, vscode.Disposable {
   private model: ActiveSuggestionModel | null = null;
+
+  /**
+   * autoOpenedAt: cuando ADACEEN abrio solo el menu de arreglos rapidos. Esa
+   * accion (preseleccionada, un Enter la aplica) no cuenta como clic del
+   * estudiante: con requireConfirmation pregunta (quickFixOrigin).
+   */
+  constructor(private readonly autoOpenedAt: () => number = () => 0) {}
 
   update(model: ActiveSuggestionModel | null) {
     this.model = model;
@@ -4432,7 +4575,7 @@ class AdaceenSuggestionCodeActionProvider implements vscode.CodeActionProvider, 
       return [];
     }
 
-    return buildSuggestionCodeActions(this.model);
+    return buildSuggestionCodeActions(this.model, quickFixOrigin(this.autoOpenedAt()));
   }
 
   dispose() {
@@ -4944,11 +5087,25 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand('adaceen.quiz.checkPending', () => quizView.checkPending(true)),
   );
-  const suggestionCodeLensProvider = new AdaceenSuggestionCodeLensProvider();
-  const suggestionCodeActionProvider = new AdaceenSuggestionCodeActionProvider();
-  const suggestionInlayHintProvider = new AdaceenSuggestionInlayHintProvider();
   // Ventana flotante anclada a la seleccion: una sola sugerencia, en un solo sitio.
   const selectionWidget = new AdaceenSelectionWidget();
+  // Con comments.visible=false el hilo existe pero no se ve: no cuenta como abierta.
+  const selectionWidgetPresence = (): SelectionWidgetPresence => selectionWidgetPresenceFor({
+    hasThread: selectionWidget.visible,
+    uriString: selectionWidget.uriString,
+    commentsVisible: vscode.workspace.getConfiguration('comments').get<boolean>('visible', true) !== false,
+  });
+  // Sugerencia que el estudiante descarto con la X de la ventana flotante: no se vuelve a
+  // ofrecer en el CodeLens ni en la pista hasta que llegue otra.
+  let dismissedSuggestionMetricId = '';
+  const suggestionCodeLensProvider = new AdaceenSuggestionCodeLensProvider(
+    selectionWidgetPresence,
+    () => dismissedSuggestionMetricId,
+  );
+  // Cuando ADACEEN abre solo el menu de arreglos rapidos (maybeOpenSelectionInlinePanel).
+  let quickFixAutoOpenedAt = 0;
+  const suggestionCodeActionProvider = new AdaceenSuggestionCodeActionProvider(() => quickFixAutoOpenedAt);
+  const suggestionInlayHintProvider = new AdaceenSuggestionInlayHintProvider();
   const suggestionStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98);
   suggestionStatusBar.command = 'adaceen.openAssistant';
   updateSuggestionStatusBar(suggestionStatusBar, null, resolveActiveSuggestionSettings().enabled);
@@ -5116,12 +5273,30 @@ export async function activate(context: vscode.ExtensionContext) {
         void vscode.commands.executeCommand('editor.action.showHover');
         if (activeSuggestionModel.actionsVisible && !activeSuggestionModel.loading) {
           setTimeout(() => {
+            // La accion recomendada queda preseleccionada: no cuenta como clic.
+            quickFixAutoOpenedAt = Date.now();
             void vscode.commands.executeCommand('editor.action.quickFix');
           }, 220);
         }
       }
     }, model.loading ? 160 : 80);
   };
+
+  /**
+   * Pista en linea y decoracion de fin de linea de la sugerencia activa. Con la
+   * ventana flotante abierta en ese archivo se apagan (ella ofrece la accion);
+   * vuelven al cerrarla (suggestion-surfaces.ts).
+   */
+  const refreshInlineSuggestionSurfaces = () => {
+    const model = inlineSurfaceModel(activeSuggestionModel, selectionWidgetPresence(), dismissedSuggestionMetricId);
+    suggestionInlayHintProvider.update(model);
+    applySuggestionDecoration(suggestionDecorationType, model);
+  };
+  // La ventana flotante se abrio o se cerro: el CodeLens y la pista no repiten «Aceptar ayuda».
+  context.subscriptions.push(selectionWidget.onDidChangeVisibility(() => {
+    suggestionCodeLensProvider.refresh();
+    refreshInlineSuggestionSurfaces();
+  }));
 
   const publishSuggestionModel = (model: ActiveSuggestionModel | null, enabled = true) => {
     // Una sugerencia mostrada que se reemplaza por otra o desaparece sin
@@ -5134,6 +5309,10 @@ export async function activate(context: vscode.ExtensionContext) {
       recordIgnoredSuggestion(ignored.item, ignored.durationMs, model ? 'replaced' : 'dismissed');
     }
     activeSuggestionModel = model;
+    if (!model || model.applied || model.metricId !== dismissedSuggestionMetricId) {
+      // Llego otra sugerencia (o se aplico): lo descartado con la X deja de contar.
+      dismissedSuggestionMetricId = '';
+    }
     updateSuggestionStatusBar(suggestionStatusBar, model, enabled);
     quizView.updateHistory(toQuizHistoryItems(latestSuggestionHistory));
     suggestionCodeLensProvider.update(model);
@@ -5144,8 +5323,7 @@ export async function activate(context: vscode.ExtensionContext) {
     selectionWidget.show(widgetModel);
     // Con el widget a la vista, el inlay hint y la decoracion de fin de linea
     // repetirian lo mismo a dos centimetros: se apagan mientras dure.
-    suggestionInlayHintProvider.update(widgetModel ? null : model);
-    applySuggestionDecoration(suggestionDecorationType, widgetModel ? null : model);
+    refreshInlineSuggestionSurfaces();
     maybeOpenSelectionInlinePanel(model);
     if (model && !model.loading && !model.applied) {
       void rememberSuggestionHistory(context.workspaceState, model)
@@ -5751,6 +5929,8 @@ export async function activate(context: vscode.ExtensionContext) {
       origin,
       fileLabel: model.fileName,
       repoFullName: model.repoFullName,
+      // Ventana flotante, CodeLens, arreglo rapido, pista, hover o comando: el clic confirma.
+      explicitClick: isExplicitClickOrigin(origin),
     }, codeApplicationGuardDeps);
     if (!verdict.allowed) {
       return;
@@ -5798,6 +5978,7 @@ export async function activate(context: vscode.ExtensionContext) {
       origin,
       applyCheck: verdict.offline ? 'offline' : 'server',
       confirmedByStudent: verdict.confirmed,
+      confirmedBy: verdict.confirmedBy || '',
     }, false, {
       decisionId: verdict.decisionId || model.decisionId,
       durationMs: shownAt === null ? null : Date.now() - shownAt,
@@ -5834,6 +6015,8 @@ export async function activate(context: vscode.ExtensionContext) {
       if (dismissed) {
         recordIgnoredSuggestion(dismissed.item, dismissed.durationMs, 'closed');
       }
+      // Descartada: al cerrarse la ventana, el CodeLens y la pista no la vuelven a ofrecer.
+      dismissedSuggestionMetricId = model?.metricId || '';
       selectionWidget.hide();
     }),
   ];
@@ -5919,7 +6102,8 @@ export async function activate(context: vscode.ExtensionContext) {
     async (mode?: string, origin?: unknown) => {
       const normalizedMode: SuggestionApplyMode | undefined =
         mode === 'insert' || mode === 'replace' || mode === 'delete' ? mode : undefined;
-      // origin lo ponen la ventana flotante, el CodeLens, el quick fix... (solo para metricas).
+      // origin lo ponen la ventana flotante, el CodeLens, el quick fix...: va a las metricas y
+      // decide si el clic cuenta como confirmacion (isExplicitClickOrigin). Sin origin, la paleta.
       const normalizedOrigin = typeof origin === 'string' && /^[a-z_]{1,40}$/.test(origin) ? origin : 'command';
       await applySuggestionCompletion(normalizedMode, normalizedOrigin);
     },
@@ -5965,7 +6149,8 @@ export async function activate(context: vscode.ExtensionContext) {
     });
   });
 
-  // Sigue existiendo: acepta un codigo XXXX-XXXX (lo canjea) o el UUID de antes.
+  // Compatibilidad: lo mismo que «ADACEEN: Conectar» → «Tengo un codigo o sesion»; acepta un
+  // codigo XXXX-XXXX (lo canjea) o el UUID de antes. Sigue en la paleta: el navegador lo cita.
   // La sesion va a SecretStorage (no a settings), por encima del ajuste heredado.
   const setBackendSessionIdDisposable = vscode.commands.registerCommand('adaceen.setBackendSessionId', () =>
     connection.promptLegacySession(),
@@ -6191,8 +6376,7 @@ export async function activate(context: vscode.ExtensionContext) {
         lastActiveDocumentUri = activeUri;
         pendingFileOpenUri = activeUri;
       }
-      suggestionInlayHintProvider.update(activeSuggestionModel);
-      applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
+      refreshInlineSuggestionSurfaces();
       scheduleCursorIdleSuggestionRefresh();
       evaluateErrorSignals();
     }),
@@ -6200,8 +6384,7 @@ export async function activate(context: vscode.ExtensionContext) {
       selectionWidget.onSelectionChanged(event.textEditor);
       if (vscode.window.activeTextEditor?.document.uri.toString() === event.textEditor.document.uri.toString()) {
         scheduleCursorIdleSuggestionRefresh();
-        suggestionInlayHintProvider.update(activeSuggestionModel);
-        applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
+        refreshInlineSuggestionSurfaces();
       }
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
@@ -6209,8 +6392,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (event.contentChanges.length > 0) {
           rememberEdit(event.document.uri.toString());
         }
-        suggestionInlayHintProvider.update(activeSuggestionModel);
-        applySuggestionDecoration(suggestionDecorationType, activeSuggestionModel);
+        refreshInlineSuggestionSurfaces();
         scheduleCursorIdleSuggestionRefresh();
       }
     }),
@@ -6240,6 +6422,11 @@ export async function activate(context: vscode.ExtensionContext) {
       if (event.affectsConfiguration('adaceen.triggers')) {
         errorSignalTracker.updateSettings(errorSignalSettingsFromConfig());
         evaluateErrorSignals();
+      }
+      if (event.affectsConfiguration('comments.visible')) {
+        // Comentarios ocultos: la ventana flotante no se ve y el CodeLens y la pista vuelven.
+        suggestionCodeLensProvider.refresh();
+        refreshInlineSuggestionSurfaces();
       }
     }),
     {
