@@ -37,7 +37,7 @@ La extension expone estas opciones:
 - `adaceen.scan.excludeGlob`: glob de exclusion
 - `adaceen.scan.maxFiles`: maximo de archivos
 - `adaceen.scan.maxFileKB`: tamano maximo por archivo en KB
-- `adaceen.backend.baseUrl`: URL base del backend ADACEEN
+- `adaceen.backend.baseUrl`: URL base del backend ADACEEN. Vacio (por defecto): el backend local `http://127.0.0.1:3000` si esta corriendo en el equipo (`npm run dev:local`) y, si no, produccion; en Codespaces, produccion
 - `adaceen.backend.sessionId`: sesion compartida con el overlay del navegador
 - `adaceen.backend.codeActionsEnabled`: consulta reemplazos enviados desde el navegador
 - `adaceen.backend.autoApplyCodeActions`: aplica reemplazos sin confirmacion (salvo que la politica del docente pida confirmar)

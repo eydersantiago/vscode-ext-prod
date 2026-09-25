@@ -131,6 +131,23 @@ describe('TelemetryClient', () => {
     assert.equal(client.nextSeq, 2);
   });
 
+  it('agrega a cada evento la metadata base (entorno del editor) sin pisar la del evento', async () => {
+    const { impl, calls } = fakeFetch([{ status: 200 }]);
+    const client = new TelemetryClient({
+      getEndpoint: () => endpoint,
+      fetchImpl: impl,
+      flushDelayMs: 5,
+      baseMetadata: () => ({ editorHost: 'local', editorUi: 'desktop' }),
+    });
+    client.track({ category: 'suggestion', eventType: 'vscode_suggestion_shown' });
+    client.track({ category: 'signal', eventType: 'compile_error_detected', metadata: { line: 4, editorUi: 'web' } });
+    await client.flush();
+
+    const events = calls[0].body.events;
+    assert.deepEqual(events[0].metadata, { editorHost: 'local', editorUi: 'desktop' });
+    assert.deepEqual(events[1].metadata, { editorHost: 'local', editorUi: 'web', line: 4 });
+  });
+
   it('con sesion manda tambien x-session-id', async () => {
     const { impl, calls } = fakeFetch([{ status: 200 }]);
     const client = new TelemetryClient({ getEndpoint: () => ({ ...endpoint, sessionId: 'ses-1' }), fetchImpl: impl, flushDelayMs: 5 });

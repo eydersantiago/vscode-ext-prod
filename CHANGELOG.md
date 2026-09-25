@@ -4,6 +4,24 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.30] - 2026-09-24
+
+### Cambiado
+
+- Backend por defecto (Mac del laboratorio y VS Code instalado en cualquier equipo): la conexión local de siempre se conserva. Si en el equipo corre un backend de ADACEEN (`npm run dev:local` o el rol local de las Mac del laboratorio), la extensión lo usa en `http://127.0.0.1:3000`, igual que antes. Si no hay backend local, usa producción, así que VS Code instalado en las Mac del laboratorio o en Windows funciona sin configurar nada. Se reconoce el backend local por su `GET /health` (`ok`, `mode` y `database_provider`), para no confundirlo con otra aplicación del estudiante en el puerto 3000. La prueba se hace al activar (máximo 800 ms) y cada 30 s, así que encender o apagar el backend local cambia el destino sin reiniciar VS Code. Un valor escrito en `adaceen.backend.baseUrl` o en `ADACEEN_BACKEND_URL` sigue mandando, y Codespaces sigue en producción (`src/backend-url.ts`). En vscode.dev sin túnel (extensión web) no se prueba el equipo, para que el navegador no pida permiso de red local: va a producción.
+- El valor por defecto de `adaceen.backend.baseUrl` pasa a vacío. Quien ya lo tenía escrito, por ejemplo `http://127.0.0.1:3000` o la URL de la VM de editores que fija `nuevo-tunel.sh`, conserva ese valor.
+
+### Añadido
+
+- Telemetría: cada evento lleva `metadata.editorHost` (`local`, `tunnel`, `codespaces` o `remote`) y `metadata.editorUi` (`desktop` o `web`). Así el piloto puede separar VS Code instalado en las Mac del laboratorio de vscode.dev por túnel.
+- Indicador de GPU: el tooltip lista los servidores de inferencia con latido reciente (por ejemplo «Mac del laboratorio - M2 x2, Google Cloud - V100») y de dónde salió la URL del backend.
+- El canal ADACEEN registra el backend elegido y cada cambio (`[Backend] …`).
+- 11 pruebas unitarias nuevas (70 en total).
+
+### Compatibilidad
+
+- `editorHost` y `editorUi` solo se guardan con un backend que los tenga en su lista blanca de metadata (rama `feat/macs-laboratorio` de PDC). Un backend anterior descarta esas claves y guarda el resto del evento.
+
 ## [0.0.29] - 2026-09-24
 
 ### Añadido

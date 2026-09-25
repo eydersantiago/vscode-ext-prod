@@ -253,6 +253,11 @@ type FetchLike = (url: string, init: {
 
 export type TelemetryClientOptions = {
   getEndpoint: () => TelemetryEndpoint | null;
+  /**
+   * Metadata que llevan todos los eventos (editorHost, editorUi). La metadata
+   * propia del evento manda si repite una clave.
+   */
+  baseMetadata?: () => Record<string, unknown>;
   log?: (line: string) => void;
   fetchImpl?: FetchLike;
   /** Espera para juntar eventos casi simultaneos en un solo POST. */
@@ -275,7 +280,7 @@ export class TelemetryClient {
   private pending: TelemetryEventPayload[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private consecutiveFailures = 0;
-  private readonly options: Required<Omit<TelemetryClientOptions, 'log' | 'fetchImpl' | 'random'>> & TelemetryClientOptions;
+  private readonly options: Required<Omit<TelemetryClientOptions, 'log' | 'fetchImpl' | 'random' | 'baseMetadata'>> & TelemetryClientOptions;
 
   constructor(options: TelemetryClientOptions) {
     this.options = {
@@ -294,7 +299,11 @@ export class TelemetryClient {
 
   /** Encola un evento; sale en el siguiente POST (unos cientos de ms). */
   track(input: TelemetryEventInput): TelemetryEventPayload {
-    const event = buildTelemetryEvent(input, { seq: this.seq, clientSessionId: this.clientSessionId });
+    const base = this.options.baseMetadata?.();
+    const withBase = base && Object.keys(base).length
+      ? { ...input, metadata: { ...base, ...(input.metadata || {}) } }
+      : input;
+    const event = buildTelemetryEvent(withBase, { seq: this.seq, clientSessionId: this.clientSessionId });
     this.seq += 1;
     this.pending.push(event);
     if (!this.flushTimer) {

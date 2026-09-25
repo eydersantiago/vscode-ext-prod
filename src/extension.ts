@@ -30,6 +30,15 @@ import {
   DEFAULT_OFFLINE_MAX_LINES,
   guardCodeApplication,
 } from './code-application-guard';
+import {
+  BackendUrlSource,
+  describeBackendUrlSource,
+  detectEditorHost,
+  LOCAL_BACKEND_BASE_URL,
+  needsLocalBackendProbe,
+  probeLocalBackend,
+  resolveBackendBaseUrl,
+} from './backend-url';
 
 const DEFAULT_INCLUDE_GLOB =
   '**/*.{ts,tsx,js,jsx,mjs,cjs,py,java,cpp,c,h,hpp,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}';
@@ -44,8 +53,8 @@ const DEFAULT_MAX_FILES = 200;
 const DEFAULT_MAX_FILE_BYTES = 300 * 1024; // 300 KB por archivo
 const DEFAULT_MAX_DOCUMENTS = 12;
 const DEFAULT_MAX_DOCUMENT_BYTES = 1024 * 1024;
-const DEFAULT_BACKEND_BASE_URL = 'http://127.0.0.1:3000';
-const DEFAULT_CODESPACES_BACKEND_BASE_URL = 'https://app-adaceen-api-eyder05232002.azurewebsites.net';
+// Backend: local si esta corriendo en esta maquina, si no produccion (src/backend-url.ts).
+let localBackendDetected: boolean | null = null;
 const DEFAULT_WORKER_POLL_MS = 8000;
 const DEFAULT_ACTIVE_SUGGESTION_DEBOUNCE_MS = 900;
 const DEFAULT_ACTIVE_SUGGESTION_MAX_CODE_CHARS = 24000;
@@ -150,6 +159,8 @@ type ScanComputation = {
 
 type BackendSettings = {
   baseUrl: string;
+  /** De donde salio baseUrl (ajuste, entorno, Codespaces, local detectado o produccion). */
+  baseUrlSource: BackendUrlSource;
   scanWorkerKey: string;
   sessionId: string;
   autoWorkerEnabled: boolean;
@@ -532,15 +543,6 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function normalizeBackendBaseUrl(value: string | undefined): string {
-  const fallback = DEFAULT_BACKEND_BASE_URL;
-  const clean = toOptionalString(value);
-  if (!clean) {
-    return fallback;
-  }
-  return clean.replace(/\/+$/, '');
-}
-
 function getConfiguredString(config: vscode.WorkspaceConfiguration, key: string): string | undefined {
   const inspected = config.inspect<string>(key);
   return toOptionalString(inspected?.workspaceFolderLanguageValue) ??
@@ -559,6 +561,34 @@ function isCodespaceRuntime(): boolean {
 
   const envFlag = (getEnv('CODESPACES') ?? '').toLowerCase();
   return envFlag === 'true' || envFlag === '1';
+}
+
+/**
+ * Prueba si hay un backend de ADACEEN en 127.0.0.1:3000 (npm run dev:local o
+ * el rol local de las Mac del laboratorio). Solo cuando nadie eligio el backend
+ * y no es Codespaces. Devuelve true si cambio la deteccion.
+ */
+async function refreshLocalBackendDetection(): Promise<boolean> {
+  const config = vscode.workspace.getConfiguration('adaceen');
+  const probeNeeded = needsLocalBackendProbe({
+    configured: getConfiguredString(config, 'backend.baseUrl'),
+    envUrl: getEnv('ADACEEN_BACKEND_URL'),
+    codespace: isCodespaceRuntime(),
+  });
+  if (!probeNeeded) {
+    return false;
+  }
+  if (vscode.env.uiKind === vscode.UIKind.Web && !vscode.env.remoteName) {
+    // Extension web (vscode.dev sin tunel): no se prueba 127.0.0.1 para que el
+    // navegador no pida permiso de red local; va a produccion.
+    const changed = localBackendDetected !== false;
+    localBackendDetected = false;
+    return changed;
+  }
+  const detected = await probeLocalBackend(fetch, LOCAL_BACKEND_BASE_URL, 800);
+  const changed = detected !== localBackendDetected;
+  localBackendDetected = detected;
+  return changed;
 }
 
 function resolveScanOptions(args: ScanCommandArgs | undefined): ScanOptions {
@@ -637,16 +667,12 @@ function resolveScanOptions(args: ScanCommandArgs | undefined): ScanOptions {
 
 function resolveBackendSettings(): BackendSettings {
   const config = vscode.workspace.getConfiguration('adaceen');
-  const configuredBaseUrl = getConfiguredString(config, 'backend.baseUrl');
-  const defaultBaseUrl = isCodespaceRuntime()
-    ? DEFAULT_CODESPACES_BACKEND_BASE_URL
-    : DEFAULT_BACKEND_BASE_URL;
-
-  const baseUrl = normalizeBackendBaseUrl(
-    configuredBaseUrl ??
-      toOptionalString(getEnv('ADACEEN_BACKEND_URL')) ??
-      defaultBaseUrl,
-  );
+  const { baseUrl, source: baseUrlSource } = resolveBackendBaseUrl({
+    configured: getConfiguredString(config, 'backend.baseUrl'),
+    envUrl: getEnv('ADACEEN_BACKEND_URL'),
+    codespace: isCodespaceRuntime(),
+    localBackendDetected,
+  });
 
   const scanWorkerKey =
     toOptionalString(config.get<string>('backend.scanWorkerKey')) ??
@@ -686,6 +712,7 @@ function resolveBackendSettings(): BackendSettings {
 
   return {
     baseUrl,
+    baseUrlSource,
     scanWorkerKey,
     sessionId,
     autoWorkerEnabled,
@@ -4500,6 +4527,8 @@ type BackendOrigin = {
   aliveWorkers: number | null;
   /** Workers que el backend conoce (listening.length); null si no viene. */
   listeningCount: number | null;
+  /** Servidores con latido reciente, agrupados: "Mac del laboratorio - M2 x2". */
+  aliveLabels: string[];
 };
 
 const UNKNOWN_BACKEND_ORIGIN: BackendOrigin = {
@@ -4512,6 +4541,7 @@ const UNKNOWN_BACKEND_ORIGIN: BackendOrigin = {
   noWorker: false,
   aliveWorkers: null,
   listeningCount: null,
+  aliveLabels: [],
 };
 
 /**
@@ -4526,10 +4556,19 @@ function readWorkerHeartbeat(data: Record<string, unknown>) {
   const aliveWorkers = typeof aliveRaw === 'number' && Number.isFinite(aliveRaw) ? Math.max(0, Math.floor(aliveRaw)) : null;
   const mode = (toOptionalString(data.mode) || '').toLowerCase();
   const heartbeatMode = mode !== 'local' && mode !== 'azure';
+  const counts = new Map<string, number>();
+  for (const entry of listening ?? []) {
+    const worker = asRecord(entry);
+    const label = toOptionalString(worker.label);
+    if (worker.alive === true && label) {
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+  }
   return {
     listeningCount: listening ? listening.length : null,
     aliveWorkers,
     noWorker: !!listening && aliveWorkers === 0 && heartbeatMode,
+    aliveLabels: [...counts].map(([label, count]) => (count > 1 ? `${label} x${count}` : label)),
   };
 }
 
@@ -4585,6 +4624,7 @@ async function fetchBackendOrigin(settings: BackendSettings): Promise<BackendOri
       noWorker: heartbeat.noWorker,
       aliveWorkers: heartbeat.aliveWorkers,
       listeningCount: heartbeat.listeningCount,
+      aliveLabels: heartbeat.aliveLabels,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -4612,7 +4652,8 @@ function updateBackendOriginStatusBar(
     origin.aliveWorkers !== null && origin.listeningCount !== null
       ? `Workers con latido reciente: ${origin.aliveWorkers} de ${origin.listeningCount}`
       : '',
-    `Backend: ${settings.baseUrl}`,
+    origin.aliveLabels.length ? `Servidores vivos: ${origin.aliveLabels.join(', ')}` : '',
+    `Backend: ${settings.baseUrl} (${describeBackendUrlSource(settings.baseUrlSource)})`,
     origin.detail,
   ]
     .filter(Boolean)
@@ -4789,7 +4830,7 @@ function applySuggestionDecoration(
   editor.setDecorations(decorationType, [decoration]);
 }
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel('ADACEEN');
   const safeLog = (line: string) => {
     try {
@@ -4798,14 +4839,23 @@ export function activate(context: vscode.ExtensionContext) {
       // Canal ya cerrado (desactivacion): se descarta la linea.
     }
   };
+  // Antes de la primera llamada: backend local si esta corriendo, si no produccion.
+  // Sin nada escuchando en el 3000 la prueba termina al instante (maximo 800 ms).
+  await refreshLocalBackendDetection();
   // Identidad unica para TODAS las llamadas al backend (x-adaceen-client-id);
   // es el mismo id persistente que usaba la vista de quiz.
   initClientIdentity(context.globalState);
+  // Donde corre el editor (VS Code instalado, tunel, Codespaces), en cada evento.
+  const editorMetadata = {
+    editorHost: detectEditorHost({ remoteName: vscode.env.remoteName, codespace: isCodespaceRuntime() }),
+    editorUi: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
+  };
   const telemetry = new TelemetryClient({
     getEndpoint: () => {
       const settings = resolveBackendSettings();
       return { baseUrl: settings.baseUrl, sessionId: settings.sessionId, clientId: currentClientId() };
     },
+    baseMetadata: () => editorMetadata,
     log: safeLog,
   });
   const codeApplicationGuardDeps = createCodeApplicationGuardDeps(telemetry, output);
@@ -4813,6 +4863,9 @@ export function activate(context: vscode.ExtensionContext) {
   const startupSettings = resolveBackendSettings();
   output.appendLine(
     `[Worker] Inicializado | auto=${startupSettings.autoWorkerEnabled} | backend=${startupSettings.baseUrl} | pollMs=${startupSettings.workerPollMs} | workerId=${startupSettings.workerId}`,
+  );
+  output.appendLine(
+    `[Backend] ${startupSettings.baseUrl} (${describeBackendUrlSource(startupSettings.baseUrlSource)}) | editor=${editorMetadata.editorHost}/${editorMetadata.editorUi}`,
   );
   output.appendLine(`[Identidad] clientId=${currentClientId()} | clientSessionId=${telemetry.clientSessionId}`);
 
@@ -4863,6 +4916,11 @@ export function activate(context: vscode.ExtensionContext) {
   let backendOriginTimer: ReturnType<typeof setInterval> | null = null;
 
   const refreshBackendOrigin = async (announce = false) => {
+    // Si se enciende o se apaga el backend local (npm run dev:local), se cambia solo.
+    if (await refreshLocalBackendDetection()) {
+      const switched = resolveBackendSettings();
+      safeLog(`[Backend] Cambia a ${switched.baseUrl} (${describeBackendUrlSource(switched.baseUrlSource)})`);
+    }
     const settings = resolveBackendSettings();
     const origin = await fetchBackendOrigin(settings);
     updateBackendOriginStatusBar(backendOriginStatusBar, origin, settings);
