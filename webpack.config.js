@@ -50,6 +50,11 @@ const nodeExtensionConfig = {
 /** @type WebpackConfig */
 const webExtensionConfig = {
   ...baseConfig,
+  // La version web no tiene procesos: child_process queda vacio y el escaneo no filtra con git.
+  resolve: {
+    ...baseConfig.resolve,
+    fallback: { child_process: false },
+  },
   target: 'webworker',
   output: {
     path: path.resolve(__dirname, 'dist', 'web'),

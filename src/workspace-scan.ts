@@ -1,7 +1,11 @@
 // ADACEEN (VS Code): escaneo del espacio de trabajo (carpetas, archivos y documentos) y su salida.
-// Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
+// Movido desde src/extension.ts. Desde 0.0.33 (A12.12) no sale lo que ignora .gitignore, ni archivos
+// con claves o contrasenas, ni mas de 3 MB en total (scan-privacy.ts).
+import * as childProcess from 'child_process';
 import * as vscode from 'vscode';
 import { DOCUMENT_EXTENSIONS } from './constants';
+import { containsSecret, DEFAULT_MAX_TOTAL_SCAN_BYTES, describeScanPermission, emptyScanPrivacyCounts, isSecretPath, parseGitLsFiles } from './scan-privacy';
+import { PROMPT_TIMED_OUT, promptWithTimeout } from './code-action-queue';
 import { isCodespaceRuntime, resolveScanOptions } from './settings';
 import type { ScanCommandArgs, ScanComputation, ScanMode, ScanOptions, ScanPayload, ScannedDocument, ScannedFile } from './types';
 
@@ -176,6 +180,30 @@ export async function findWorkspaceDocuments(
     .slice(0, options.maxDocuments);
 }
 
+/**
+ * Archivos que git no ignora en la carpeta (`git ls-files --cached --others --exclude-standard`),
+ * relativos a ella. null si no es un repositorio o git no esta: entonces no se filtra por .gitignore.
+ */
+export function listGitVisibleFiles(folder: vscode.WorkspaceFolder): Promise<Set<string> | null> {
+  // En la version web (vscode.dev sin servidor remoto) no hay git ni procesos.
+  if (folder.uri.scheme !== 'file' || typeof childProcess.execFile !== 'function') {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    childProcess.execFile(
+      'git',
+      ['-C', folder.uri.fsPath, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { timeout: 10_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      (error, stdout) => resolve(error ? null : parseGitLsFiles(String(stdout))),
+    );
+  });
+}
+
+function relativeToFolder(folder: vscode.WorkspaceFolder, uri: vscode.Uri) {
+  const base = folder.uri.path.replace(/\/+$/, '');
+  return uri.path.startsWith(`${base}/`) ? uri.path.slice(base.length + 1) : vscode.workspace.asRelativePath(uri, false);
+}
+
 export async function performWorkspaceScan(args: ScanCommandArgs | undefined, output: vscode.OutputChannel): Promise<ScanComputation> {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders?.length) {
@@ -184,13 +212,40 @@ export async function performWorkspaceScan(args: ScanCommandArgs | undefined, ou
 
   const options = resolveScanOptions(args);
   const selection = selectFolders(options.mode, workspaceFolders);
-  const files = await findWorkspaceFiles(selection.folders, options);
-  const documents = await findWorkspaceDocuments(selection.folders, options, output);
+  const privacy = emptyScanPrivacyCounts();
+  const maxTotalBytes = DEFAULT_MAX_TOTAL_SCAN_BYTES;
+
+  // .gitignore: lo que git ignora no sale del equipo (antes el exclude propio lo pasaba por alto).
+  const gitVisibleByFolder = new Map<string, Set<string> | null>();
+  for (const folder of selection.folders) {
+    gitVisibleByFolder.set(folder.uri.toString(), await listGitVisibleFiles(folder));
+  }
+  const gitignoreApplied = [...gitVisibleByFolder.values()].some((visible) => visible !== null);
+  const allowedByPrivacy = (uri: vscode.Uri) => {
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    const relative = folder ? relativeToFolder(folder, uri) : vscode.workspace.asRelativePath(uri, false);
+    const visible = folder ? gitVisibleByFolder.get(folder.uri.toString()) : null;
+    if (visible && !visible.has(relative)) {
+      privacy.skippedByGitignore += 1;
+      return false;
+    }
+    if (isSecretPath(relative)) {
+      privacy.skippedAsSecret += 1;
+      return false;
+    }
+    return true;
+  };
+
+  const files = (await findWorkspaceFiles(selection.folders, options)).filter(allowedByPrivacy);
+  const documents = (await findWorkspaceDocuments(selection.folders, options, output))
+    .filter((document) => allowedByPrivacy(document.uri));
 
   const results: ScannedFile[] = [];
   let skippedBySize = 0;
+  let totalBytes = 0;
 
   for (const uri of files) {
+    const relativePath = vscode.workspace.asRelativePath(uri, false);
     try {
       const bytes = await vscode.workspace.fs.readFile(uri);
 
@@ -199,19 +254,29 @@ export async function performWorkspaceScan(args: ScanCommandArgs | undefined, ou
         continue;
       }
 
-      const textDocument = await vscode.workspace.openTextDocument(uri);
-      const text = textDocument.getText();
+      // Se lee de los bytes (no con openTextDocument, que despierta los servidores de lenguaje).
+      const text = new TextDecoder('utf-8').decode(bytes);
+      if (containsSecret(text, relativePath)) {
+        privacy.skippedAsSecret += 1;
+        output.appendLine(`Omitido por posible clave o contrasena: ${relativePath}`);
+        continue;
+      }
+      if (totalBytes + bytes.byteLength > maxTotalBytes) {
+        privacy.skippedByBudget += 1;
+        continue;
+      }
+      totalBytes += bytes.byteLength;
       const lines = text.length ? text.split(/\r?\n/).length : 0;
 
       results.push({
-        path: vscode.workspace.asRelativePath(uri, false),
+        path: relativePath,
         bytes: bytes.byteLength,
         lines,
         preview: text.slice(0, 300).replace(/\s+/g, ' ').trim(),
         content: text,
       });
     } catch (error) {
-      output.appendLine(`No se pudo leer ${vscode.workspace.asRelativePath(uri, false)}: ${String(error)}`);
+      output.appendLine(`No se pudo leer ${relativePath}: ${String(error)}`);
     }
   }
 
@@ -224,6 +289,11 @@ export async function performWorkspaceScan(args: ScanCommandArgs | undefined, ou
     mode: {
       requested: options.mode,
       applied: selection.mode,
+      gitignoreApplied,
+      skippedByGitignore: privacy.skippedByGitignore,
+      skippedAsSecret: privacy.skippedAsSecret,
+      skippedByBudget: privacy.skippedByBudget,
+      maxTotalBytes,
     },
     workspaceFolders: workspaceFolders.map((folder) => ({
       name: folder.name,
@@ -266,6 +336,11 @@ export function renderScanOutput(output: vscode.OutputChannel, scan: ScanComputa
   }
   output.appendLine(`Archivos leídos: ${scan.payload.totalFiles}`);
   output.appendLine(`Archivos omitidos por tamaño: ${scan.payload.skippedBySize}`);
+  output.appendLine(
+    `Omitidos por privacidad: ${scan.payload.mode.skippedByGitignore || 0} por .gitignore`
+    + `${scan.payload.mode.gitignoreApplied ? '' : ' (git no disponible: no se aplicó)'}, `
+    + `${scan.payload.mode.skippedAsSecret || 0} con posibles claves y ${scan.payload.mode.skippedByBudget || 0} por el tope total`,
+  );
   output.appendLine(`Documentos candidatos: ${scan.documents.length}`);
   output.appendLine('');
 
@@ -284,4 +359,45 @@ export function renderScanOutput(output: vscode.OutputChannel, scan: ScanComputa
 
   output.appendLine('=== JSON listo para enviar a backend ===');
   output.appendLine(JSON.stringify(scan.payload, null, 2));
+}
+
+/** Tiempo que espera el permiso del escaneo antes de darlo por no respondido. */
+export const SCAN_PERMISSION_TIMEOUT_MS = 2 * 60 * 1000;
+
+const SCAN_ALWAYS_ALLOWED_KEY = 'adaceen.scan.alwaysAllowedRepos';
+
+/**
+ * Permiso del estudiante antes de enviar el escaneo que pidio el navegador (A12.12): cada vez,
+ * salvo que haya elegido «Permitir siempre en este repo» (se recuerda en este workspace).
+ */
+export async function askScanPermission(
+  memento: vscode.Memento,
+  repoFullName: string,
+  maxFiles: number,
+): Promise<'allow' | 'deny' | 'timeout'> {
+  const remembered = memento.get<string[]>(SCAN_ALWAYS_ALLOWED_KEY, []);
+  if (remembered.includes(repoFullName)) {
+    return 'allow';
+  }
+  const allow = 'Permitir';
+  const always = 'Permitir siempre en este repo';
+  const deny = 'No';
+  const answer = await promptWithTimeout(
+    vscode.window.showInformationMessage(
+      describeScanPermission(repoFullName, maxFiles, DEFAULT_MAX_TOTAL_SCAN_BYTES),
+      { modal: false },
+      allow,
+      always,
+      deny,
+    ),
+    SCAN_PERMISSION_TIMEOUT_MS,
+  );
+  if (answer === PROMPT_TIMED_OUT) {
+    return 'timeout';
+  }
+  if (answer === always) {
+    await memento.update(SCAN_ALWAYS_ALLOWED_KEY, [...remembered, repoFullName]);
+    return 'allow';
+  }
+  return answer === allow ? 'allow' : 'deny';
 }

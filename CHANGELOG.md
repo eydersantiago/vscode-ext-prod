@@ -4,6 +4,24 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.33] - 2026-09-28
+
+Riesgos antes del piloto (revisión técnica del 27 de septiembre; A12.12 · ADACEEN-155 de PDC).
+
+### Cambiado
+
+- **Cola de reemplazos del navegador con lease.** VS Code reclama con `POST /api/projects/code-actions/claim` y recibe un lease de 180 s; con un backend anterior usa `GET /api/projects/code-actions/next`. El aviso «Aplicar reemplazo» / «Omitir» se da por no respondido a los 2 minutos: antes, si el estudiante lo ignoraba, la cola se quedaba parada. Un cambio ya aplicado se confirma con reintentos (un 404 es que ya estaba cerrado) y nunca se reporta como fallido: antes un fallo de `complete` terminaba en `fail` y la tesis contaba un dato falso. Un reemplazo que volvió a la cola porque su primer reclamo venció no se aplica dos veces si el archivo ya tiene el cambio (`src/code-action-queue.ts`).
+- **Escaneo pedido desde el navegador con permiso.** Antes de enviar nada, VS Code pregunta cada vez: «Permitir», «Permitir siempre en este repo» (se recuerda en el workspace) o «No»; sin respuesta en 2 minutos no se envía y el backend recibe el fallo. El escaneo ya no incluye lo que ignora `.gitignore` (`git ls-files --exclude-standard`), ni archivos con claves (`.env`, `.pem`, `.key`, `credentials.json`, `client_secret*.json`, carpetas `.ssh` o `.aws`, llaves privadas y tokens con prefijo conocido en cualquier archivo, y asignaciones de contraseñas en archivos de configuración), y se detiene en 3 MB (`src/scan-privacy.ts`). El resultado dice cuántos archivos se omitieron por cada motivo. Los archivos se leen de sus bytes, sin `openTextDocument`, que despertaba los servidores de lenguaje.
+- **Con la sesión.** Reclamar un escaneo, enviarlo, reportar un fallo y clasificar documentos van con la sesión: el backend solo entrega las solicitudes del mismo estudiante.
+- **Sin robar el foco.** Los errores del worker se registran en «ADACEEN» sin abrir el panel de salida.
+- 16 pruebas unitarias nuevas (191 en total).
+
+### Compatibilidad
+
+- Con el backend anterior: los reemplazos siguen funcionando (`GET …/next`) y el escaneo también (el backend viejo no pide sesión).
+- Con el backend del 28 de septiembre, la 0.0.32 ya no recibe solicitudes de escaneo (las reclamaba sin sesión); los reemplazos sí.
+- La VM de editores instala la VSIX que fija el submódulo: se publica con `git add -f adaceen-0.0.33.vsix` (`*.vsix` está en `.gitignore`).
+
 ## [0.0.32] - 2026-09-25
 
 Menos pasos repetidos (auditoría de redundancias del frontend, ítems 6, 7 y 13).

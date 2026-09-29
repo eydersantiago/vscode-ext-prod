@@ -1,5 +1,6 @@
 // ADACEEN (VS Code): aplicar acciones de codigo pedidas desde el navegador (con la guarda de aplicacion).
-// Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
+// Movido desde src/extension.ts. Desde 0.0.33 (A12.12): reclamo con lease, aviso que se cierra solo,
+// confirmacion con reintentos y nunca «fallido» despues de editar (code-action-queue.ts).
 import * as vscode from 'vscode';
 import { buildSessionHeaders, claimNextCodeAction, completeCodeAction, failCodeAction, fetchJsonWithTimeout } from './backend-http';
 import { describeQueuedTarget, guardCodeApplication, insertAnchorMatches, isFreshOverlayClick, queuedActionSummary, queuedCodeActionAgeMs, queuedCodeActionNeedsPrompt, queuedTargetVerified } from './code-application-guard';
@@ -13,6 +14,7 @@ import { editorPageContext } from './suggestion-metrics';
 import { inferActiveLanguage, pathBaseName, truncateInline } from './suggestion-results';
 import type { TelemetryClient, TelemetryEventInput } from './telemetry';
 import type { BackendSettings, PendingCodeAction } from './types';
+import { CODE_ACTION_PROMPT_TIMEOUT_MS, confirmAppliedCodeAction, PROMPT_TIMED_OUT, promptWithTimeout, replacementAlreadyApplied } from './code-action-queue';
 
 /** La aplicacion no se hizo por decision del guard (politica, regla offline o cancelacion). */
 export class CodeApplicationBlockedError extends Error {
@@ -120,9 +122,25 @@ export async function applyPendingCodeAction(
   }
 
   const document = await vscode.workspace.openTextDocument(uri);
+  const applyMode = actionTypeToApplyMode(action.actionType);
+  // Volvio a la cola porque su primer reclamo vencio: si ya se aplico, no se aplica otra vez.
+  if (replacementAlreadyApplied({
+    documentText: document.getText(),
+    originalText: action.originalText,
+    replacementText: action.replacementText,
+    applyMode,
+    attempts: action.attempts,
+  })) {
+    output.appendLine(`[CodeActions] ${action.id}: el cambio ya estaba en ${action.filePath}; no se aplica de nuevo.`);
+    return {
+      filePath: action.filePath,
+      alreadyApplied: true,
+      attempts: action.attempts,
+      appliedAt: new Date().toISOString(),
+    };
+  }
   const editor = await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
   const label = truncateInline(action.title || 'Reemplazo sugerido', 80);
-  const applyMode = actionTypeToApplyMode(action.actionType);
   const fileLabel = pathBaseName(action.filePath);
   const planRange = () => {
     const match = applyMode === 'insert' ? null : findTextMatch(editor, action.originalText);
@@ -191,12 +209,20 @@ export async function applyPendingCodeAction(
     autoApply: settings.autoApplyCodeActions,
   });
   if (prompted) {
-    const answer = await vscode.window.showInformationMessage(
-      `ADACEEN: ${summary}`,
-      { modal: false },
-      DEFAULT_CODE_ACTION_CONFIRM_LABEL,
-      'Omitir',
+    // El aviso no modal se puede ignorar: a los 2 minutos se da por no respondido, para no
+    // dejar parada la cola (antes la esperaba para siempre con workerBusy).
+    const answer = await promptWithTimeout(
+      vscode.window.showInformationMessage(
+        `ADACEEN: ${summary}`,
+        { modal: false },
+        DEFAULT_CODE_ACTION_CONFIRM_LABEL,
+        'Omitir',
+      ),
+      CODE_ACTION_PROMPT_TIMEOUT_MS,
     );
+    if (answer === PROMPT_TIMED_OUT) {
+      throw new Error('Sin respuesta en VS Code en 2 minutos: el reemplazo no se aplico. Pidelo otra vez desde el navegador.');
+    }
     if (answer !== DEFAULT_CODE_ACTION_CONFIRM_LABEL) {
       throw new Error('Reemplazo omitido por el usuario en VS Code.');
     }
@@ -293,21 +319,15 @@ export async function processNextCodeActionForRepo(
     return false;
   }
 
+  output.appendLine(`[CodeActions] Reemplazo reclamado: ${action.id} | ${action.filePath} (intento ${action.attempts}).`);
+  // Solo el clic reciente en el overlay confirma. El comando pedido a mano no:
+  // el estudiante no ve cual es el siguiente de la cola (puede tener dias).
+  const explicitClick = isFreshOverlayClick(action);
+  let metadata: Record<string, unknown>;
   try {
-    output.appendLine(`[CodeActions] Reemplazo reclamado: ${action.id} | ${action.filePath}.`);
-    // Solo el clic reciente en el overlay confirma. El comando pedido a mano no:
-    // el estudiante no ve cual es el siguiente de la cola (puede tener dias).
-    const explicitClick = isFreshOverlayClick(action);
-    const metadata = await applyPendingCodeAction(action, settings, output, guardDeps, explicitClick);
-    await completeCodeAction(settings, action.id, {
-      ...action.metadata,
-      ...metadata,
-      workerId: settings.workerId,
-    });
-    if (manual) {
-      vscode.window.showInformationMessage(`ADACEEN: reemplazo aplicado en ${action.filePath}.`);
-    }
+    metadata = await applyPendingCodeAction(action, settings, output, guardDeps, explicitClick);
   } catch (error) {
+    // No se edito nada: se reporta el fallo (guard, omitido, sin respuesta, archivo ausente).
     const blockedByGuard = error instanceof CodeApplicationBlockedError;
     const message = blockedByGuard ? error.message : String(error);
     output.appendLine(`[CodeActions] No se pudo aplicar ${action.id}: ${message}`);
@@ -318,6 +338,26 @@ export async function processNextCodeActionForRepo(
     if (manual && !blockedByGuard) {
       vscode.window.showWarningMessage(`ADACEEN: ${message}`);
     }
+    return true;
+  }
+
+  // El cambio ya esta en el archivo: se confirma con reintentos y NUNCA se reporta como
+  // fallido (antes un fallo de complete terminaba en fail y la tesis contaba un dato falso).
+  const confirmation = await confirmAppliedCodeAction(() => completeCodeAction(settings, action.id, {
+    ...action.metadata,
+    ...metadata,
+    workerId: settings.workerId,
+  }));
+  if (confirmation.outcome === 'unconfirmed') {
+    output.appendLine(
+      `[CodeActions] ${action.id} se aplico pero el backend no confirmo tras ${confirmation.attempts} intentos (${confirmation.lastError}). `
+      + 'Si vuelve a la cola, VS Code vera que ya esta aplicado.',
+    );
+  } else if (confirmation.outcome === 'already_closed') {
+    output.appendLine(`[CodeActions] ${action.id}: el backend ya lo tenia cerrado.`);
+  }
+  if (manual) {
+    vscode.window.showInformationMessage(`ADACEEN: reemplazo aplicado en ${action.filePath}.`);
   }
 
   return true;

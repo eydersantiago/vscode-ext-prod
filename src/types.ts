@@ -55,6 +55,12 @@ export type ScanPayload = {
   mode: {
     requested: ScanMode;
     applied: Exclude<ScanMode, 'auto'>;
+    /** Privacidad del escaneo (0.0.33, A12.12). Va en mode porque el backend acepta ahi campos nuevos. */
+    gitignoreApplied?: boolean;
+    skippedByGitignore?: number;
+    skippedAsSecret?: number;
+    skippedByBudget?: number;
+    maxTotalBytes?: number;
   };
   workspaceFolders: Array<{ name: string; scheme: string }>;
   selectedFolders: Array<{ name: string; scheme: string }>;
@@ -352,4 +358,8 @@ export type PendingCodeAction = {
   /** Horas del servidor (ISO): cuando se pidio en el navegador y cuando VS Code lo reclamo. */
   requestedAt: string;
   claimedAt: string;
+  /** Hasta cuando es de este VS Code (lease, A12.12); '' con un backend anterior. */
+  leaseUntil: string;
+  /** Veces que se reclamo: 2 si el primer reclamo vencio y volvio a la cola. */
+  attempts: number;
 };

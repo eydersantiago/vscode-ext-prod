@@ -9,6 +9,14 @@ import { isAbortLikeError } from './suggestion-results';
 import type { BackendSettings, PendingCodeAction, PendingScanRequest, ScanPayload, ScannedDocument } from './types';
 import { scoreDocumentName } from './workspace-scan';
 
+/** Respuesta no 2xx del backend. El mensaje es el mismo de antes; status permite distinguir un 404. */
+export class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
+
 /**
  * x-adaceen-session: invalid en una respuesta: la sesion enviada ya no vale
  * (logout, vencida). editor-session.ts la olvida y busca otra.
@@ -50,12 +58,12 @@ export async function fetchJsonWithTimeout(
       const rawError = toOptionalString(text);
       const looksLikeHtml = /^<!doctype html>|<html[\s>]/i.test(rawError || '');
       if (response.status === 524 || /524:\s*a timeout occurred|error code 524/i.test(rawError || '')) {
-        throw new Error('Backend no respondio a tiempo por Cloudflare 524. Se usara fallback local.');
+        throw new HttpError('Backend no respondio a tiempo por Cloudflare 524. Se usara fallback local.', response.status);
       }
       if (looksLikeHtml) {
-        throw new Error(`Backend devolvio HTML en lugar de JSON (HTTP ${response.status}).`);
+        throw new HttpError(`Backend devolvio HTML en lugar de JSON (HTTP ${response.status}).`, response.status);
       }
-      throw new Error(structuredError || rawError || `HTTP ${response.status}`);
+      throw new HttpError(structuredError || rawError || `HTTP ${response.status}`, response.status);
     }
     return data;
   } catch (error) {
@@ -106,11 +114,12 @@ export async function claimNextScanRequest(
   repoFullName: string,
 ): Promise<PendingScanRequest | null> {
   const query = `?repoFullName=${encodeURIComponent(repoFullName)}`;
+  // Con la sesion (A12.12): el backend solo entrega las solicitudes del mismo estudiante.
   const response = await fetchJsonWithTimeout(
     `${settings.baseUrl}/api/projects/scan/request/next${query}`,
     {
       method: 'GET',
-      headers: buildWorkerHeaders(settings, false),
+      headers: buildSessionHeaders(settings, false),
     },
     settings.requestTimeoutMs,
   );
@@ -137,7 +146,7 @@ export async function sendScanResult(
     `${settings.baseUrl}/api/projects/scan/request/${encodeURIComponent(requestId)}/result`,
     {
       method: 'POST',
-      headers: buildWorkerHeaders(settings, true),
+      headers: buildSessionHeaders(settings, true),
       body: JSON.stringify(payload),
     },
     settings.requestTimeoutMs,
@@ -152,15 +161,32 @@ export async function claimNextCodeAction(
     return null;
   }
 
-  const query = `?repoFullName=${encodeURIComponent(repoFullName)}`;
-  const response = await fetchJsonWithTimeout(
-    `${settings.baseUrl}/api/projects/code-actions/next${query}`,
-    {
-      method: 'GET',
-      headers: buildSessionHeaders(settings, false),
-    },
-    settings.requestTimeoutMs,
-  );
+  // POST /claim con lease (A12.12). Un backend anterior no la tiene (404): se usa GET /next.
+  let response: unknown;
+  try {
+    response = await fetchJsonWithTimeout(
+      `${settings.baseUrl}/api/projects/code-actions/claim`,
+      {
+        method: 'POST',
+        headers: buildSessionHeaders(settings, true),
+        body: JSON.stringify({ repoFullName, workerId: settings.workerId }),
+      },
+      settings.requestTimeoutMs,
+    );
+  } catch (error) {
+    if (!(error instanceof HttpError) || error.status !== 404) {
+      throw error;
+    }
+    const query = `?repoFullName=${encodeURIComponent(repoFullName)}`;
+    response = await fetchJsonWithTimeout(
+      `${settings.baseUrl}/api/projects/code-actions/next${query}`,
+      {
+        method: 'GET',
+        headers: buildSessionHeaders(settings, false),
+      },
+      settings.requestTimeoutMs,
+    );
+  }
 
   const action = asRecord(asRecord(response).action);
   const id = toOptionalString(action.id);
@@ -186,6 +212,9 @@ export async function claimNextCodeAction(
     source: toOptionalString(action.source) || '',
     requestedAt: toOptionalString(action.requestedAt) || '',
     claimedAt: toOptionalString(action.claimedAt) || '',
+    leaseUntil: toOptionalString(action.leaseUntil) || '',
+    // Sin el campo (backend anterior) se asume el primer reclamo.
+    attempts: Math.max(1, Number(action.attempts) || 1),
   };
 }
 
@@ -294,7 +323,7 @@ export async function sendDocumentClassification(
     `${settings.baseUrl}/api/documents/classify`,
     {
       method: 'POST',
-      headers: buildWorkerHeaders(settings, true),
+      headers: buildSessionHeaders(settings, true),
       body: JSON.stringify({
         repoFullName: input.repoFullName,
         requestId: input.requestId,
@@ -356,7 +385,7 @@ export async function sendScanFailure(
       `${settings.baseUrl}/api/projects/scan/request/${encodeURIComponent(requestId)}/fail`,
       {
         method: 'POST',
-        headers: buildWorkerHeaders(settings, true),
+        headers: buildSessionHeaders(settings, true),
         body: JSON.stringify({ error: errorMessage.slice(0, 1200) }),
       },
       settings.requestTimeoutMs,

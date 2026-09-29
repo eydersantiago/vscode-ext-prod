@@ -17,7 +17,7 @@ import type { BlockingSignal, ErrorSignal } from './error-signals';
 import { detectBranchName, detectRepoFullName, parseRepoFromGitConfig, readGitConfigText } from './git-repo';
 import { AdaceenQuizViewProvider } from './quiz-view';
 import { AdaceenSelectionWidget, SELECTION_WIDGET_ORIGIN } from './selection-widget';
-import { asRecord, backendUrlSetByWorkspace, getEnv, isCodespaceRuntime, refreshLocalBackendDetection, resolveActiveSuggestionSettings, resolveBackendSettings, resolveCurrentBackendBaseUrl, resolveTriggerSettings, toOptionalString } from './settings';
+import { asRecord, backendUrlSetByWorkspace, getEnv, isCodespaceRuntime, refreshLocalBackendDetection, resolveActiveSuggestionSettings, resolveBackendSettings, resolveCurrentBackendBaseUrl, resolveScanOptions, resolveTriggerSettings, toOptionalString } from './settings';
 import { UNKNOWN_BACKEND_ORIGIN, fetchBackendOrigin, updateBackendOriginStatusBar } from './status-bar';
 import { applySuggestionDecoration, clearSuggestionDecorations, updateSuggestionStatusBar } from './suggestion-decorations';
 import { buildAppliedSuggestionModel, planSuggestionEdit, resolveWorkspaceFileUri } from './suggestion-edit';
@@ -33,7 +33,7 @@ import { SuggestionExposureTracker, TelemetryClient } from './telemetry';
 import type { TelemetryEventInput } from './telemetry';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionInFlight, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, CursorIdleAnchor, ScanCommandArgs, ScanPayload, SuggestionApplyMode, SuggestionTrigger, WorkspaceProjectIndex } from './types';
 import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity, stableStringHash } from './workspace-index';
-import { performWorkspaceScan, renderScanOutput } from './workspace-scan';
+import { askScanPermission, performWorkspaceScan, renderScanOutput } from './workspace-scan';
 
 export async function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel('ADACEEN');
@@ -1545,7 +1545,22 @@ export async function activate(context: vscode.ExtensionContext) {
 
       requestId = request.id;
       output.appendLine(`[Worker] Solicitud reclamada: ${request.id} (${request.repoFullName}).`);
-      output.show(true);
+
+      // Permiso del estudiante en cada solicitud (A12.12): sin el, no sale nada del equipo.
+      const permission = await askScanPermission(
+        context.workspaceState,
+        request.repoFullName,
+        resolveScanOptions(undefined).maxFiles,
+      );
+      if (permission !== 'allow') {
+        const reason = permission === 'timeout'
+          ? 'Sin respuesta en VS Code en 2 minutos: no se escaneo el proyecto.'
+          : 'El estudiante no autorizo el escaneo en VS Code.';
+        output.appendLine(`[Worker] ${reason} (${request.id})`);
+        await sendScanFailure(settings, request.id, reason);
+        requestId = '';
+        return;
+      }
 
       const scan = await performWorkspaceScan(undefined, output);
       const payload: ScanPayload = {
@@ -1567,8 +1582,8 @@ export async function activate(context: vscode.ExtensionContext) {
       }, output);
     } catch (error) {
       const errorMessage = String(error);
+      // Sin output.show: un error del worker no le quita el foco al estudiante.
       output.appendLine(`[Worker] Error al procesar solicitud de escaneo: ${errorMessage}`);
-      output.show(true);
 
       const normalized = errorMessage.toLowerCase();
       if (
@@ -1577,7 +1592,7 @@ export async function activate(context: vscode.ExtensionContext) {
       ) {
         authErrorNotified = true;
         vscode.window.showWarningMessage(
-          'ADACEEN Worker: backend rechazó la solicitud (401/no autorizado). Revisa adaceen.backend.scanWorkerKey.',
+          'ADACEEN Worker: el backend rechazó la solicitud (401/no autorizado). Conecta VS Code con tu cuenta (ADACEEN: Conectar) o revisa adaceen.backend.scanWorkerKey.',
         );
       }
 
