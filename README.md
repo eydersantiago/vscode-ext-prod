@@ -21,7 +21,9 @@ ADACEEN escanea archivos del workspace en VS Code (local o Codespaces), genera u
 ## Comandos
 
 - `ADACEEN: Escanear workspace`
-- `ADACEEN: Abrir sugerencias del archivo activo`
+- `ADACEEN: Ver de qué trata el archivo y el material del curso` (vista «ADACEEN · Este archivo»)
+- `ADACEEN: Ver material del curso`
+- `ADACEEN: Ver cambios de la propuesta`
 - `ADACEEN: Actualizar sugerencias del archivo activo`
 - `ADACEEN: Conectar` (tambien desde la barra de estado «ADACEEN: sin conectar»)
 - `ADACEEN: Configurar sesión compartida` (compatibilidad: abre la misma caja que «Tengo un código o sesión»; el navegador aun lo cita)
@@ -53,6 +55,8 @@ La extension expone estas opciones:
 - Antes de aplicar cualquier cambio del tutor se consulta `POST /api/suggestions/apply-check`: si la politica del docente no lo permite, no se aplica y se muestra el motivo.
 - Si la politica pide confirmar (`requireConfirmation`), en un cambio de hasta 5 lineas que no borra codigo la confirmacion es el clic explicito del estudiante sobre la accion (ventana flotante, «Aceptar ayuda» del CodeLens, pista o hover, arreglo rapido abierto con `Ctrl+.`, comando o un reemplazo recien elegido en el overlay): no se abre un segundo dialogo. El modal «Aplicar» queda para las aplicaciones automaticas, los cambios mas grandes y las eliminaciones.
 - Mientras la ventana flotante esta abierta, el CodeLens no repite «Aceptar ayuda» y la pista en linea se oculta. Si el estudiante la cierra con la X, esa sugerencia no se vuelve a ofrecer hasta que llegue otra.
+- Sugerencias de codigo (0.0.34): el codigo sale solo del bloque que escribio el tutor (`suggestion-code.ts`), nunca de un `TODO` armado en VS Code. La ventana de la seleccion aplica con un clic la accion para la que se escribio ese codigo y trae «Ver cambios» (`proposal-diff.ts`); «Proponer una mejora» y «Proponer código para continuar» piden el codigo de esa accion (`requestedAction` en `POST /suggest-tab`). El texto de la ventana sale de `selection-widget-text.ts` (sin `vscode`, con pruebas).
+- Vista «ADACEEN · Este archivo» (`file-view.ts`, datos en `file-view-model.ts`, material en `course-material.ts`): resumen del archivo, siguientes pasos, la sugerencia de ahora y el material del curso.
 - Pruebas unitarias (sin descargar VS Code): `npm run test:unit`.
 
 ## Sesion

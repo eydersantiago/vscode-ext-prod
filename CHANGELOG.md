@@ -4,6 +4,31 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.34] - 2026-10-20
+
+Piloto del 20 de octubre (prueba con una estudiante): «cuando ADACEEN sugiere código, lo único es agregar un TODO», «la mejora de código no está sirviendo bien» y «el panel con el resumen de la pestaña y el atajo al material del curso ya no están».
+
+### Cambiado
+
+- **Nunca un `TODO` inventado.** La pista local y la respuesta del tutor sin bloque de código ya no se convierten en un comentario `// TODO: …` para insertar. El código sale solo del bloque que escribió el tutor (`suggestion-code.ts`); un bloque de puros comentarios o marcadores no cuenta como código. Si no hay código, la ventana lo dice y ofrece pedirlo.
+- **Cada acción con su propio código.** La ventana de la selección («Sugerencia para la selección») aplica con un clic solo la acción para la que el tutor escribió el código («Insertar debajo» o «Modificar selección») y trae «Ver cambios», que abre la comparación (`vscode.diff`) antes de aplicar. «Proponer una mejora» pide al backend la selección completa mejorada (`requestedAction: "replace"`) y «Proponer código para continuar», el código para insertar debajo (`"insert"`); la respuesta aparece en la misma ventana. Antes, «Modificar selección» reemplazaba el bloque por un fragmento escrito para insertar. Si la versión mejorada se lleva más de la mitad del bloque, la ventana avisa que la revises con «Ver cambios».
+- **Vista «ADACEEN · Este archivo»** en el Explorador (`adaceen.fileView`): «De qué trata» (resumen del tutor, con «Pedir resumen al tutor» / «Actualizar resumen»), «Para seguir», «Sugerencia de ahora» y «Material del curso» (lo citado en la última sugerencia y «Ver todo el material del curso», con búsqueda). El clic en «ADACEEN: <archivo>» de la barra de estado la abre. Comandos nuevos: «ADACEEN: Ver de qué trata el archivo y el material del curso», «ADACEEN: Ver material del curso» y «ADACEEN: Ver cambios de la propuesta».
+- **Cuando la GPU tarda.** A los 20 s sin respuesta, la ventana dice «El tutor está tardando más de lo normal…» en vez de quedarse cargando sin explicación.
+- **Modo restringido.** La extensión declara `untrustedWorkspaces: limited`: en una carpeta no confiable sigue con las sugerencias, el resumen y el quiz (antes VS Code la desactivaba), sin tomar de esa carpeta la dirección del backend, la clave del worker, la sesión ni los ajustes de aplicar código.
+- «Ver panel» (llevaba al quiz) pasa a «Resumen y material»; «Otra sugerencia» actualiza la ventana en su sitio sin abrir el quiz.
+- Textos con tildes: «Modificar selección», «Eliminar selección».
+- **Aplicar va sobre el bloque que vio el tutor** (revisión independiente del mismo día): con más de 20 líneas seleccionadas el tutor solo ve las primeras 20, y «Modificar selección» ya no borra las demás; un clic dentro del bloque (selección vacía) ya no hace que el bloque entero reemplace una sola línea. Si el bloque cambió desde la sugerencia, no se aplica y se pide «Otra sugerencia».
+- **Cuando el modelo se equivoca de acción** (dice «Aplicar: insert» con el bloque completo, «replace» con un fragmento o «delete» con código cuando se pidió mejorar), decide el contenido: si el código conserva la mitad o más de las líneas del bloque (sin contar llaves ni palabras sueltas como `else`) es una versión del bloque; si no, un fragmento para insertar. El backend usa la misma regla. El aviso de «Ver cambios» sale desde bloques de 2 líneas (antes, 4).
+- Pedir el código no congela las sugerencias: mientras llega, el estudiante puede ir a otro bloque, y si se fue (o cerró la ventana) la respuesta no se pinta sobre las líneas viejas; se muestra si vuelve al mismo bloque.
+- «Otra sugerencia» y «Proponer una mejora» le preguntan otra vez al tutor (no repiten la respuesta guardada), y no se guardan la respuesta sin modelo ni un pedido de código que volvió sin código.
+- Una respuesta que es solo la línea «Aplicar:» y el bloque de código ya no se descarta; si el tutor contestó sin nada utilizable, la pista local sale de una vez en vez de esperar el tiempo límite.
+- 23 pruebas unitarias nuevas (214 en total).
+
+### Compatibilidad
+
+- Con el backend del 20 de octubre, el modelo recibe la acción pedida y el lenguaje, no se le pide `TODO` y la regla del docente cuenta las líneas que cambian (no recorta una versión completa del bloque). Con el backend anterior la ventana funciona igual, pero «Proponer una mejora» puede volver sin código.
+- La VM de editores instala la VSIX que fija el submódulo: se publica con `git add -f adaceen-0.0.34.vsix`.
+
 ## [0.0.33] - 2026-09-28
 
 Riesgos antes del piloto (revisión técnica del 27 de septiembre; A12.12 · ADACEEN-155 de PDC).

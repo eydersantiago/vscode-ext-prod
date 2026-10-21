@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.33",
+  "version": "0.0.34",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -19,6 +19,21 @@
     "onStartupFinished",
     "onUri"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "En modo restringido ADACEEN sigue con las sugerencias, el resumen del archivo y el quiz, pero no toma de la carpeta abierta la dirección del backend, la clave del worker, la sesión ni los ajustes para aplicar código.",
+      "restrictedConfigurations": [
+        "adaceen.backend.baseUrl",
+        "adaceen.backend.scanWorkerKey",
+        "adaceen.backend.sessionId",
+        "adaceen.backend.autoWorkerEnabled",
+        "adaceen.backend.codeActionsEnabled",
+        "adaceen.backend.autoApplyCodeActions",
+        "adaceen.codeApplication.offlineMaxLines"
+      ]
+    }
+  },
   "main": "./dist/extension.js",
   "browser": "./dist/web/extension.js",
   "scripts": {
@@ -42,6 +57,21 @@
       {
         "command": "adaceen.openAssistant",
         "title": "ADACEEN: Abrir panel de quiz y seguimiento"
+      },
+      {
+        "command": "adaceen.openFileView",
+        "title": "ADACEEN: Ver de qué trata el archivo y el material del curso",
+        "icon": "$(book)"
+      },
+      {
+        "command": "adaceen.openCourseMaterial",
+        "title": "ADACEEN: Ver material del curso",
+        "icon": "$(library)"
+      },
+      {
+        "command": "adaceen.showProposalDiff",
+        "title": "ADACEEN: Ver cambios de la propuesta",
+        "icon": "$(diff)"
       },
       {
         "command": "adaceen.quiz.checkPending",
@@ -92,13 +122,13 @@
       },
       {
         "command": "adaceen.selectionWidget.replace",
-        "title": "Modificar seleccion",
+        "title": "Modificar selección",
         "category": "ADACEEN",
         "icon": "$(edit)"
       },
       {
         "command": "adaceen.selectionWidget.delete",
-        "title": "Eliminar seleccion",
+        "title": "Eliminar selección",
         "category": "ADACEEN",
         "icon": "$(trash)"
       },
@@ -119,6 +149,13 @@
       ]
     },
     "views": {
+      "explorer": [
+        {
+          "type": "webview",
+          "id": "adaceen.fileView",
+          "name": "ADACEEN · Este archivo"
+        }
+      ],
       "adaceen": [
         {
           "type": "webview",
@@ -129,10 +166,26 @@
     },
     "menus": {
       "commandPalette": [
-        { "command": "adaceen.selectionWidget.insert", "when": "false" },
-        { "command": "adaceen.selectionWidget.replace", "when": "false" },
-        { "command": "adaceen.selectionWidget.delete", "when": "false" },
-        { "command": "adaceen.selectionWidget.close", "when": "false" }
+        {
+          "command": "adaceen.selectionWidget.insert",
+          "when": "false"
+        },
+        {
+          "command": "adaceen.selectionWidget.replace",
+          "when": "false"
+        },
+        {
+          "command": "adaceen.selectionWidget.delete",
+          "when": "false"
+        },
+        {
+          "command": "adaceen.selectionWidget.close",
+          "when": "false"
+        },
+        {
+          "command": "adaceen.openRagSource",
+          "when": "false"
+        }
       ],
       "comments/commentThread/title": [
         {
@@ -154,6 +207,13 @@
           "command": "adaceen.selectionWidget.close",
           "group": "inline@9",
           "when": "commentController == adaceen.selection"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "adaceen.openCourseMaterial",
+          "when": "view == adaceen.fileView",
+          "group": "navigation@1"
         }
       ]
     },
@@ -242,7 +302,7 @@
         "adaceen.suggestions.autoRevealPanel": {
           "type": "boolean",
           "default": false,
-          "description": "Abre automaticamente el panel ADACEEN de sugerencias cuando cambia el archivo activo."
+          "description": "Abre automáticamente la vista «ADACEEN · Este archivo» (de qué trata el archivo y el material del curso) cuando cambia el archivo activo."
         },
         "adaceen.suggestions.autoOpenSelectionActions": {
           "type": "boolean",

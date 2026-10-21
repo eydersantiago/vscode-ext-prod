@@ -17,6 +17,10 @@ export function isSupportedActiveDocument(document: vscode.TextDocument) {
   if (document.uri.scheme === 'output' || document.uri.scheme === 'debug' || document.uri.scheme === 'vscode-chat') {
     return false;
   }
+  // La propuesta de «Ver cambios» (proposal-diff.ts) no es un archivo del estudiante.
+  if (document.uri.scheme === 'adaceen-propuesta') {
+    return false;
+  }
   if (document.isUntitled && !document.getText().trim()) {
     return false;
   }

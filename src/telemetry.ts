@@ -484,6 +484,16 @@ export class SuggestionExposureTracker<T> {
     return { item: current.item, durationMs: Math.max(0, endedAt - current.shownAt) };
   }
 
+  /**
+   * La sugerencia sigue en otra (0.0.34: el estudiante pidio el codigo de una
+   * accion y llego una version con codigo): no cuenta como ignorada.
+   */
+  forget(id: string) {
+    if (this.visible?.id === id) {
+      this.visible = null;
+    }
+  }
+
   /** El estudiante cerro la sugerencia (p. ej. la ventana flotante). */
   dismiss(id: string, now: number): { item: T; durationMs: number } | null {
     const current = this.visible;

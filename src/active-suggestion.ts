@@ -4,7 +4,9 @@ import { buildSessionHeaders, fetchJsonWithTimeout } from './backend-http';
 import { ACTIVE_SUGGESTION_PROMPT_CODE_CHARS, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS, ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import type { SuggestDiagnostic } from './error-signals';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
-import { buildSuggestedCompletion, countMatches, extractFirstCodeFence, inferSuggestionApplyMode } from './suggestion-edit';
+import { DROPS_MOST_WARNING, extractSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionReadyForMode } from './suggestion-code';
+import type { EditorCodeAction } from './suggestion-code';
+import { countMatches, inferSuggestionApplyMode } from './suggestion-edit';
 import { parseBackendSuggestionSections } from './suggestion-format';
 import { createEmptyBackendSuggestionResult, normalizeBackendSuggestionResult, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, BackendSuggestionSections, SuggestionTrigger, WorkspaceProjectIndex } from './types';
@@ -139,7 +141,9 @@ export function buildLocalActiveSuggestion(
   const compactSuggestions = uniqueCompactStrings(suggestions, 4);
   const focusLine = hasSelection ? snapshot.selectionStartLine : snapshot.line;
   const focusColumn = hasSelection ? 1 : snapshot.column;
-  const completionText = buildSuggestedCompletion(snapshot, compactSuggestions[0] || nextSteps[0] || '');
+  // La pista local no escribe codigo (0.0.34): antes inventaba un «TODO: ...» que
+  // «Modificar seleccion» llegaba a poner en lugar del bloque del estudiante.
+  const completionText = '';
   const applyMode = inferSuggestionApplyMode(
     snapshot,
     `${compactSuggestions.join('\n')}\n${nextSteps.join('\n')}`,
@@ -176,6 +180,7 @@ export function buildLocalActiveSuggestion(
     selectionOriginalLineCount: snapshot.selectionOriginalLineCount,
     selectionTruncated: snapshot.selectionTruncated,
     selectionRangeKey: snapshot.selectionRangeKey,
+    ...(hasSelection ? { selectionText: snapshot.selectionText } : {}),
     fileSummaryCacheKey: snapshot.fileSummaryCacheKey,
     metricId: stableStringHash([
       snapshot.cacheKey,
@@ -184,6 +189,7 @@ export function buildLocalActiveSuggestion(
       'local',
     ].join('\n---adaceen-metric---\n')),
     completionText,
+    completionMode: '',
     applyMode,
     triggerKind: 'cursor',
     actionsVisible: false,
@@ -239,10 +245,19 @@ export function buildBackendSuggestionContent(
   ].filter(Boolean).join('\n\n');
 }
 
+/** Como elegir la accion y que codigo escribir para ella (sin «TODO», 0.0.34). */
+const ACTION_AND_CODE_RULE = [
+  'Elige la accion que mas ayude y escribe la linea "Aplicar: replace", "Aplicar: insert" o "Aplicar: delete":',
+  'replace para corregir o mejorar el bloque (el codigo es el bloque completo ya mejorado),',
+  'insert para agregar codigo nuevo debajo (el codigo es solo lo nuevo) y delete solo si conviene quitar codigo (sin bloque).',
+  'Si escribes codigo, que sea real y compile; nunca un comentario TODO solo.',
+].join(' ');
+
 export function buildBackendSuggestionQuestion(
   snapshot: ActiveEditorSnapshot,
   scope: BackendSuggestionRequestScope,
   trigger?: SuggestionTrigger,
+  requestedAction?: EditorCodeAction,
 ) {
   if (scope === 'file_summary') {
     return [
@@ -252,24 +267,42 @@ export function buildBackendSuggestionQuestion(
     ].join(' ');
   }
 
+  const hasSelection = !!snapshot.selectionText.trim();
+  const target = hasSelection
+    ? `el bloque seleccionado (lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine})`
+    : `la linea ${snapshot.line}`;
+  if (requestedAction === 'replace') {
+    return [
+      `El estudiante pidio una version mejorada de ${target}.`,
+      'Responde con la linea "Aplicar: replace" y un unico bloque de codigo con ese bloque completo ya mejorado o corregido, listo para reemplazarlo: misma funcion y sangria, sin omitir lineas ni usar "...".',
+      'Cambia solo lo necesario y explica en 1 o 2 bullets que cambiaste y por que.',
+      'No inventes datos que no esten en el contexto.',
+    ].join(' ');
+  }
+  if (requestedAction === 'insert') {
+    return [
+      `El estudiante pidio codigo para continuar justo debajo de ${target}.`,
+      'Responde con la linea "Aplicar: insert" y un unico bloque de codigo solo con las lineas nuevas, sin repetir el codigo que ya existe.',
+      'Explica en 1 bullet que hacen esas lineas. No des la solucion completa del ejercicio ni inventes datos.',
+    ].join(' ');
+  }
+
   const visibleError = snapshot.diagnostics.firstError;
   if (trigger === 'blocking' && visibleError) {
     return [
       `El estudiante lleva un rato bloqueado con este error del editor en la linea ${visibleError.line}: "${truncateInline(visibleError.message, 300)}".`,
       'Explica en 1 bullet la causa probable con palabras sencillas y da 2 pistas breves para que lo corrija por su cuenta.',
-      'Al final, si es seguro, incluye un unico bloque de codigo corto que ayude a corregirlo. Si no es seguro, usa un comentario TODO del lenguaje.',
-      'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
+      ACTION_AND_CODE_RULE,
       'No des la solucion completa ni inventes datos que no esten en el contexto.',
     ].join(' ');
   }
 
-  if (snapshot.selectionText.trim()) {
+  if (hasSelection) {
     return [
       `El estudiante selecciono un bloque del editor; analiza la seleccion completa recibida, con limite maximo de ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas, como foco principal.`,
       'No reduzcas el analisis a la linea del cursor si hay varias lineas seleccionadas.',
       'Describe en 1 bullet que parece estar intentando hacer el bloque seleccionado y da 2 sugerencias breves para continuar desde esa seleccion.',
-      'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
-      'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
+      ACTION_AND_CODE_RULE,
       'No des la solucion completa ni inventes datos que no esten en el contexto.',
     ].join(' ');
   }
@@ -277,8 +310,7 @@ export function buildBackendSuggestionQuestion(
   return [
     'El cursor quedo quieto 3 segundos en la linea indicada; interpreta esto como posible bloqueo del estudiante.',
     'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa linea.',
-    'Al final, si es seguro, incluye un unico bloque de codigo corto para continuar. Si no es seguro, usa un comentario TODO del lenguaje.',
-    'Incluye una linea "Aplicar: insert", "Aplicar: replace" o "Aplicar: delete" segun corresponda; usa delete solo si la mejor ayuda es eliminar codigo.',
+    ACTION_AND_CODE_RULE,
     'No des la solucion completa ni inventes datos que no esten en el contexto.',
   ].join(' ');
 }
@@ -304,7 +336,7 @@ export async function fetchBackendSuggestionText(
       headers: buildSessionHeaders(backend, true),
       body: JSON.stringify({
         tab_content: buildBackendSuggestionContent(snapshot, projectIndex, scope, requestContext.trigger),
-        question: buildBackendSuggestionQuestion(snapshot, scope, requestContext.trigger),
+        question: buildBackendSuggestionQuestion(snapshot, scope, requestContext.trigger, requestContext.requestedAction),
         tab_title: snapshot.filePath,
         tab_url: `vscode://${snapshot.repoFullName || snapshot.workspaceName || 'workspace'}/${snapshot.filePath}`,
         suggestion_scope: scope,
@@ -325,6 +357,8 @@ export async function fetchBackendSuggestionText(
         ragCourseCode: settings.ragCourseCode,
         // Contrato v1.1 (A9.10): origen real de la peticion y errores del editor.
         trigger: requestContext.trigger,
+        // 0.0.34: el estudiante pidio el codigo de una accion (Proponer una mejora / codigo debajo).
+        ...(scope === 'cursor' && requestContext.requestedAction ? { requestedAction: requestContext.requestedAction } : {}),
         ...(visibleError ? { visibleError: visibleError.slice(0, 2000) } : {}),
         ...(snapshot.diagnostics.items.length ? { diagnostics: snapshot.diagnostics.items } : {}),
         clientSessionId: requestContext.clientSessionId,
@@ -415,6 +449,7 @@ export function buildBackendActiveSuggestionModel(
   fileSummaryResult: BackendSuggestionResult = createEmptyBackendSuggestionResult(),
   backendError = '',
   trigger?: SuggestionTrigger,
+  requestedAction?: EditorCodeAction,
 ): ActiveSuggestionModel | null {
   const focusOutputText = focusResult.outputText;
   const fileSummaryOutputText = fileSummaryResult.outputText;
@@ -438,7 +473,26 @@ export function buildBackendActiveSuggestionModel(
   const fileSummarySections = fileSummaryOutputText
     ? parseBackendSuggestionSections(fileSummaryOutputText)
     : emptySections;
-  const focusLines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
+  // Codigo solo del bloque del modelo (un bloque de puros comentarios no cuenta) y
+  // la accion de la linea "Aplicar:" del foco, la que pidio el estudiante o la que
+  // dice el contenido (0.0.34). El resumen del archivo no decide la accion: siempre
+  // trae su propio "Aplicar:".
+  const modes = resolveSuggestionModes({
+    focusText: focusOutputText,
+    code: extractSuggestionCode(focusOutputText),
+    requestedAction,
+    fallbackText: focusOutputText || fileSummaryResult.outputText,
+    selection: snapshot.selectionText,
+  });
+  // Una respuesta que es solo la linea "Aplicar:" y el bloque de codigo tambien vale
+  // (antes se descartaba por no traer texto fuera del bloque).
+  const codeOnlyHeadline = modes.completionText
+    ? (modes.completionMode === 'replace'
+      ? 'El tutor propone una versión mejorada del bloque.'
+      : 'El tutor propone código para continuar.')
+    : '';
+  const sectionFocusLines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
+  const focusLines = sectionFocusLines.length > 0 ? sectionFocusLines : (codeOnlyHeadline ? [codeOnlyHeadline] : []);
   const fileLines = fileSummarySections.sugerencias.length > 0
     ? fileSummarySections.sugerencias
     : fileSummarySections.all;
@@ -452,19 +506,9 @@ export function buildBackendActiveSuggestionModel(
     : localFallback.fileOverview;
   const focusSummary = focusSections.resumen.length > 0
     ? truncateInline(focusSections.resumen.join(' '), 420)
-    : '';
-  const completionSeed = focusLines[0]
-    || (scope === 'cursor' ? localFallback.lineSuggestions[0] : fileLines[0])
-    || fileLines[0]
-    || localFallback.suggestions[0]
-    || '';
-  const completionText = extractFirstCodeFence(focusOutputText)
-    || buildSuggestedCompletion(snapshot, completionSeed);
-  const applyMode = inferSuggestionApplyMode(
-    snapshot,
-    `${focusOutputText}\n${fileSummaryResult.outputText}`,
-    completionText,
-  );
+    : codeOnlyHeadline;
+  const completionText = modes.completionText;
+  const applyMode = modes.applyMode;
   const fileSuggestions = uniqueCompactStrings(
     fileLines.length ? fileLines : localFallback.fileSuggestions,
     4,
@@ -505,6 +549,7 @@ export function buildBackendActiveSuggestionModel(
       ragCourseCode,
     ].join('\n---adaceen-metric---\n')),
     completionText,
+    completionMode: modes.completionMode,
     applyMode,
     triggerKind: scope === 'cursor' ? 'cursor' : 'file',
     actionsVisible: false,
@@ -513,12 +558,26 @@ export function buildBackendActiveSuggestionModel(
     codeApplication: primaryResult.codeApplication,
     blocked: false,
     trigger,
+    ...(requestedAction ? { requestedAction } : {}),
+    fileOverviewFromTutor: fileSummarySections.resumen.length > 0,
+    proposalWarning: modes.completionMode === 'replace' && replacementDropsMostOfSelection(snapshot.selectionText, completionText)
+      ? DROPS_MOST_WARNING
+      : '',
   };
 }
 
 /** Se ofrece aplicar codigo para este modelo (no bloqueado y permitido por la politica). */
 export function isSuggestionApplyOffered(model: ActiveSuggestionModel) {
   return !model.blocked && model.codeApplication?.allowed !== false;
+}
+
+/**
+ * La accion recomendada se puede aplicar con un clic: la politica lo permite y,
+ * salvo eliminar, el tutor ya escribio el codigo para esa accion (CodeLens,
+ * pista en linea y arreglo rapido solo ofrecen «Aceptar ayuda» en ese caso).
+ */
+export function isRecommendedActionReady(model: ActiveSuggestionModel) {
+  return isSuggestionApplyOffered(model) && suggestionReadyForMode(model, model.applyMode || 'insert');
 }
 
 /** Nota discreta sobre la aplicacion de codigo para mostrar junto a la sugerencia. */

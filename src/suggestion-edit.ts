@@ -2,8 +2,12 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { pickTextMatch } from './code-application-guard';
+import { actionModeFromText, analyzedBlockMatches, normalizeActionProbe } from './suggestion-code';
 import { truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, PendingCodeAction, SuggestionApplyMode } from './types';
+
+// Movidas a suggestion-code.ts (sin vscode, con pruebas); se reexportan para los imports de siempre.
+export { actionModeFromText, extractFirstCodeFence, normalizeActionProbe } from './suggestion-code';
 
 export function countMatches(value: string, pattern: RegExp) {
   return (value.match(pattern) || []).length;
@@ -29,40 +33,6 @@ export function normalizeSuggestionForCode(value: string) {
   return truncateInline(value.replace(/\s+/g, ' ').replace(/[.;]\s*$/g, ''), 120);
 }
 
-export function extractFirstCodeFence(value: string) {
-  const match = value.match(/```(?:[A-Za-z0-9_+-]+)?\s*\r?\n([\s\S]*?)```/);
-  return match?.[1]?.trimEnd() || '';
-}
-
-export function buildSuggestedCompletion(snapshot: ActiveEditorSnapshot, suggestion = '', mode: 'insert' | 'replace' = 'insert') {
-  const currentLine = snapshot.currentLineText || '';
-  const indent = lineIndent(currentLine);
-  const nestedIndent = `${indent}  `;
-  const normalizedLanguage = snapshot.language.toLowerCase();
-  const lowerPath = snapshot.filePath.toLowerCase();
-  const cleanSuggestion = normalizeSuggestionForCode(suggestion || `continuar en ${snapshot.fileName}`);
-  const currentTrimmed = currentLine.trimEnd();
-
-  if ((normalizedLanguage === 'python' || lowerPath.endsWith('.py')) && currentTrimmed.endsWith(':')) {
-    return `${indent}    # TODO: ${cleanSuggestion}\n${indent}    pass`;
-  }
-
-  if (
-    (normalizedLanguage.includes('javascript') || normalizedLanguage.includes('typescript') || /\.(mjs|cjs|jsx|tsx?)$/i.test(lowerPath))
-    && /[{\[]\s*$/.test(currentTrimmed)
-  ) {
-    return `${nestedIndent}// TODO: ${cleanSuggestion}`;
-  }
-
-  if (normalizedLanguage === 'python' || lowerPath.endsWith('.py')) {
-    return `${indent}# TODO: ${cleanSuggestion}`;
-  }
-
-  const comment = commentPrefixForLanguage(snapshot.language, snapshot.filePath);
-  const prefix = mode === 'replace' ? indent : indent;
-  return `${prefix}${comment.open}TODO: ${cleanSuggestion}${comment.close}`;
-}
-
 export function getDocumentEol(document: vscode.TextDocument) {
   return document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
 }
@@ -80,51 +50,6 @@ export function normalizeCompletionTextForEditor(rawText: string, indent: string
   }
 
   return lines.join(eol);
-}
-
-export function buildCompletionFallbackForModel(model: ActiveSuggestionModel, lineText: string) {
-  const indent = lineIndent(lineText);
-  const comment = commentPrefixForLanguage(model.language, model.filePath);
-  const suggestion = normalizeSuggestionForCode(
-    model.suggestions[0] || model.nextSteps[0] || `continuar en ${model.fileName}`,
-  );
-  return `${indent}${comment.open}TODO: ${suggestion}${comment.close}`;
-}
-
-export function normalizeActionProbe(value: string) {
-  return value
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    // "insert_after_line" -> "insert after line": sin esto \b no separa
-    // "insert" de "_after" y la accion se aplicaba como reemplazo.
-    .replace(/[_-]+/g, ' ');
-}
-
-export function actionModeFromText(value: string): SuggestionApplyMode | '' {
-  const probe = normalizeActionProbe(value);
-  const explicit = probe.match(/\b(?:accion|aplicar|modo|action|apply)\s*:\s*(insert|insertar|add|replace|reemplazar|modificar|update|delete|eliminar|borrar|remove)\b/);
-  const token = explicit?.[1] || '';
-  if (/^(delete|eliminar|borrar|remove)$/.test(token)) {
-    return 'delete';
-  }
-  if (/^(replace|reemplazar|modificar|update)$/.test(token)) {
-    return 'replace';
-  }
-  if (/^(insert|insertar|add)$/.test(token)) {
-    return 'insert';
-  }
-
-  if (/\b(elimina|eliminar|borra|borrar|quita|quitar|remueve|remover|retira|retirar|delete|remove)\b/.test(probe)) {
-    return 'delete';
-  }
-  if (/\b(modifica|modificar|reemplaza|reemplazar|cambia|cambiar|actualiza|actualizar|corrige|corregir|refactoriza|refactorizar|replace|update|fix)\b/.test(probe)) {
-    return 'replace';
-  }
-  if (/\b(agrega|agregar|anade|anadir|inserta|insertar|crea|crear|implementa|implementar|add|insert|append)\b/.test(probe)) {
-    return 'insert';
-  }
-  return '';
 }
 
 export function inferSuggestionApplyMode(snapshot: ActiveEditorSnapshot, suggestionText: string, completionText: string): SuggestionApplyMode {
@@ -227,6 +152,40 @@ export function getSuggestionDeleteRange(editor: vscode.TextEditor, modelLineInd
   return editor.document.lineAt(modelLineIndex).rangeIncludingLineBreak;
 }
 
+/**
+ * Lineas completas del bloque que analizo el tutor, o null si la sugerencia no
+ * salio de una seleccion (o es de antes de la 0.0.34 y no guardo el bloque).
+ * 'stale': el documento ya no tiene ese texto en esas lineas.
+ *
+ * Revision del 20/10/2026: aplicar iba sobre la seleccion de ahora. Con mas de
+ * 20 lineas seleccionadas el tutor solo veia las primeras 20 y «Modificar
+ * selección» borraba las demas; y un clic dentro del bloque (seleccion vacia)
+ * hacia que un bloque entero reemplazara una sola linea.
+ */
+export function getAnalyzedBlockRange(
+  document: vscode.TextDocument,
+  model: Pick<ActiveSuggestionModel, 'line' | 'selectionLineCount' | 'selectionText'>,
+): vscode.Range | 'stale' | null {
+  if (!model.selectionLineCount || model.selectionLineCount <= 0 || !String(model.selectionText || '').trim()) {
+    return null;
+  }
+  const startLine = (Number(model.line) || 1) - 1;
+  const endLine = startLine + model.selectionLineCount - 1;
+  if (startLine < 0 || endLine > document.lineCount - 1) {
+    return 'stale';
+  }
+  const blockLines: string[] = [];
+  for (let line = startLine; line <= endLine; line += 1) {
+    blockLines.push(document.lineAt(line).text);
+  }
+  if (!analyzedBlockMatches(blockLines, model.selectionText || '')) {
+    return 'stale';
+  }
+  return new vscode.Range(new vscode.Position(startLine, 0), document.lineAt(endLine).range.end);
+}
+
+const STALE_BLOCK_MESSAGE = 'ADACEEN: el bloque cambió desde la sugerencia. Selecciónalo otra vez y pide «Otra sugerencia».';
+
 export type SuggestionEditPlan =
   | { ok: false; message: string }
   | {
@@ -263,9 +222,19 @@ export function planSuggestionEdit(
   );
   const targetLine = document.lineAt(modelLineIndex);
   const eol = getDocumentEol(document);
+  const analyzedBlock = getAnalyzedBlockRange(document, model);
+  if (analyzedBlock === 'stale') {
+    return { ok: false, message: STALE_BLOCK_MESSAGE };
+  }
 
   if (mode === 'delete') {
-    const range = getSuggestionDeleteRange(editor, modelLineIndex);
+    // «Eliminar selección» borra la seleccion de ahora; si ya no hay (un clic dentro del
+    // bloque), el bloque que vio el tutor, no solo su primera linea.
+    const range = editor.selection.isEmpty && analyzedBlock
+      ? (analyzedBlock.end.line < document.lineCount - 1
+        ? new vscode.Range(analyzedBlock.start, new vscode.Position(analyzedBlock.end.line + 1, 0))
+        : analyzedBlock)
+      : getSuggestionDeleteRange(editor, modelLineIndex);
     const deletedText = document.getText(range);
     if (!deletedText.trim()) {
       return { ok: false, message: 'ADACEEN: no hay codigo seleccionado o linea con contenido para eliminar.' };
@@ -282,16 +251,17 @@ export function planSuggestionEdit(
     };
   }
 
-  const rawCompletion = model.completionText || buildCompletionFallbackForModel(model, targetLine.text);
-  const completionText = normalizeCompletionTextForEditor(rawCompletion, lineIndent(targetLine.text), eol);
+  // 0.0.34: solo el codigo que escribio el tutor; nunca un «TODO» inventado aqui.
+  const completionText = normalizeCompletionTextForEditor(model.completionText || '', lineIndent(targetLine.text), eol);
   if (!completionText.trim()) {
-    return { ok: false, message: 'ADACEEN: la sugerencia no trae codigo aplicable.' };
+    return { ok: false, message: 'ADACEEN: esta sugerencia no trae código para aplicar. Usa «Proponer una mejora» o «Otra sugerencia».' };
   }
 
   if (mode === 'replace') {
-    const range = editor.selection.isEmpty
-      ? new vscode.Range(new vscode.Position(modelLineIndex, 0), targetLine.range.end)
-      : getSelectedFullLineRange(editor);
+    const range = analyzedBlock
+      || (editor.selection.isEmpty
+        ? new vscode.Range(new vscode.Position(modelLineIndex, 0), targetLine.range.end)
+        : getSelectedFullLineRange(editor));
     const originalCode = document.getText(range);
     return {
       ok: true,
@@ -305,14 +275,18 @@ export function planSuggestionEdit(
     };
   }
 
-  const insertLineIndex = editor.selection.isEmpty
-    ? modelLineIndex
-    : Math.min(document.lineCount - 1, getSelectedFullLineRange(editor).end.line);
+  const insertLineIndex = analyzedBlock
+    ? analyzedBlock.end.line
+    : editor.selection.isEmpty
+      ? modelLineIndex
+      : Math.min(document.lineCount - 1, getSelectedFullLineRange(editor).end.line);
   const insertLine = document.lineAt(insertLineIndex);
-  const quizOriginalCode = editor.selection.isEmpty
-    ? insertLine.text
-    : document.getText(getSelectedFullLineRange(editor));
-  if (editor.selection.isEmpty && !insertLine.text.trim()) {
+  const quizOriginalCode = analyzedBlock
+    ? document.getText(analyzedBlock)
+    : editor.selection.isEmpty
+      ? insertLine.text
+      : document.getText(getSelectedFullLineRange(editor));
+  if (!analyzedBlock && editor.selection.isEmpty && !insertLine.text.trim()) {
     const range = new vscode.Range(new vscode.Position(insertLineIndex, 0), insertLine.range.end);
     return {
       ok: true,

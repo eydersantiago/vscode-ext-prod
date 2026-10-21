@@ -214,9 +214,22 @@ export type ActiveSuggestionModel = {
   selectionOriginalLineCount: number;
   selectionTruncated: boolean;
   selectionRangeKey: string;
+  /**
+   * Texto del bloque que analizo el tutor (hasta 20 lineas). Aplicar va sobre ese
+   * bloque y solo si sigue igual en el documento (suggestion-edit.ts).
+   */
+  selectionText?: string;
   fileSummaryCacheKey: string;
   metricId: string;
+  /** Codigo que escribio el tutor ('' si no trajo; la extension ya no inventa un «TODO»). */
   completionText: string;
+  /**
+   * Para que accion se escribio completionText (0.0.34): '' sin codigo. Otra
+   * accion (p. ej. «Proponer una mejora» sobre un codigo para insertar) pide su
+   * propio codigo al tutor antes de aplicar. Sin el campo (historial anterior):
+   * la accion recomendada.
+   */
+  completionMode?: SuggestionApplyMode | '';
   applyMode: SuggestionApplyMode;
   triggerKind: 'file' | 'cursor';
   actionsVisible?: boolean;
@@ -233,6 +246,20 @@ export type ActiveSuggestionModel = {
   tutorMessage?: string;
   /** Origen real de la peticion que produjo esta sugerencia. */
   trigger?: SuggestionTrigger;
+  /** La sugerencia responde a un pedido del estudiante (codigo bajo demanda). */
+  requestedAction?: 'insert' | 'replace';
+  /** Se esta pidiendo al tutor el codigo de esta accion (la ventana flotante muestra la espera). */
+  pendingMode?: SuggestionApplyMode;
+  /** La respuesta del tutor tarda mas de lo normal (GPU lenta o encendiendose). */
+  slow?: boolean;
+  /** Nota del ultimo pedido de codigo: llego sin codigo o fallo. */
+  codeRequestNote?: string;
+  /** cacheKey de la foto del editor para la que se pidio el codigo (no se repite al volver). */
+  snapshotKey?: string;
+  /** fileOverview salio del resumen del tutor (file_summary) y no de la pista local. */
+  fileOverviewFromTutor?: boolean;
+  /** Aviso sobre el codigo propuesto (p. ej. una version mejorada que quita casi todo el bloque). */
+  proposalWarning?: string;
 };
 
 export type VscodeReplacementOption = {
@@ -287,12 +314,16 @@ export type BackendSuggestionResult = {
   codeApplication: SuggestionCodeApplication | null;
   /** Tiempo de ida y vuelta de /suggest-tab (null si salio de la cache local). */
   latencyMs: number | null;
+  /** El backend respondio sin modelo («El tutor no esta disponible»): no se guarda en cache. */
+  degraded?: boolean;
 };
 
 /** Datos de la peticion que no forman parte de la foto del editor. */
 export type BackendSuggestionRequestContext = {
   trigger: SuggestionTrigger;
   clientSessionId: string;
+  /** Codigo bajo demanda (0.0.34): insert = codigo nuevo debajo, replace = version mejorada. */
+  requestedAction?: 'insert' | 'replace';
 };
 
 export type BackendSuggestionSettledResult =

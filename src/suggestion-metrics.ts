@@ -6,7 +6,8 @@ import { ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT, ACTIVE_SUGGESTION_SELECTION_MAX_
 import { detectBranchName } from './git-repo';
 import type { QuizHistoryItem } from './quiz-view';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
-import { buildSuggestedCompletion, commentPrefixForLanguage, inferSuggestionApplyMode, lineIndent, normalizeSuggestionForCode, suggestionApplyModeLabel } from './suggestion-edit';
+import { suggestionReadyForMode } from './suggestion-code';
+import { inferSuggestionApplyMode, suggestionApplyModeLabel } from './suggestion-edit';
 import { historyEntryTargetLabel, normalizeHistoryText } from './suggestion-history';
 import { truncateInline } from './suggestion-results';
 import type { TelemetryCategory, TelemetryClient } from './telemetry';
@@ -58,39 +59,6 @@ export function buildSuggestionMetricMetadata(
       : {}),
     ...extra,
   };
-}
-
-export function buildActionCommentText(snapshot: ActiveEditorSnapshot, model: ActiveSuggestionModel) {
-  const baseLine = snapshot.selectionText
-    .split(/\r?\n/)
-    .reverse()
-    .find((line) => line.trim())
-    || snapshot.currentLineText
-    || '';
-  const indent = lineIndent(baseLine);
-  const comment = commentPrefixForLanguage(snapshot.language, snapshot.filePath);
-  const suggestion = normalizeSuggestionForCode(primarySuggestionText(model) || 'revisar este bloque con ADACEEN');
-  return `${indent}${comment.open}TODO: ${suggestion}${comment.close}`;
-}
-
-export function appendActionCommentToTarget(targetText: string, commentText: string) {
-  const cleanTarget = targetText.replace(/\s+$/g, '');
-  if (!cleanTarget) {
-    return commentText;
-  }
-  return `${cleanTarget}\n${commentText}`;
-}
-
-export function looksLikeCommentOnlyCompletion(value: string, snapshot: ActiveEditorSnapshot) {
-  const clean = value.trim();
-  if (!clean) {
-    return false;
-  }
-  const comment = commentPrefixForLanguage(snapshot.language, snapshot.filePath);
-  if (comment.open === '// ') {
-    return clean.split(/\r?\n/).every((line) => !line.trim() || line.trim().startsWith('//'));
-  }
-  return clean.startsWith(comment.open.trim()) && (!comment.close || clean.endsWith(comment.close.trim()));
 }
 
 export function actionOptionMetadata(
@@ -197,7 +165,6 @@ export function buildRackReplacementOptions(
   }
   const applyMode = model.applyMode || inferSuggestionApplyMode(snapshot, summarizeActiveSuggestion(model), model.completionText);
   const targetText = snapshot.selectionText.trim() ? snapshot.selectionText : snapshot.currentLineText;
-  const actionCommentText = buildActionCommentText(snapshot, model);
   if (applyMode === 'delete') {
     if (!targetText.trim()) {
       return [];
@@ -217,16 +184,12 @@ export function buildRackReplacementOptions(
     }];
   }
 
-  const fallback = buildSuggestedCompletion(snapshot, model.suggestions[0] || model.summary, applyMode === 'replace' ? 'replace' : 'insert');
-  const primaryReplacementText = (model.completionText || fallback || actionCommentText).trimEnd();
-  if (!primaryReplacementText.trim()) {
+  // 0.0.34: solo con codigo del tutor escrito para esta accion; antes se mandaba un
+  // «TODO: ...» inventado (o se pegaba al final del bloque) cuando no habia codigo.
+  if (!suggestionReadyForMode(model, applyMode)) {
     return [];
   }
-
-  const replacementText = applyMode === 'replace'
-    && looksLikeCommentOnlyCompletion(primaryReplacementText, snapshot)
-    ? appendActionCommentToTarget(targetText, primaryReplacementText)
-    : primaryReplacementText;
+  const replacementText = model.completionText.trimEnd();
 
   return [{
     id: `agent-${applyMode}-focused-code`,

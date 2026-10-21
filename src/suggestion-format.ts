@@ -25,8 +25,18 @@ export function parseBackendSuggestionSections(output: string): BackendSuggestio
     all: [],
   };
   let current: keyof Omit<BackendSuggestionSections, 'all'> | '' = '';
+  let insideFence = false;
 
   for (const rawLine of output.split(/\r?\n/)) {
+    // El bloque de codigo no es texto de la sugerencia (0.0.34): sus lineas
+    // aparecian como «sugerencias» o «riesgos» en el panel y en el historial.
+    if (/^\s*```/.test(rawLine)) {
+      insideFence = !insideFence;
+      continue;
+    }
+    if (insideFence) {
+      continue;
+    }
     const clean = cleanBackendSuggestionLine(rawLine);
     if (!clean) {
       continue;

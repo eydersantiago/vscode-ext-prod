@@ -1,10 +1,10 @@
 // ADACEEN (VS Code): barra de estado de la sugerencia, hover y decoraciones en el editor.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { isSuggestionApplyOffered, primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
+import { isRecommendedActionReady, primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
 import { ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import { buildSelectionRangeKey } from './editor-snapshot';
-import { sanitizeTutorMarkdown } from './selection-widget';
+import { sanitizeTutorMarkdown } from './selection-widget-text';
 import { suggestionApplyModeLabel } from './suggestion-edit';
 import { buildCommandUri } from './suggestion-format';
 import { truncateInline } from './suggestion-results';
@@ -18,15 +18,18 @@ export function updateSuggestionStatusBar(statusBar: vscode.StatusBarItem, model
 
   if (!model) {
     statusBar.text = '$(lightbulb) ADACEEN';
-    statusBar.tooltip = 'Abrir panel ADACEEN. Abre un archivo para recibir sugerencias.';
+    statusBar.tooltip = 'Resumen del archivo y material del curso. Abre un archivo para recibir sugerencias.';
     statusBar.show();
     return;
   }
 
-  if (model.loading) {
-    statusBar.text = `$(sync~spin) ADACEEN: cargando`;
+  if (model.loading || model.pendingMode) {
+    // 0.0.34: si tarda (GPU lenta o encendiendose) se dice, en vez de un «cargando» de 2 minutos.
+    statusBar.text = model.slow ? '$(sync~spin) ADACEEN: el tutor está tardando' : '$(sync~spin) ADACEEN: cargando';
     statusBar.tooltip = [
-      `Cargando sugerencias para ${model.fileName}...`,
+      model.slow
+        ? 'El tutor está tardando más de lo normal: la GPU puede estar lenta o encendiéndose. La respuesta llega sola.'
+        : `Cargando sugerencias para ${model.fileName}...`,
       model.fileOverview ? `Descripcion: ${model.fileOverview}` : '',
     ].filter(Boolean).join('\n');
     statusBar.show();
@@ -41,7 +44,7 @@ export function updateSuggestionStatusBar(statusBar: vscode.StatusBarItem, model
       ? `Seleccion limitada: primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount}.`
       : '',
 	    '',
-	    'Clic: abrir panel ADACEEN.',
+	    'Clic: resumen del archivo y material del curso.',
 	    ...(model.suggestions || []).map((item) => `- ${item}`),
     model.backendError ? `Backend: ${model.backendError}` : '',
   ].filter(Boolean).join('\n');
@@ -72,7 +75,7 @@ export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
   const markdown = new vscode.MarkdownString('', true);
   markdown.isTrusted = {
     enabledCommands: [
-      'adaceen.openAssistant',
+      'adaceen.openFileView',
       'adaceen.applySuggestionCompletion',
       'adaceen.openRagSource',
     ],
@@ -87,19 +90,19 @@ export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
       `> Seleccion limitada: se analizaron las primeras ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas de ${model.selectionOriginalLineCount || 'la seleccion'}.\n\n`,
     );
   }
-  const openPanelUri = buildCommandUri('adaceen.openAssistant');
+  const openPanelUri = buildCommandUri('adaceen.openFileView');
   if (model.blocked) {
     // Mensaje controlado del tutor: se muestra tal cual (Markdown) y sin enlace de aplicar.
     markdown.appendMarkdown(`${sanitizeTutorMarkdown(model.tutorMessage || primarySuggestionText(model))}\n\n`);
-    markdown.appendMarkdown(`[Ver panel](${openPanelUri})`);
+    markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
   } else {
     markdown.appendMarkdown(`${escapeMarkdown(primarySuggestionText(model))}\n\n`);
     markdown.appendMarkdown(`**Accion:** ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}\n\n`);
 
     const applyUri = buildCommandUri('adaceen.applySuggestionCompletion', [model.applyMode, 'hover']);
     const applicationNote = suggestionApplicationNote(model);
-    markdown.appendMarkdown(`[Ver panel](${openPanelUri})`);
-    if (!model.loading && !model.applied && model.source !== 'local-fallback' && isSuggestionApplyOffered(model)) {
+    markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
+    if (!model.loading && !model.applied && model.source !== 'local-fallback' && isRecommendedActionReady(model)) {
       markdown.appendMarkdown(` · [Aceptar ayuda: ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}](${applyUri})`);
     } else if (model.applied) {
       markdown.appendMarkdown(`\n\n_Ayuda aplicada. Mantengo el contexto para que puedas validar el cambio._`);

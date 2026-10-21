@@ -1,7 +1,7 @@
 // ADACEEN (VS Code): proveedores de VS Code para la sugerencia (CodeLens, acciones de codigo e inlay hints).
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { isSuggestionApplyOffered, suggestionApplicationNote } from './active-suggestion';
+import { isRecommendedActionReady, suggestionApplicationNote } from './active-suggestion';
 import { quickFixOrigin } from './code-application-guard';
 import { buildSelectionRangeKey } from './editor-snapshot';
 import { buildSuggestionHoverMarkdown } from './suggestion-decorations';
@@ -50,7 +50,7 @@ export class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvide
         range,
         {
           title: `ADACEEN: ${truncateInline(headline, 96)}`,
-          command: 'adaceen.openAssistant',
+          command: 'adaceen.openFileView',
         },
       ),
     ];
@@ -58,7 +58,7 @@ export class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvide
       !this.model.loading &&
       !this.model.applied &&
       this.model.source !== 'local-fallback' &&
-      isSuggestionApplyOffered(this.model);
+      isRecommendedActionReady(this.model);
     // Con la ventana flotante abierta en este archivo, ella ofrece la accion: sin repetirla aqui.
     // Tampoco si el estudiante cerro la ventana de esta sugerencia con la X.
     if (codeLensOffersApply({
@@ -163,7 +163,7 @@ export class AdaceenSuggestionCodeActionProvider implements vscode.CodeActionPro
       this.model.applied ||
       this.model.source === 'local-fallback' ||
       !this.model.actionsVisible ||
-      !isSuggestionApplyOffered(this.model) ||
+      !isRecommendedActionReady(this.model) ||
       !isSuggestionCodeActionRequestFocused(this.model, document, range)
     ) {
       return [];
@@ -199,7 +199,7 @@ export function isSuggestionInlineHintVisible(model: ActiveSuggestionModel, docu
     model.loading ||
     model.applied ||
     model.source === 'local-fallback' ||
-    !isSuggestionApplyOffered(model) ||
+    !isRecommendedActionReady(model) ||
     document.uri.toString() !== model.uriString
   ) {
     return false;

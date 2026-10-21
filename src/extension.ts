@@ -3,25 +3,32 @@
 // git-repo, editor-snapshot, active-suggestion, suggestion-*, code-actions, status-bar...).
 import * as vscode from 'vscode';
 import { buildBackendActiveSuggestionModel, buildLocalActiveSuggestion, fetchBackendSuggestionText, isSuggestionApplyOffered, primarySuggestionText } from './active-suggestion';
-import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, sendScanFailure, sendScanResult } from './backend-http';
+import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, fetchJsonWithTimeout, sendScanFailure, sendScanResult } from './backend-http';
 import { describeBackendUrlSource, detectEditorHost } from './backend-url';
 import { currentClientId, initClientIdentity } from './client-identity';
 import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './code-actions';
 import { guardCodeApplication, isExplicitClickOrigin } from './code-application-guard';
 import { setEditorConnection } from './connection-state';
 import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_CURSOR_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, WORKER_TICK_MS } from './constants';
+import { courseMaterialListUrl, normalizeCourseMaterial } from './course-material';
 import { EditorConnection } from './editor-connect';
 import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnchor, hasActiveSelection, isCursorIdleAnchorStillActive, isSnapshotStillActive, isSuggestionModelDocumentVisible, isSupportedActiveDocument } from './editor-snapshot';
 import { ERROR_TEXT_MAX_CHARS, ErrorSignalTracker } from './error-signals';
 import type { BlockingSignal, ErrorSignal } from './error-signals';
+import { AdaceenFileViewProvider } from './file-view';
+import { buildFileViewState, EMPTY_MATERIAL_STATE } from './file-view-model';
+import type { FileSummaryEntry, FileViewMaterialState } from './file-view-model';
 import { detectBranchName, detectRepoFullName, parseRepoFromGitConfig, readGitConfigText } from './git-repo';
+import { applyEditToText, PROPOSAL_SCHEME, ProposalContentProvider } from './proposal-diff';
 import { AdaceenQuizViewProvider } from './quiz-view';
 import { AdaceenSelectionWidget, SELECTION_WIDGET_ORIGIN } from './selection-widget';
 import { asRecord, backendUrlSetByWorkspace, getEnv, isCodespaceRuntime, refreshLocalBackendDetection, resolveActiveSuggestionSettings, resolveBackendSettings, resolveCurrentBackendBaseUrl, resolveScanOptions, resolveTriggerSettings, toOptionalString } from './settings';
 import { UNKNOWN_BACKEND_ORIGIN, fetchBackendOrigin, updateBackendOriginStatusBar } from './status-bar';
 import { applySuggestionDecoration, clearSuggestionDecorations, updateSuggestionStatusBar } from './suggestion-decorations';
+import { extractSuggestionCode, producedMode, suggestionReadyForMode } from './suggestion-code';
+import type { EditorCodeAction } from './suggestion-code';
 import { buildAppliedSuggestionModel, planSuggestionEdit, resolveWorkspaceFileUri } from './suggestion-edit';
-import { buildRagSourceMarkdown, buildRagSourceTargetUrl, getBackendSuggestionScopeLabel } from './suggestion-format';
+import { buildRagSourceMarkdown, buildRagSourceTargetUrl, getBackendSuggestionScopeLabel, parseBackendSuggestionSections } from './suggestion-format';
 import { formatSuggestionHistoryMarkdown, readSuggestionHistory, rememberSuggestionHistory, toSelectionWidgetModel, writeSuggestionHistory } from './suggestion-history';
 import { editorPageContext, publishActiveEditorRack, recordVscodeSuggestionMetric, toQuizHistoryItems } from './suggestion-metrics';
 import type { SuggestionMetricFields } from './suggestion-metrics';
@@ -34,6 +41,14 @@ import type { TelemetryEventInput } from './telemetry';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionInFlight, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, CursorIdleAnchor, ScanCommandArgs, ScanPayload, SuggestionApplyMode, SuggestionTrigger, WorkspaceProjectIndex } from './types';
 import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity, stableStringHash } from './workspace-index';
 import { askScanPermission, performWorkspaceScan, renderScanOutput } from './workspace-scan';
+
+/** /suggest-tab respondio, pero sin texto ni codigo que mostrar. */
+class BackendAnsweredWithoutSuggestion extends Error {
+  constructor() {
+    super('Backend no devolvio sugerencias aplicables.');
+    this.name = 'BackendAnsweredWithoutSuggestion';
+  }
+}
 
 export async function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel('ADACEEN');
@@ -123,6 +138,20 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand('adaceen.quiz.checkPending', () => quizView.checkPending(true)),
   );
+  // Vista «Este archivo» (0.0.34): de que trata el archivo y el material del curso. El
+  // proveedor se crea mas abajo, cuando ya existen las funciones que usa.
+  let fileView: AdaceenFileViewProvider | null = null;
+  const fileSummaries = new Map<string, FileSummaryEntry>();
+  const fileSummaryInFlight = new Set<string>();
+  let materialState: FileViewMaterialState = { ...EMPTY_MATERIAL_STATE };
+  let materialLoadedAt = 0;
+  let materialInFlight: Promise<FileViewMaterialState> | null = null;
+  // «Ver cambios»: la propuesta del tutor aplicada, en un documento de solo lectura.
+  const proposals = new ProposalContentProvider();
+  context.subscriptions.push(
+    proposals,
+    vscode.workspace.registerTextDocumentContentProvider(PROPOSAL_SCHEME, proposals),
+  );
   // Ventana flotante anclada a la seleccion: una sola sugerencia, en un solo sitio.
   const selectionWidget = new AdaceenSelectionWidget();
   // Con comments.visible=false el hilo existe pero no se ve: no cuenta como abierta.
@@ -143,7 +172,8 @@ export async function activate(context: vscode.ExtensionContext) {
   const suggestionCodeActionProvider = new AdaceenSuggestionCodeActionProvider(() => quickFixAutoOpenedAt);
   const suggestionInlayHintProvider = new AdaceenSuggestionInlayHintProvider();
   const suggestionStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98);
-  suggestionStatusBar.command = 'adaceen.openAssistant';
+  // El bombillo abre «Este archivo» (resumen y material); antes abria el quiz.
+  suggestionStatusBar.command = 'adaceen.openFileView';
   updateSuggestionStatusBar(suggestionStatusBar, null, resolveActiveSuggestionSettings().enabled);
 
   // Indicador de origen de la GPU: PC, Mac, Google Cloud o Colab.
@@ -225,6 +255,9 @@ export async function activate(context: vscode.ExtensionContext) {
   };
   const backendSuggestionInFlight = new Map<string, BackendSuggestionInFlight>();
   let activeSuggestionModel: ActiveSuggestionModel | null = null;
+  // Ultimo codigo pedido por el estudiante (0.0.34): se vuelve a mostrar si regresa a la
+  // misma seleccion sin cambios (p. ej. despues de «Ver cambios»).
+  let lastRequestedModel: ActiveSuggestionModel | null = null;
   let suggestionTimer: ReturnType<typeof setTimeout> | null = null;
   let cursorIdleSuggestionTimer: ReturnType<typeof setTimeout> | null = null;
   let cursorActionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -334,6 +367,59 @@ export async function activate(context: vscode.ExtensionContext) {
     refreshInlineSuggestionSurfaces();
   }));
 
+  /** Resumen del tutor (file_summary) que trae un modelo: se guarda por archivo para la vista. */
+  const rememberFileSummary = (model: ActiveSuggestionModel | null) => {
+    if (!model || model.source !== 'backend' || !model.fileOverviewFromTutor || !model.fileOverview) {
+      return;
+    }
+    fileSummaries.delete(model.uriString);
+    fileSummaries.set(model.uriString, {
+      uriString: model.uriString,
+      overview: model.fileOverview,
+      tips: model.fileSuggestions.slice(0, 3),
+      updatedAt: new Date().toISOString(),
+    });
+    while (fileSummaries.size > 40) {
+      fileSummaries.delete(fileSummaries.keys().next().value as string);
+    }
+  };
+
+  const refreshFileView = () => {
+    if (!fileView) {
+      return;
+    }
+    const model = activeSuggestionModel;
+    const uri = model?.uriString || '';
+    fileView.update(buildFileViewState(
+      model,
+      uri ? fileSummaries.get(uri) || null : null,
+      !!uri && fileSummaryInFlight.has(uri),
+      materialState,
+    ));
+  };
+
+  // Aviso de espera larga (0.0.34): a los 20 s sin respuesta la ventana y la barra lo dicen.
+  let slowNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  const SLOW_NOTICE_MS = 20_000;
+  const armSlowNotice = (model: ActiveSuggestionModel) => {
+    if (slowNoticeTimer) {
+      clearTimeout(slowNoticeTimer);
+    }
+    slowNoticeTimer = setTimeout(() => {
+      slowNoticeTimer = null;
+      const current = activeSuggestionModel;
+      if (
+        current
+        && current.metricId === model.metricId
+        && current.uriString === model.uriString
+        && (current.loading || current.pendingMode)
+        && !current.slow
+      ) {
+        publishSuggestionModel({ ...current, slow: true }, true);
+      }
+    }, SLOW_NOTICE_MS);
+  };
+
   const publishSuggestionModel = (model: ActiveSuggestionModel | null, enabled = true) => {
     // Una sugerencia mostrada que se reemplaza por otra o desaparece sin
     // aplicarse cuenta como ignorada (con el tiempo que estuvo a la vista).
@@ -345,6 +431,11 @@ export async function activate(context: vscode.ExtensionContext) {
       recordIgnoredSuggestion(ignored.item, ignored.durationMs, model ? 'replaced' : 'dismissed');
     }
     activeSuggestionModel = model;
+    rememberFileSummary(model);
+    if (slowNoticeTimer && !(model?.loading || model?.pendingMode)) {
+      clearTimeout(slowNoticeTimer);
+      slowNoticeTimer = null;
+    }
     if (!model || model.applied || model.metricId !== dismissedSuggestionMetricId) {
       // Llego otra sugerencia (o se aplico): lo descartado con la X deja de contar.
       dismissedSuggestionMetricId = '';
@@ -361,7 +452,8 @@ export async function activate(context: vscode.ExtensionContext) {
     // repetirian lo mismo a dos centimetros: se apagan mientras dure.
     refreshInlineSuggestionSurfaces();
     maybeOpenSelectionInlinePanel(model);
-    if (model && !model.loading && !model.applied) {
+    refreshFileView();
+    if (model && !model.loading && !model.pendingMode && !model.applied) {
       void rememberSuggestionHistory(context.workspaceState, model)
         .then((history) => {
           latestSuggestionHistory = history;
@@ -410,6 +502,7 @@ export async function activate(context: vscode.ExtensionContext) {
     projectIndex: WorkspaceProjectIndex | null,
     scope: BackendSuggestionRequestScope,
     trigger: SuggestionTrigger,
+    requestedAction?: EditorCodeAction,
   ) => {
     const projectKey = projectIndex?.cacheKey || 'sin-mapa';
     const backend = resolveBackendSettings();
@@ -418,9 +511,11 @@ export async function activate(context: vscode.ExtensionContext) {
     if (scope === 'file_summary') {
       return `${sessionKey}:${snapshot.fileSummaryCacheKey}:${projectKey}`;
     }
-    // Un bloqueo siempre llega al backend (su pregunta y su politica son otras).
+    // Un bloqueo siempre llega al backend (su pregunta y su politica son otras), y
+    // un pedido de codigo (0.0.34) no reusa la sugerencia normal del mismo bloque.
     const triggerKey = trigger === 'blocking' ? ':blocking' : '';
-    return `${sessionKey}:${snapshot.cacheKey}:${projectKey}${triggerKey}`;
+    const actionKey = requestedAction ? `:pedido-${requestedAction}` : '';
+    return `${sessionKey}:${snapshot.cacheKey}:${projectKey}${triggerKey}${actionKey}`;
   };
 
   const getBackendSuggestionText = async (
@@ -430,8 +525,11 @@ export async function activate(context: vscode.ExtensionContext) {
     scope: BackendSuggestionRequestScope,
     requestContext: BackendSuggestionRequestContext,
   ): Promise<BackendSuggestionResult> => {
-    const cacheKey = buildBackendSuggestionTextCacheKey(snapshot, projectIndex, scope, requestContext.trigger);
-    const cached = backendSuggestionCache[scope].get(cacheKey);
+    const cacheKey = buildBackendSuggestionTextCacheKey(snapshot, projectIndex, scope, requestContext.trigger, requestContext.requestedAction);
+    // Un pedido explicito del estudiante («Otra sugerencia», «Proponer una mejora»,
+    // «Actualizar resumen») va al backend aunque haya respuesta guardada: repetir la
+    // misma era lo que no servia al reintentar.
+    const cached = requestContext.trigger === 'manual' ? undefined : backendSuggestionCache[scope].get(cacheKey);
     if (cached) {
       // Sale de la cache local: no hubo viaje al backend, asi que no hay latencia que medir.
       return { ...cached, latencyMs: null };
@@ -450,7 +548,10 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     const result = await inFlight.request;
-    if (result.outputText) {
+    // Sin guardar: la respuesta sin modelo («El tutor no esta disponible») y un pedido de
+    // codigo que volvio sin codigo; asi el siguiente intento le pregunta otra vez al tutor.
+    const codeRequestWithoutCode = !!requestContext.requestedAction && !extractSuggestionCode(result.outputText);
+    if (result.outputText && !result.degraded && !codeRequestWithoutCode) {
       backendSuggestionCache[scope].set(cacheKey, result);
     }
     return result;
@@ -577,6 +678,25 @@ export async function activate(context: vscode.ExtensionContext) {
     if (snapshot.repoFullName) {
       lastKnownRepoFullName = snapshot.repoFullName;
     }
+    // Codigo pedido por el estudiante (0.0.34) para esta misma foto del editor: al volver de
+    // «Ver cambios» o de otra pestaña se vuelve a mostrar, no se cambia por la sugerencia normal.
+    // «Otra sugerencia» (manual-refresh) si pide una nueva.
+    if (reason === 'manual-refresh') {
+      lastRequestedModel = null;
+    }
+    const active = activeSuggestionModel;
+    const current = active && (active.requestedAction || active.pendingMode) ? active : lastRequestedModel;
+    if (
+      reason !== 'manual-refresh'
+      && current
+      && !current.applied
+      && current.uriString === snapshot.uriString
+      && !!current.snapshotKey
+      && current.snapshotKey === snapshot.cacheKey
+    ) {
+      publishSuggestionModel(current, true);
+      return current;
+    }
     const trigger = resolveSuggestionTrigger(reason, snapshot);
     if (pendingFileOpenUri === snapshot.uriString) {
       // "file_open" solo describe la primera peticion tras abrir el archivo.
@@ -599,9 +719,12 @@ export async function activate(context: vscode.ExtensionContext) {
       trigger,
     };
     publishSuggestionModel(model, true);
+    if (model.loading) {
+      armSlowNotice(model);
+    }
     publishActiveRackSnapshot(snapshot, model, null, `${reason}:local`);
     if (settings.autoRevealPanel && backendScope === 'file' && autoRevealedSuggestionUri !== snapshot.uriString) {
-      void quizView.reveal(true);
+      void fileView?.reveal(true);
       autoRevealedSuggestionUri = snapshot.uriString;
     }
 
@@ -611,6 +734,7 @@ export async function activate(context: vscode.ExtensionContext) {
       if (!isSnapshotStillActive(snapshot, backendScope)) {
         return activeSuggestionModel;
       }
+      const previousLoading = activeSuggestionModel;
       model = {
         ...buildLocalActiveSuggestion(snapshot, projectIndex),
         triggerKind: backendScope === 'cursor' ? 'cursor' : 'file',
@@ -618,7 +742,14 @@ export async function activate(context: vscode.ExtensionContext) {
         loading: true,
         trigger,
       };
+      // Si ya se habia avisado que tarda, el aviso se mantiene.
+      if (previousLoading?.slow && previousLoading.metricId === model.metricId) {
+        model = { ...model, slow: true };
+      }
       publishSuggestionModel(model, true);
+      if (!model.slow) {
+        armSlowNotice(model);
+      }
       publishActiveRackSnapshot(snapshot, model, projectIndex, `${reason}:indexed-local`);
     }
 
@@ -686,12 +817,14 @@ export async function activate(context: vscode.ExtensionContext) {
         if (backendModel) {
           model = backendModel;
         } else {
-          throw new Error('Backend no devolvio sugerencias aplicables.');
+          throw new BackendAnsweredWithoutSuggestion();
         }
       } catch (error) {
         const backendErrorMessage = formatBackendSuggestionError(error);
         const remainingMs = fallbackDelayMs - (Date.now() - backendStartedAt);
-        if (remainingMs > 0) {
+        // El tutor ya contesto (sin nada utilizable): la pista local sale de una vez, sin
+        // dejar la ventana «consultando al tutor» hasta el tiempo limite.
+        if (remainingMs > 0 && !(error instanceof BackendAnsweredWithoutSuggestion)) {
           await delay(remainingMs);
         }
         if (!isSnapshotStillActive(snapshot, backendScope)) {
@@ -748,7 +881,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     publishActiveRackSnapshot(snapshot, finalModel, projectIndex, `${reason}:final`);
     if (backendScope === 'file' && settings.autoRevealPanel && autoRevealedSuggestionUri !== finalModel.uriString) {
-      void quizView.reveal(true);
+      void fileView?.reveal(true);
       autoRevealedSuggestionUri = finalModel.uriString;
     }
     output.appendLine(
@@ -920,6 +1053,153 @@ export async function activate(context: vscode.ExtensionContext) {
     });
   };
 
+  /** Pedido de codigo en curso (sugerencia y accion): un doble clic no manda dos. */
+  let codeRequestInFlightKey = '';
+
+  /** Nota bajo el codigo pedido cuando no es para la accion que se pidio (o no hay codigo). */
+  const codeRequestNoteFor = (next: ActiveSuggestionModel, mode: EditorCodeAction) => {
+    if (suggestionReadyForMode(next, mode)) {
+      return '';
+    }
+    const produced = producedMode(next);
+    if (mode === 'replace' && produced === 'insert') {
+      return 'El tutor propuso código para continuar en vez de una versión del bloque. Puedes insertarlo o pedir «Otra sugerencia».';
+    }
+    if (mode === 'insert' && produced === 'replace') {
+      return 'El tutor propuso una versión del bloque en vez de código para continuar (insertarla lo duplicaría). Revísala con «Ver cambios».';
+    }
+    return 'El tutor respondió sin código para esto. Prueba «Otra sugerencia» o escríbelo con la pista.';
+  };
+
+  /**
+   * Pide al tutor el codigo de una accion (0.0.34): «Proponer una mejora»
+   * (replace: la seleccion completa mejorada) o «Proponer codigo para continuar»
+   * (insert). Antes, elegir una accion distinta de la recomendada aplicaba el
+   * codigo escrito para la otra (o un «TODO» inventado) y podia romper el bloque.
+   * El resultado se muestra en la ventana flotante; aplicarlo es otro clic.
+   */
+  const requestCodeForMode = async (model: ActiveSuggestionModel, mode: EditorCodeAction, origin: string) => {
+    // Se marca antes del primer await. Un pedido para otro bloque si sale: el anterior,
+    // al llegar, ve que ya no es la sugerencia activa y no se pinta.
+    const key = `${model.metricId}:${mode}`;
+    if (codeRequestInFlightKey === key) {
+      return;
+    }
+    codeRequestInFlightKey = key;
+    try {
+      await requestCodeForModeNow(model, mode, origin);
+    } finally {
+      if (codeRequestInFlightKey === key) {
+        codeRequestInFlightKey = '';
+      }
+    }
+  };
+
+  const requestCodeForModeNow = async (model: ActiveSuggestionModel, mode: EditorCodeAction, origin: string) => {
+    const settings = resolveActiveSuggestionSettings();
+    if (!settings.enabled || !settings.useBackend) {
+      void vscode.window.showInformationMessage('ADACEEN: para pedir código hace falta el tutor (ajuste adaceen.suggestions.useBackend).');
+      return;
+    }
+    const editor = await resolveEditorForSuggestion(model);
+    if (!editor) {
+      void vscode.window.showInformationMessage('ADACEEN: abre el archivo de la sugerencia para pedir el código.');
+      return;
+    }
+    const snapshot = await buildActiveEditorSnapshot(settings);
+    const sameFocus = !!snapshot
+      && snapshot.uriString === model.uriString
+      && (model.selectionRangeKey ? snapshot.selectionRangeKey === model.selectionRangeKey : snapshot.line === model.line);
+    if (!snapshot || !sameFocus) {
+      void vscode.window.showInformationMessage('ADACEEN: la selección cambió. Selecciona otra vez el bloque y vuelve a pedir el código.');
+      return;
+    }
+    const documentVersion = editor.document.version;
+
+    const pending: ActiveSuggestionModel = { ...model, pendingMode: mode, slow: false, codeRequestNote: '', snapshotKey: snapshot.cacheKey };
+    publishSuggestionModel(pending, true);
+    armSlowNotice(pending);
+    recordSuggestionMetric(model, 'vscode_suggestion_manual_refresh', mode, { requestedAction: mode, origin });
+    // Lo que se muestra si el pedido no trae codigo: la misma sugerencia con una nota.
+    const keepWithNote = (note: string) => {
+      const current = activeSuggestionModel;
+      if (current && current.metricId === pending.metricId && current.pendingMode === mode) {
+        publishSuggestionModel({ ...model, pendingMode: undefined, slow: false, codeRequestNote: note, snapshotKey: snapshot.cacheKey }, true);
+      }
+    };
+    try {
+      const projectIndex = await getWorkspaceProjectIndex();
+      const requestContext: BackendSuggestionRequestContext = {
+        trigger: 'manual',
+        clientSessionId: telemetry.clientSessionId,
+        requestedAction: mode,
+      };
+      const result = await withActiveSuggestionDeadline(
+        getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext),
+        Math.min(settings.backendTimeoutMs, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS),
+      );
+      const current = activeSuggestionModel;
+      const stillPending = !!current && current.metricId === pending.metricId && current.pendingMode === mode;
+      const next = buildBackendActiveSuggestionModel(
+        snapshot,
+        projectIndex,
+        'cursor',
+        result,
+        createEmptyBackendSuggestionResult(),
+        '',
+        'manual',
+        mode,
+      );
+      if (!next) {
+        if (stillPending) {
+          keepWithNote('El tutor respondió sin código para esto. Prueba «Otra sugerencia» o escríbelo con la pista.');
+        }
+        return;
+      }
+      // El resumen del archivo es el de antes: este pedido solo trae el foco.
+      const shown: ActiveSuggestionModel = next.blocked
+        ? { ...next, snapshotKey: snapshot.cacheKey }
+        : {
+          ...next,
+          fileOverview: model.fileOverview || next.fileOverview,
+          fileOverviewFromTutor: model.fileOverviewFromTutor,
+          fileSuggestions: model.fileSuggestions.length ? model.fileSuggestions : next.fileSuggestions,
+          codeRequestNote: codeRequestNoteFor(next, mode),
+          snapshotKey: snapshot.cacheKey,
+        };
+      if (!shown.blocked) {
+        // Si el estudiante vuelve a este mismo bloque sin cambios, se le muestra (refreshActiveSuggestion).
+        lastRequestedModel = shown;
+      }
+      // Mientras llegaba, el estudiante se fue a otro bloque o archivo, cambio el texto o
+      // cerro la ventana con la X: no se pinta sobre las lineas viejas.
+      const moved = !isSnapshotStillActive(snapshot, 'cursor') || editor.document.version !== documentVersion;
+      if (!stillPending || moved || dismissedSuggestionMetricId === pending.metricId) {
+        if (stillPending) {
+          publishSuggestionModel(null, true);
+        }
+        output.appendLine(`[Suggestions] ${shown.filePath} | codigo pedido=${mode} llego cuando ya no estaba a la vista`);
+        return;
+      }
+      // La sugerencia original no se ignoro: el estudiante pidio su codigo.
+      suggestionExposure.forget(pending.metricId);
+      publishSuggestionModel(shown, true);
+      if (!shown.blocked) {
+        suggestionExposure.markShown(shown.metricId, shown, Date.now());
+      }
+      recordSuggestionMetric(shown, 'vscode_suggestion_shown', shown.applyMode, {
+        reason: 'code-request',
+        requestedAction: mode,
+        cacheNamespace: 'cursor',
+      }, true, { latencyMs: result.latencyMs });
+      output.appendLine(`[Suggestions] ${shown.filePath} | codigo pedido=${mode} | ${suggestionReadyForMode(shown, mode) ? 'con codigo' : 'sin codigo'}${shown.blocked ? ' | bloqueada por politica' : ''}`);
+    } catch (error) {
+      const message = formatBackendSuggestionError(error);
+      output.appendLine(`[Suggestions] No llego el codigo pedido (${mode}): ${message}`);
+      keepWithNote(`No llegó el código del tutor (${truncateInline(message, 120)}). Intenta de nuevo en un momento.`);
+    }
+  };
+
   /**
    * Aplica la sugerencia activa. Todos los caminos del editor pasan por aqui
    * (ventana flotante, CodeLens "Aceptar ayuda", quick fix, inlay hint, hover,
@@ -942,7 +1222,18 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
 
+    if (model.pendingMode) {
+      return; // se esta preparando el codigo de una accion: un clic mas no hace nada
+    }
     const mode = modeOverride || model.applyMode || 'insert';
+    if (mode !== 'delete' && !suggestionReadyForMode(model, mode)) {
+      // 0.0.34: el codigo de la sugerencia no es para esta accion (o no hay codigo): se pide
+      // al tutor y se muestra antes de aplicar nada. Sin esperar aqui: mientras llega, el
+      // estudiante puede moverse y las sugerencias de otros bloques siguen llegando
+      // (applyInProgress solo cubre apply-check y la confirmacion).
+      void requestCodeForMode(model, mode, origin);
+      return;
+    }
     output.appendLine(
       `[Apply] ${model.fileName}: modo=${mode} (${modeOverride ? 'elegido' : 'recomendado'}) | `
       + `seleccion=${editor.selection.isEmpty ? 'no' : `${editor.selection.start.line + 1}-${editor.selection.end.line + 1}`}`,
@@ -1058,6 +1349,246 @@ export async function activate(context: vscode.ExtensionContext) {
   ];
   context.subscriptions.push(...selectionWidgetDisposables);
 
+  // --- Vista «Este archivo» y material del curso (0.0.34) ---------------------
+
+  /** Resumen del archivo activo para la vista (file_summary, con la misma cache de siempre). */
+  const requestFileSummary = async (force = false) => {
+    const settings = resolveActiveSuggestionSettings();
+    if (!settings.enabled || !settings.useBackend) {
+      return;
+    }
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || !isSupportedActiveDocument(editor.document)) {
+      return;
+    }
+    const uriString = editor.document.uri.toString();
+    if (fileSummaryInFlight.has(uriString) || (!force && fileSummaries.has(uriString))) {
+      return;
+    }
+    const snapshot = await buildActiveEditorSnapshot(settings);
+    if (!snapshot || snapshot.uriString !== uriString || fileSummaryInFlight.has(uriString)) {
+      return;
+    }
+    fileSummaryInFlight.add(uriString);
+    refreshFileView();
+    try {
+      const projectIndex = await getWorkspaceProjectIndex();
+      if (force) {
+        backendSuggestionCache.file_summary.delete(buildBackendSuggestionTextCacheKey(snapshot, projectIndex, 'file_summary', 'panel'));
+      }
+      const result = await withActiveSuggestionDeadline(
+        getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary', {
+          trigger: 'panel',
+          clientSessionId: telemetry.clientSessionId,
+        }),
+        Math.min(settings.backendTimeoutMs, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS),
+      );
+      if (!result.blocked && result.outputText) {
+        const sections = parseBackendSuggestionSections(result.outputText);
+        const overview = truncateInline(sections.resumen.join(' '), 420);
+        if (overview) {
+          fileSummaries.delete(uriString);
+          fileSummaries.set(uriString, {
+            uriString,
+            overview,
+            tips: sections.sugerencias.slice(0, 3),
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+    } catch (error) {
+      output.appendLine(`[Resumen] No se pudo pedir el resumen de ${snapshot.filePath}: ${formatBackendSuggestionError(error)}`);
+    } finally {
+      fileSummaryInFlight.delete(uriString);
+      refreshFileView();
+    }
+  };
+
+  const MATERIAL_TTL_MS = 5 * 60_000;
+  const setMaterialState = (next: FileViewMaterialState) => {
+    materialState = next;
+    refreshFileView();
+    return next;
+  };
+
+  /** Material del curso (GET /api/rag/sources): las fuentes RAG que el docente cargo. */
+  const loadCourseMaterial = async (force = false): Promise<FileViewMaterialState> => {
+    if (!force && materialState.status === 'ready' && Date.now() - materialLoadedAt < MATERIAL_TTL_MS) {
+      return materialState;
+    }
+    if (materialInFlight) {
+      return materialInFlight;
+    }
+    const settings = resolveBackendSettings();
+    if (!settings.baseUrl) {
+      return setMaterialState({ ...EMPTY_MATERIAL_STATE, status: 'error', message: 'No hay un backend de ADACEEN configurado.' });
+    }
+    if (!settings.sessionId) {
+      return setMaterialState({
+        ...EMPTY_MATERIAL_STATE,
+        status: 'no_session',
+        message: 'Conecta VS Code con tu cuenta de ADACEEN para ver el material del curso (ADACEEN: Conectar).',
+      });
+    }
+    const courseCode = normalizeCourseCode(resolveActiveSuggestionSettings().ragCourseCode || activeSuggestionModel?.ragCourseCode || '');
+    setMaterialState({ ...materialState, status: 'loading', message: '' });
+    materialInFlight = (async () => {
+      try {
+        const data = await fetchJsonWithTimeout(
+          courseMaterialListUrl(settings.baseUrl, courseCode),
+          { method: 'GET', headers: buildSessionHeaders(settings, false) },
+          20_000,
+        );
+        const list = normalizeCourseMaterial(data, settings.baseUrl);
+        materialLoadedAt = Date.now();
+        return setMaterialState({ status: 'ready', courseCode: list.courseCode || courseCode, items: list.items, message: '' });
+      } catch (error) {
+        if ((error as { status?: number })?.status === 401) {
+          return setMaterialState({
+            ...EMPTY_MATERIAL_STATE,
+            status: 'no_session',
+            message: 'Tu sesión de ADACEEN venció: vuelve a conectar VS Code (ADACEEN: Conectar) para ver el material.',
+          });
+        }
+        return setMaterialState({
+          ...EMPTY_MATERIAL_STATE,
+          status: 'error',
+          message: `No se pudo traer el material del curso: ${truncateInline(formatBackendSuggestionError(error), 160)}`,
+        });
+      } finally {
+        materialInFlight = null;
+      }
+    })();
+    return materialInFlight;
+  };
+
+  const recordMaterialOpened = (title: string, metadata: Record<string, unknown>) => {
+    const model = activeSuggestionModel;
+    if (model && !model.loading) {
+      recordSuggestionMetric(model, 'vscode_rag_source_opened', title.slice(0, 120), metadata);
+      return;
+    }
+    telemetry.track({
+      source: 'vscode_extension',
+      category: 'suggestion',
+      eventType: 'vscode_rag_source_opened',
+      pageContext: editorPageContext(),
+      value: title.slice(0, 120),
+      metadata,
+    });
+  };
+
+  const openCourseMaterialItem = async (id: string, origin: string) => {
+    const item = materialState.items.find((entry) => entry.id === id);
+    if (!item?.url) {
+      void vscode.window.showInformationMessage('ADACEEN: esa fuente ya no está en el material del curso.');
+      return;
+    }
+    await vscode.env.openExternal(vscode.Uri.parse(item.url));
+    recordMaterialOpened(item.title, { origin, courseCode: item.courseCode, sourceId: item.id });
+  };
+
+  fileView = new AdaceenFileViewProvider({
+    onVisible: () => {
+      refreshFileView();
+      void requestFileSummary(false);
+    },
+    openSource: (index) => {
+      const source = activeSuggestionModel?.ragSources[index];
+      if (source) {
+        void vscode.commands.executeCommand('adaceen.openRagSource', source);
+      }
+    },
+    openMaterial: (id) => {
+      void openCourseMaterialItem(id, 'file_view');
+    },
+    loadMaterial: () => {
+      void loadCourseMaterial(materialState.status !== 'idle');
+    },
+    refreshSummary: () => {
+      void requestFileSummary(true);
+    },
+    openQuiz: () => {
+      void quizView.reveal(false);
+    },
+  });
+  context.subscriptions.push(
+    fileView,
+    vscode.window.registerWebviewViewProvider(AdaceenFileViewProvider.viewType, fileView, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.commands.registerCommand('adaceen.openFileView', async () => {
+      await fileView?.reveal(false);
+      const model = activeSuggestionModel;
+      if (model && !model.loading) {
+        recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', 'file_view');
+      }
+    }),
+    vscode.commands.registerCommand('adaceen.openCourseMaterial', async () => {
+      const state = await loadCourseMaterial(false);
+      if (state.status === 'no_session') {
+        const pick = await vscode.window.showWarningMessage(`ADACEEN: ${state.message}`, 'Conectar');
+        if (pick === 'Conectar') {
+          void vscode.commands.executeCommand('adaceen.connect');
+        }
+        return;
+      }
+      if (state.status !== 'ready') {
+        void vscode.window.showWarningMessage(`ADACEEN: ${state.message || 'no se pudo traer el material del curso.'}`);
+        return;
+      }
+      if (!state.items.length) {
+        void vscode.window.showInformationMessage('ADACEEN: tu docente todavía no cargó material para este curso.');
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(
+        state.items.map((item) => ({
+          label: item.title,
+          description: [item.fileName && item.fileName !== item.title ? item.fileName : '', item.supplemental ? 'bitácora' : ''].filter(Boolean).join(' · '),
+          detail: item.preview,
+          id: item.id,
+        })),
+        {
+          title: `Material del curso${state.courseCode ? ` ${state.courseCode}` : ''}`,
+          placeHolder: 'Elige una fuente para abrirla en el navegador',
+          matchOnDescription: true,
+          matchOnDetail: true,
+        },
+      );
+      if (picked) {
+        await openCourseMaterialItem(picked.id, 'command');
+      }
+    }),
+    vscode.commands.registerCommand('adaceen.showProposalDiff', async (modeArg?: unknown) => {
+      const model = activeSuggestionModel;
+      const editor = model ? await resolveEditorForSuggestion(model) : undefined;
+      if (!model || !editor || editor.document.uri.toString() !== model.uriString) {
+        void vscode.window.showInformationMessage('ADACEEN: no hay una propuesta activa para comparar.');
+        return;
+      }
+      const requested = modeArg === 'insert' || modeArg === 'replace' || modeArg === 'delete' ? modeArg : '';
+      const mode: SuggestionApplyMode = requested || producedMode(model) || model.applyMode || 'insert';
+      if (!suggestionReadyForMode(model, mode)) {
+        void vscode.window.showInformationMessage('ADACEEN: esta sugerencia no trae código para esa acción; pídelo con «Proponer una mejora».');
+        return;
+      }
+      const plan = planSuggestionEdit(editor, model, mode);
+      if (!plan.ok) {
+        void vscode.window.showInformationMessage(plan.message);
+        return;
+      }
+      const proposalUri = proposals.remember(model.fileName, applyEditToText(editor.document, plan.range, plan.text));
+      await vscode.commands.executeCommand(
+        'vscode.diff',
+        editor.document.uri,
+        proposalUri,
+        `${model.fileName}: tu código ↔ propuesta de ADACEEN`,
+        { preview: true },
+      );
+      recordSuggestionMetric(model, 'vscode_suggestion_actions_revealed', mode, { origin: 'proposal_diff' }, true);
+    }),
+  );
+
   const openAssistantDisposable = vscode.commands.registerCommand('adaceen.openAssistant', async () => {
     const model = activeSuggestionModel || await refreshActiveSuggestion('open-panel');
     void quizView.reveal(false);
@@ -1068,9 +1599,9 @@ export async function activate(context: vscode.ExtensionContext) {
   });
 
   const refreshSuggestionsDisposable = vscode.commands.registerCommand('adaceen.refreshSuggestions', async () => {
+    // «Otra sugerencia» actualiza la ventana flotante en su sitio (antes abria tambien el quiz).
     const model = await refreshActiveSuggestion('manual-refresh');
     if (model) {
-      void quizView.reveal(false);
       recordSuggestionMetric(model, 'vscode_suggestion_manual_refresh', model.applyMode);
     }
   });
@@ -1415,6 +1946,14 @@ export async function activate(context: vscode.ExtensionContext) {
       refreshInlineSuggestionSurfaces();
       scheduleCursorIdleSuggestionRefresh();
       evaluateErrorSignals();
+      if (fileView?.visible) {
+        // Un poco despues: la sugerencia normal del archivo suele traer el resumen igual.
+        setTimeout(() => {
+          if (vscode.window.activeTextEditor?.document.uri.toString() === activeUri) {
+            void requestFileSummary(false);
+          }
+        }, 4000);
+      }
     }),
     vscode.window.onDidChangeTextEditorSelection((event) => {
       selectionWidget.onSelectionChanged(event.textEditor);

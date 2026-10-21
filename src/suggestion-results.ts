@@ -239,6 +239,7 @@ export function normalizeBackendSuggestionResult(value: unknown, latencyMs: numb
     policyApplied,
     codeApplication: normalizeSuggestionCodeApplication(data.code_application ?? data.codeApplication),
     latencyMs,
+    ...(data.degraded === true ? { degraded: true } : {}),
   };
 }
 

@@ -3,7 +3,8 @@
 import * as vscode from 'vscode';
 import { isSuggestionApplyOffered, primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
 import { ACTIVE_SUGGESTION_HISTORY_LIMIT, ACTIVE_SUGGESTION_HISTORY_STORAGE_KEY } from './constants';
-import type { SelectionWidgetModel } from './selection-widget';
+import type { SelectionWidgetModel } from './selection-widget-text';
+import { producedMode } from './suggestion-code';
 import { toOptionalString } from './settings';
 import { firstPositiveNumber, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveSuggestionHistoryEntry, ActiveSuggestionHistoryKind, ActiveSuggestionModel } from './types';
@@ -25,6 +26,7 @@ export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): Sel
     endLine,
     headline: model.lineSummary || primarySuggestionText(model) || '',
     completionText: model.completionText || '',
+    completionMode: producedMode(model),
     language: model.language || '',
     recommendedMode: model.applyMode || 'insert',
     source: model.source,
@@ -35,6 +37,11 @@ export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): Sel
     tutorMessage: model.tutorMessage || '',
     applyAllowed: isSuggestionApplyOffered(model),
     applicationNote: suggestionApplicationNote(model),
+    pendingMode: model.pendingMode || '',
+    slow: !!model.slow,
+    codeRequestNote: model.codeRequestNote || '',
+    requestedAction: model.requestedAction || '',
+    proposalWarning: model.proposalWarning || '',
   };
 }
 
