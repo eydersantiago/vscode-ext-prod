@@ -1,16 +1,17 @@
 // ADACEEN (VS Code): construir la sugerencia activa (local, del backend o bloqueada) y sus textos.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import { buildSessionHeaders, fetchJsonWithTimeout } from './backend-http';
-import { ACTIVE_SUGGESTION_PROMPT_CODE_CHARS, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS, ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
+import { ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS, ACTIVE_SUGGESTION_PROMPT_RELATED_CHARS, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS, ACTIVE_SUGGESTION_PROMPT_TOTAL_CHARS, ACTIVE_SUGGESTION_PROMPT_WINDOW_CHARS, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import type { SuggestDiagnostic } from './error-signals';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
-import { DROPS_MOST_WARNING, extractSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionReadyForMode } from './suggestion-code';
+import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionReadyForMode } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { countMatches, inferSuggestionApplyMode } from './suggestion-edit';
 import { parseBackendSuggestionSections } from './suggestion-format';
 import { createEmptyBackendSuggestionResult, normalizeBackendSuggestionResult, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, BackendSuggestionSections, SuggestionTrigger, WorkspaceProjectIndex } from './types';
-import { buildLocalFileOverview, formatWorkspaceProjectIndexForPrompt, stableStringHash } from './workspace-index';
+import { buildCodeOutline, buildNumberedWindow, formatOtherFilesLine, formatRelatedDeclarations, selectRelatedFiles } from './prompt-context';
+import { buildLocalFileOverview, rankWorkspaceIndexEntries, stableStringHash } from './workspace-index';
 
 export function buildSelectionSpecificGuidance(snapshot: ActiveEditorSnapshot) {
   const selected = snapshot.selectionText.trim();
@@ -206,6 +207,14 @@ export function formatDiagnosticsForPrompt(diagnostics: SuggestDiagnostic[], max
   ].join('\n');
 }
 
+/**
+ * Contexto que va al tutor en tab_content (0.0.35, revision de precision del 21/10/2026):
+ * rotulos del archivo, el bloque seleccionado tal cual (es lo que se reemplaza), unas 100
+ * lineas numeradas alrededor del foco con ">" en las del foco, la estructura del resto del
+ * archivo, las declaraciones de los archivos relacionados y la lista corta de los demas.
+ * Antes: los primeros 7200 caracteres del archivo (aunque el cursor estuviera mas abajo), el
+ * texto visible repetido y un mapa de 24 archivos con vista previa. Ver prompt-context.ts.
+ */
 export function buildBackendSuggestionContent(
   snapshot: ActiveEditorSnapshot,
   projectIndex: WorkspaceProjectIndex | null = null,
@@ -214,45 +223,76 @@ export function buildBackendSuggestionContent(
 ) {
   const isFileSummary = scope === 'file_summary';
   const blockingFocus = scope === 'cursor' && trigger === 'blocking';
-  const selectionBlock = !isFileSummary && snapshot.selectionText.trim()
+  const hasSelection = !isFileSummary && !!snapshot.selectionText.trim();
+  const selectionBlock = hasSelection
     ? [
       `Bloque seleccionado por el usuario: lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine}`,
-      `Lineas analizadas de la seleccion: ${snapshot.selectionLineCount}${snapshot.selectionTruncated ? ` de ${snapshot.selectionOriginalLineCount}` : ''}`,
       snapshot.selectionTruncated
-        ? `Aviso: la seleccion supero el limite de ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas; analiza solo este recorte inicial y menciona esa limitacion si afecta la respuesta.`
+        ? `Aviso: la seleccion supero el limite de ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas (tenia ${snapshot.selectionOriginalLineCount}); analiza solo este recorte inicial y menciona esa limitacion si afecta la respuesta.`
         : '',
-      'El foco principal es todo este bloque seleccionado, no solamente la linea del cursor.',
       snapshot.selectionText.slice(0, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS),
     ].filter(Boolean).join('\n')
     : '';
-
-  return [
-    `Repositorio: ${snapshot.repoFullName || '(sin repo detectado)'}`,
-    `Workspace: ${snapshot.workspaceName || '(sin workspace)'}`,
-    `Archivo activo: ${snapshot.filePath}`,
-    `Lenguaje: ${snapshot.language}`,
+  const meta = [
+    `Archivo activo: ${snapshot.filePath} (${snapshot.language}, ${snapshot.lineCount} lineas)`,
+    snapshot.repoFullName ? `Repositorio: ${snapshot.repoFullName}` : '',
     isFileSummary ? '' : `Cursor: linea ${snapshot.line}, columna ${snapshot.column}`,
     blockingFocus
       ? 'Disparador: bloqueo detectado; el mismo error del editor sigue presente o se repite.'
-      : scope === 'cursor' ? 'Disparador: cursor quieto durante 3 segundos; posible bloqueo del estudiante.' : '',
-    blockingFocus ? formatDiagnosticsForPrompt(snapshot.diagnostics.items) : '',
+      : scope === 'cursor' && !hasSelection && (trigger === 'cursor_idle' || !trigger) ? 'Disparador: cursor quieto durante 3 segundos; posible bloqueo del estudiante.' : '',
+  ].filter(Boolean).join('\n');
+  const diagnostics = blockingFocus ? formatDiagnosticsForPrompt(snapshot.diagnostics.items) : '';
+
+  // Presupuesto: lo fijo primero; la ventana numerada se queda con lo que sobra hasta su tope.
+  const ranked = rankWorkspaceIndexEntries(projectIndex, snapshot.filePath);
+  const related = formatRelatedDeclarations(
+    selectRelatedFiles(snapshot.filePath, snapshot.content, ranked, 3),
+    ACTIVE_SUGGESTION_PROMPT_RELATED_CHARS,
+  );
+  // Lista corta (ruta, lenguaje, lineas): las vistas previas del mapa de antes casi no decian nada.
+  const others = formatOtherFilesLine(ranked, snapshot.filePath, isFileSummary ? 20 : 8);
+  const fixedChars = meta.length + diagnostics.length + selectionBlock.length + related.length + others.length
+    + ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS + 200;
+  const windowChars = Math.max(1500, Math.min(ACTIVE_SUGGESTION_PROMPT_WINDOW_CHARS, ACTIVE_SUGGESTION_PROMPT_TOTAL_CHARS - fixedChars));
+  const focusStart = isFileSummary ? 0 : hasSelection ? snapshot.selectionStartLine : snapshot.line;
+  const focusEnd = isFileSummary ? 0 : hasSelection ? snapshot.selectionEndLine : snapshot.line;
+  const promptContent = snapshot.promptContent ?? snapshot.content;
+  const firstLine = snapshot.promptContent !== undefined ? snapshot.promptContentFirstLine || 1 : 1;
+  const window = buildNumberedWindow(promptContent, { firstLine, focusStart, focusEnd, maxChars: windowChars });
+  const windowBlock = window.text
+    ? [
+      isFileSummary
+        ? `Codigo del archivo con numero de linea (lineas ${window.startLine}-${window.endLine} de ${snapshot.lineCount}):`
+        : `Codigo alrededor del foco (lineas ${window.startLine}-${window.endLine} de ${snapshot.lineCount}; las lineas del foco llevan ">" antes de la barra):`,
+      window.text,
+    ].join('\n')
+    : '';
+  const coversFile = window.startLine <= 1 && window.endLine >= snapshot.lineCount;
+  const outline = coversFile
+    ? ''
+    : buildCodeOutline(promptContent, snapshot.language, {
+      firstLine,
+      exclude: [window.startLine, window.endLine],
+      maxChars: ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS,
+    });
+
+  return [
+    meta,
+    diagnostics,
     selectionBlock,
-    `Lineas del archivo: ${snapshot.lineCount}`,
-    !isFileSummary && snapshot.currentLineText ? `Linea actual:\n${snapshot.currentLineText}` : '',
-    !isFileSummary && snapshot.visibleText ? `Texto visible del editor:\n${snapshot.visibleText.slice(0, ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS)}` : '',
-    `Codigo del archivo activo (recorte local):\n${snapshot.content.slice(0, ACTIVE_SUGGESTION_PROMPT_CODE_CHARS)}`,
-    formatWorkspaceProjectIndexForPrompt(projectIndex, snapshot.filePath),
+    !isFileSummary && !hasSelection && snapshot.currentLineText.trim() ? `Linea actual:\n${snapshot.currentLineText}` : '',
+    windowBlock,
+    outline ? `Estructura del resto del archivo (numero de linea: declaracion):\n${outline}` : '',
+    related,
+    others,
   ].filter(Boolean).join('\n\n');
 }
 
-/** Como elegir la accion y que codigo escribir para ella (sin «TODO», 0.0.34). */
-const ACTION_AND_CODE_RULE = [
-  'Elige la accion que mas ayude y escribe la linea "Aplicar: replace", "Aplicar: insert" o "Aplicar: delete":',
-  'replace para corregir o mejorar el bloque (el codigo es el bloque completo ya mejorado),',
-  'insert para agregar codigo nuevo debajo (el codigo es solo lo nuevo) y delete solo si conviene quitar codigo (sin bloque).',
-  'Si escribes codigo, que sea real y compile; nunca un comentario TODO solo.',
-].join(' ');
-
+/**
+ * Lo que pide el estudiante, sin reglas de formato: el backend pone el formato, el limite de
+ * la politica y las reglas del codigo al final del prompt (0.0.35). Antes la pregunta repetia
+ * esas reglas con otras palabras y el modelo recibia dos versiones de lo mismo.
+ */
 export function buildBackendSuggestionQuestion(
   snapshot: ActiveEditorSnapshot,
   scope: BackendSuggestionRequestScope,
@@ -260,59 +300,33 @@ export function buildBackendSuggestionQuestion(
   requestedAction?: EditorCodeAction,
 ) {
   if (scope === 'file_summary') {
-    return [
-      'Describe en 1 a 3 bullets que hace el archivo activo y cual parece ser su papel dentro del proyecto usando el mapa local del workspace.',
-      'Despues da 3 sugerencias breves y accionables para continuar en ese archivo.',
-      'No des la solucion completa ni inventes datos que no esten en el contexto.',
-    ].join(' ');
+    return 'Describe que hace el archivo activo y cual parece ser su papel dentro del proyecto, y da 3 sugerencias breves y accionables para continuar en ese archivo.';
   }
 
   const hasSelection = !!snapshot.selectionText.trim();
   const target = hasSelection
-    ? `el bloque seleccionado (lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine})`
+    ? `las lineas ${snapshot.selectionStartLine}-${snapshot.selectionEndLine} (el bloque seleccionado)`
     : `la linea ${snapshot.line}`;
   if (requestedAction === 'replace') {
-    return [
-      `El estudiante pidio una version mejorada de ${target}.`,
-      'Responde con la linea "Aplicar: replace" y un unico bloque de codigo con ese bloque completo ya mejorado o corregido, listo para reemplazarlo: misma funcion y sangria, sin omitir lineas ni usar "...".',
-      'Cambia solo lo necesario y explica en 1 o 2 bullets que cambiaste y por que.',
-      'No inventes datos que no esten en el contexto.',
-    ].join(' ');
+    return `El estudiante pidio una version mejorada o corregida de ${target}.`;
   }
   if (requestedAction === 'insert') {
-    return [
-      `El estudiante pidio codigo para continuar justo debajo de ${target}.`,
-      'Responde con la linea "Aplicar: insert" y un unico bloque de codigo solo con las lineas nuevas, sin repetir el codigo que ya existe.',
-      'Explica en 1 bullet que hacen esas lineas. No des la solucion completa del ejercicio ni inventes datos.',
-    ].join(' ');
+    return `El estudiante pidio codigo para continuar justo debajo de ${target}.`;
   }
 
   const visibleError = snapshot.diagnostics.firstError;
   if (trigger === 'blocking' && visibleError) {
     return [
       `El estudiante lleva un rato bloqueado con este error del editor en la linea ${visibleError.line}: "${truncateInline(visibleError.message, 300)}".`,
-      'Explica en 1 bullet la causa probable con palabras sencillas y da 2 pistas breves para que lo corrija por su cuenta.',
-      ACTION_AND_CODE_RULE,
-      'No des la solucion completa ni inventes datos que no esten en el contexto.',
+      'Explica la causa probable con palabras sencillas y da pistas para que lo corrija por su cuenta.',
     ].join(' ');
   }
-
   if (hasSelection) {
-    return [
-      `El estudiante selecciono un bloque del editor; analiza la seleccion completa recibida, con limite maximo de ${ACTIVE_SUGGESTION_SELECTION_MAX_LINES} lineas, como foco principal.`,
-      'No reduzcas el analisis a la linea del cursor si hay varias lineas seleccionadas.',
-      'Describe en 1 bullet que parece estar intentando hacer el bloque seleccionado y da 2 sugerencias breves para continuar desde esa seleccion.',
-      ACTION_AND_CODE_RULE,
-      'No des la solucion completa ni inventes datos que no esten en el contexto.',
-    ].join(' ');
+    return `El estudiante selecciono ${target} y espera una pista sobre ese bloque completo, no solo sobre la linea del cursor.`;
   }
-
-  return [
-    'El cursor quedo quieto 3 segundos en la linea indicada; interpreta esto como posible bloqueo del estudiante.',
-    'Describe en 1 bullet que parece estar intentando hacer y da 2 sugerencias breves para continuar desde esa linea.',
-    ACTION_AND_CODE_RULE,
-    'No des la solucion completa ni inventes datos que no esten en el contexto.',
-  ].join(' ');
+  return trigger === 'cursor_idle' || !trigger
+    ? `El cursor quedo quieto en la linea ${snapshot.line}; puede estar bloqueado. Da una pista para continuar desde esa linea.`
+    : `El estudiante pide una pista para continuar desde la linea ${snapshot.line}.`;
 }
 
 export async function fetchBackendSuggestionText(
@@ -477,20 +491,33 @@ export function buildBackendActiveSuggestionModel(
   // la accion de la linea "Aplicar:" del foco, la que pidio el estudiante o la que
   // dice el contenido (0.0.34). El resumen del archivo no decide la accion: siempre
   // trae su propio "Aplicar:".
-  const modes = resolveSuggestionModes({
+  const resolvedModes = resolveSuggestionModes({
     focusText: focusOutputText,
     code: extractSuggestionCode(focusOutputText),
     requestedAction,
     fallbackText: focusOutputText || fileSummaryResult.outputText,
     selection: snapshot.selectionText,
   });
+  // 0.0.35: sin el margen numerado si el modelo lo copio, con los «...» completados con el
+  // bloque original y sin ofrecer con un clic una version que deja llaves sin cerrar.
+  const prepared = prepareSuggestionCode(resolvedModes.completionText, {
+    selection: snapshot.selectionText,
+    mode: resolvedModes.completionMode,
+    language: snapshot.language,
+  });
+  const modes = prepared.unusable
+    ? { ...resolvedModes, completionMode: '' as const, completionText: '' }
+    : { ...resolvedModes, completionText: prepared.code };
   // Una respuesta que es solo la linea "Aplicar:" y el bloque de codigo tambien vale
   // (antes se descartaba por no traer texto fuera del bloque).
   const codeOnlyHeadline = modes.completionText
     ? (modes.completionMode === 'replace'
       ? 'El tutor propone una versión mejorada del bloque.'
       : 'El tutor propone código para continuar.')
-    : '';
+    : prepared.unusable
+      // Escribio codigo, pero no se puede aplicar tal cual: la sugerencia se muestra con el motivo.
+      ? 'El tutor propuso código que no se puede aplicar tal cual.'
+      : '';
   const sectionFocusLines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
   const focusLines = sectionFocusLines.length > 0 ? sectionFocusLines : (codeOnlyHeadline ? [codeOnlyHeadline] : []);
   const fileLines = fileSummarySections.sugerencias.length > 0
@@ -560,9 +587,11 @@ export function buildBackendActiveSuggestionModel(
     trigger,
     ...(requestedAction ? { requestedAction } : {}),
     fileOverviewFromTutor: fileSummarySections.resumen.length > 0,
-    proposalWarning: modes.completionMode === 'replace' && replacementDropsMostOfSelection(snapshot.selectionText, completionText)
-      ? DROPS_MOST_WARNING
-      : '',
+    proposalWarning: [
+      modes.completionMode === 'replace' && replacementDropsMostOfSelection(snapshot.selectionText, completionText) ? DROPS_MOST_WARNING : '',
+      ...prepared.notes,
+    ].filter(Boolean).join(' '),
+    ...(prepared.unusable ? { codeRequestNote: prepared.unusableReason } : {}),
   };
 }
 

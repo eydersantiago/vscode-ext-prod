@@ -38,9 +38,18 @@ export const ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB = 96;
 
 export const ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS = 220;
 
-export const ACTIVE_SUGGESTION_PROMPT_CODE_CHARS = 7200;
+/** Firmas guardadas por archivo en el indice del proyecto (0.0.35). */
+export const ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS = 700;
 
-export const ACTIVE_SUGGESTION_PROMPT_VISIBLE_CHARS = 1400;
+/**
+ * Tope de tab_content (0.0.35): el backend corta en MAX_TAB_CONTENT_CHARS (12000) y despues
+ * ajusta el prompt a la ventana del modelo. Reparto: ventana numerada, estructura del resto
+ * del archivo, declaraciones relacionadas y lista de archivos.
+ */
+export const ACTIVE_SUGGESTION_PROMPT_TOTAL_CHARS = 11000;
+export const ACTIVE_SUGGESTION_PROMPT_WINDOW_CHARS = 6500;
+export const ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS = 1200;
+export const ACTIVE_SUGGESTION_PROMPT_RELATED_CHARS = 1500;
 
 export const ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS = 12000;
 

@@ -1061,6 +1061,11 @@ export async function activate(context: vscode.ExtensionContext) {
     if (suggestionReadyForMode(next, mode)) {
       return '';
     }
+    // 0.0.35: el motivo concreto si el codigo no se puede aplicar tal cual (resumen «...» o
+    // llaves sin cerrar, prepareSuggestionCode).
+    if (next.codeRequestNote) {
+      return next.codeRequestNote;
+    }
     const produced = producedMode(next);
     if (mode === 'replace' && produced === 'insert') {
       return 'El tutor propuso código para continuar en vez de una versión del bloque. Puedes insertarlo o pedir «Otra sugerencia».';

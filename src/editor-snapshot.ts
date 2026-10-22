@@ -8,6 +8,7 @@ import { detectRepoFullName } from './git-repo';
 import { inferActiveLanguage, pathBaseName } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionScope, CursorIdleAnchor } from './types';
 import { stableStringHash } from './workspace-index';
+import { sliceAroundLine } from './prompt-context';
 
 export function hasActiveSelection(snapshot: Pick<ActiveEditorSnapshot, 'selectionText'>) {
   return Boolean(snapshot.selectionText.trim());
@@ -145,7 +146,8 @@ export async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettin
     : '';
   const filePath = vscode.workspace.asRelativePath(document.uri, false).replace(/\\/g, '/');
   const fileName = pathBaseName(filePath);
-  const content = document.getText().slice(0, settings.maxCodeChars);
+  const fullText = document.getText();
+  const content = fullText.slice(0, settings.maxCodeChars);
   const activeLine = editor.selection.active.line;
   const currentLineText = activeLine >= 0 && activeLine < document.lineCount
     ? document.lineAt(activeLine).text
@@ -156,6 +158,8 @@ export async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettin
   const generatedAt = new Date().toISOString();
   const line = editor.selection.active.line + 1;
   const column = editor.selection.active.character + 1;
+  // 0.0.35: el recorte para el prompt va centrado en el foco (antes, el comienzo del archivo).
+  const promptSlice = sliceAroundLine(fullText, selection.text ? selection.startLine : line, settings.maxCodeChars);
   const fileSummaryCacheKey = stableStringHash([
     repoFullName,
     filePath,
@@ -196,6 +200,8 @@ export async function buildActiveEditorSnapshot(settings: ActiveSuggestionSettin
     selectionRangeKey: selection.rangeKey,
     visibleText,
     content,
+    promptContent: promptSlice.text,
+    promptContentFirstLine: promptSlice.firstLine,
     currentLineText,
     generatedAt,
     fileSummaryCacheKey,

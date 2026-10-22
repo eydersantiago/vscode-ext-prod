@@ -1,7 +1,8 @@
 // ADACEEN (VS Code): indice del proyecto que acompana la pregunta al backend.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { ACTIVE_SUGGESTION_INDEX_MAX_FILES, ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS, ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES, ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS } from './constants';
+import { ACTIVE_SUGGESTION_INDEX_MAX_FILES, ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB, ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS, ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES, ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS } from './constants';
+import { buildCodeOutline } from './prompt-context';
 import { resolveScanOptions } from './settings';
 import { inferActiveLanguage, pathExtension, truncateInline } from './suggestion-results';
 import type { ActiveEditorSnapshot, WorkspaceProjectIndex, WorkspaceProjectIndexEntry } from './types';
@@ -76,12 +77,19 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
       const document = await vscode.workspace.openTextDocument(uri);
       const text = document.getText();
       const relativePath = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+      const language = inferActiveLanguage(relativePath, document.languageId);
       entries.push({
         path: relativePath,
-        language: inferActiveLanguage(relativePath, document.languageId),
+        language,
         bytes: stat.size,
         lines: text.length ? text.split(/\r?\n/).length : 0,
         preview: text.slice(0, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS).replace(/\s+/g, ' ').trim(),
+        // Firmas para "Declaraciones de archivos relacionados" (0.0.35); en un encabezado de
+        // C/C++ tambien los atributos (los nombres de los miembros que usa el .cpp).
+        outline: buildCodeOutline(text, language, {
+          maxChars: ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS,
+          members: /\.(?:h|hh|hpp|hxx)$/i.test(relativePath),
+        }),
       });
     } catch (error) {
       output.appendLine(`[Suggestions] No se pudo indexar ${vscode.workspace.asRelativePath(uri, false)}: ${String(error)}`);
@@ -99,6 +107,17 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
     files: entries,
     folders: selection.folders.map((folder) => `${folder.name} [${folder.uri.scheme}]`),
   };
+}
+
+/** Entradas del indice ordenadas por cercania al archivo activo (misma carpeta, src/...). */
+export function rankWorkspaceIndexEntries(index: WorkspaceProjectIndex | null, activePath: string) {
+  if (!index) {
+    return [];
+  }
+  return [...index.files].sort((left, right) => {
+    const scoreDiff = prioritizeWorkspaceIndexEntry(right, activePath) - prioritizeWorkspaceIndexEntry(left, activePath);
+    return scoreDiff || left.path.localeCompare(right.path);
+  });
 }
 
 export function formatWorkspaceProjectIndexForPrompt(index: WorkspaceProjectIndex | null, activePath: string) {

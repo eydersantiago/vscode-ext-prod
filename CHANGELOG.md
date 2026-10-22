@@ -4,6 +4,26 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.35] - 2026-10-21
+
+Revisión de precisión del tutor, con técnicas de otros asistentes de código y tutores de programación (SWE-agent, Aider, Continue, Roo Code, OpenHands, CodeHelp, Iris). Va con el backend del mismo día.
+
+### Cambiado
+
+- **El tutor ve el código donde está el estudiante.** Antes se mandaban los primeros 7200 caracteres del archivo (aunque el cursor estuviera en la línea 300), el texto visible repetido y un mapa de 24 archivos con vista previa. Ahora van unas 100 líneas numeradas alrededor de la selección o del cursor, con «>» en las líneas del foco (como el visor de archivos de SWE-agent, que rindió más que 30 líneas o el archivo entero), la estructura del resto del archivo (clases y funciones con su número de línea, como el mapa del repositorio de Aider), las declaraciones de los archivos relacionados (el `.h` del `.cpp`, lo que incluye o importa, las clases que usa) y la lista corta de los demás archivos (`prompt-context.ts`). Un archivo corto va entero.
+- **La pregunta dice qué pide el estudiante, no el formato.** El backend pone el formato, el límite del docente y las reglas del código al final del prompt; antes la pregunta repetía esas reglas con otras palabras.
+- **Sangría al aplicar.** Al reemplazar, el código se re-indenta a la sangría del bloque con la unidad del editor (tabuladores o N espacios): se quita la sangría común, se convierten los niveles y se pone la del bloque. Al insertar, el código sin sangría va a la del lugar (un nivel más si la línea de arriba abre un bloque); el que trae sangría propia se respeta en Python cuando es válida en ese punto (la sangría decide el bloque: un `return` escrito al nivel de la función no se mete en el ciclo de arriba, y el código de nivel superior al final del archivo queda al margen), y en los lenguajes con llaves va a la sangría del lugar. Antes solo se tocaba si la primera línea venía sin sangría: un bloque con 4 espacios en un archivo con 2 quedaba descuadrado (`code-reindent.ts`).
+- **Los «...» del modelo ya no borran líneas.** Si la versión mejorada resume con `// ...` o `// resto igual` las líneas que no cambian, se completan con las del bloque original solo cuando no hay duda de cuáles son: la línea de justo antes del resumen tiene que estar igual en el original y la de después tiene que aparecer una sola vez; las líneas traídas toman la sangría del modelo. La ventana lo avisa. Si no se cumple, no se ofrece aplicarla con un clic y se pide otra vez (como Aider con sus `...` y Continue con `// ... existing code ...`).
+- **Llaves sin cerrar.** Una versión del bloque que deja llaves o paréntesis sin cerrar (sin contar los de cadenas y comentarios) no se aplica con un clic si el bloque original estaba completo: rompería el archivo (como el linter que SWE-agent corre antes de aceptar una edición). Al insertar, solo se avisa.
+- Si el modelo copia el margen numerado del contexto («16| …»), se quita antes de decidir la acción (con el margen, un bloque completo pasaba por fragmento para insertar y un `// TODO` por código).
+- El recorte del archivo para el prompt va centrado en el foco con el mismo tope (`adaceen.suggestions.maxCodeChars`): en un archivo largo el cursor de la línea 900 ya no queda fuera; la última línea vacía cuenta (el cursor tras el último Enter se marca bien).
+- Revisión independiente antes de publicar: encontró que la primera versión del re-indentado metía en el ciclo un `return` de Python, que el completado de «...» podía volver a poner la línea que el modelo había cambiado o saltarse líneas repetidas, y que la ventana marcaba mal el foco al final del archivo; todo corregido y con pruebas.
+- 34 pruebas unitarias nuevas (248 en total).
+
+### Compatibilidad
+
+- Con el backend anterior al 21 de octubre funciona igual: el contexto nuevo es texto y sus encabezados son los mismos o nuevos (el backend viejo los corta a ciegas como antes).
+
 ## [0.0.34] - 2026-10-20
 
 Piloto del 20 de octubre (prueba con una estudiante): «cuando ADACEEN sugiere código, lo único es agregar un TODO», «la mejora de código no está sirviendo bien» y «el panel con el resumen de la pestaña y el atajo al material del curso ya no están».

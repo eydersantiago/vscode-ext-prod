@@ -186,6 +186,12 @@ export type ActiveEditorSnapshot = {
   cacheKey: string;
   /** Errores y avisos del archivo activo al tomar la foto (para visibleError / diagnostics). */
   diagnostics: DiagnosticsSummary;
+  /**
+   * Recorte del archivo centrado en el foco (mismo tope maxCodeChars) para la ventana numerada
+   * del prompt (0.0.35), y el numero de su primera linea. Sin el, se usa `content`.
+   */
+  promptContent?: string;
+  promptContentFirstLine?: number;
 };
 
 export type ActiveSuggestionModel = {
@@ -278,6 +284,8 @@ export type WorkspaceProjectIndexEntry = {
   bytes: number;
   lines: number;
   preview: string;
+  /** Firmas del archivo (clases, funciones; atributos en un encabezado) para el contexto (0.0.35). */
+  outline?: string;
 };
 
 export type WorkspaceProjectIndex = {

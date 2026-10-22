@@ -2,6 +2,7 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { pickTextMatch } from './code-application-guard';
+import { deepestIndentBelow, indentOf, indentUnitFromOptions, insertTargetIndent, opensBlock, placeInsertedCode, reindentCode, stripLineGutters } from './code-reindent';
 import { actionModeFromText, analyzedBlockMatches, normalizeActionProbe } from './suggestion-code';
 import { truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, PendingCodeAction, SuggestionApplyMode } from './types';
@@ -252,10 +253,14 @@ export function planSuggestionEdit(
   }
 
   // 0.0.34: solo el codigo que escribio el tutor; nunca un «TODO» inventado aqui.
-  const completionText = normalizeCompletionTextForEditor(model.completionText || '', lineIndent(targetLine.text), eol);
-  if (!completionText.trim()) {
+  // 0.0.35: re-indentado al lugar donde va, con la unidad de sangria del editor (antes solo se
+  // tocaba si la primera linea venia sin sangria).
+  const rawCode = stripLineGutters(model.completionText || '').replace(/\s+$/, '');
+  if (!rawCode.trim()) {
     return { ok: false, message: 'ADACEEN: esta sugerencia no trae código para aplicar. Usa «Proponer una mejora» o «Otra sugerencia».' };
   }
+  const unit = indentUnitFromOptions(editor.options.insertSpaces, editor.options.tabSize);
+  const placed = (targetIndent: string) => reindentCode(rawCode, targetIndent, unit).split('\n').join(eol);
 
   if (mode === 'replace') {
     const range = analyzedBlock
@@ -263,6 +268,9 @@ export function planSuggestionEdit(
         ? new vscode.Range(new vscode.Position(modelLineIndex, 0), targetLine.range.end)
         : getSelectedFullLineRange(editor));
     const originalCode = document.getText(range);
+    const targetIndent = minIndentOfLines(document, range.start.line, range.end.line)
+      ?? insertTargetIndent(previousNonEmptyLineText(document, range.start.line - 1), unit, rawCode);
+    const completionText = placed(targetIndent);
     return {
       ok: true,
       mode,
@@ -286,8 +294,21 @@ export function planSuggestionEdit(
     : editor.selection.isEmpty
       ? insertLine.text
       : document.getText(getSelectedFullLineRange(editor));
+  // 0.0.35 (revision independiente): en Python la sangria decide el bloque, asi que la del
+  // modelo se respeta si es valida en ese punto (placeInsertedCode).
+  const semantic = isIndentSensitiveLanguage(document.languageId || model.language || '', document.fileName || model.filePath || '');
+  const placeInsert = (targetIndent: string, maxIndent: string) =>
+    placeInsertedCode(rawCode, { unit, targetIndent, maxIndent, semantic }).split('\n').join(eol);
+
   if (!analyzedBlock && editor.selection.isEmpty && !insertLine.text.trim()) {
+    // Linea vacia: si el editor ya dejo la sangria (Enter), esa; si no, la de la linea con texto
+    // de arriba (un nivel mas si abre un bloque). En Python, sin sangria ni bloque abierto, el
+    // codigo sin sangria queda al margen (puede ser codigo de nivel superior).
+    const previous = previousNonEmptyLineText(document, insertLineIndex - 1);
+    const targetIndent = indentOf(insertLine.text)
+      || (opensBlock(previous) ? insertTargetIndent(previous, unit, rawCode) : semantic ? '' : indentOf(previous));
     const range = new vscode.Range(new vscode.Position(insertLineIndex, 0), insertLine.range.end);
+    const completionText = placeInsert(targetIndent, deepestIndentBelow(previous, unit));
     return {
       ok: true,
       mode,
@@ -300,6 +321,15 @@ export function planSuggestionEdit(
     };
   }
 
+  // Debajo de un bloque: a la sangria del bloque (un nivel mas si su ultima linea abre otro);
+  // debajo de la linea del cursor: a la suya (un nivel mas si abre un bloque).
+  const block = analyzedBlock || (editor.selection.isEmpty ? null : getSelectedFullLineRange(editor));
+  const lastLineText = previousNonEmptyLineText(document, insertLineIndex);
+  const blockBase = block ? minIndentOfLines(document, block.start.line, block.end.line) : null;
+  const targetIndent = block && blockBase !== null && !opensBlock(lastLineText)
+    ? blockBase
+    : insertTargetIndent(lastLineText, unit, rawCode);
+  const completionText = placeInsert(targetIndent, deepestIndentBelow(lastLineText, unit));
   const insertPosition = insertLine.range.end;
   return {
     ok: true,
@@ -311,6 +341,41 @@ export function planSuggestionEdit(
     proposedText: completionText,
     quizOriginalCode,
   };
+}
+
+/** Lenguajes donde la sangria cambia el significado (Python). */
+function isIndentSensitiveLanguage(language: string, filePath: string) {
+  return /^(?:python|py)$/i.test(String(language || '')) || /\.pyw?$/i.test(String(filePath || ''));
+}
+
+/** Sangria mas corta de las lineas con texto en [startLine, endLine] (null si estan vacias). */
+function minIndentOfLines(document: vscode.TextDocument, startLine: number, endLine: number) {
+  let best: string | null = null;
+  let bestWidth = Number.MAX_SAFE_INTEGER;
+  for (let line = Math.max(0, startLine); line <= Math.min(endLine, document.lineCount - 1); line += 1) {
+    const text = document.lineAt(line).text;
+    if (!text.trim()) {
+      continue;
+    }
+    const indent = lineIndent(text);
+    const width = indent.replace(/\t/g, '    ').length;
+    if (width < bestWidth) {
+      best = indent;
+      bestWidth = width;
+    }
+  }
+  return best;
+}
+
+/** Texto de la ultima linea con contenido en `fromLine` o antes ('' si no hay). */
+function previousNonEmptyLineText(document: vscode.TextDocument, fromLine: number) {
+  for (let line = Math.min(fromLine, document.lineCount - 1); line >= 0; line -= 1) {
+    const text = document.lineAt(line).text;
+    if (text.trim()) {
+      return text;
+    }
+  }
+  return '';
 }
 
 export function splitRelativePath(value: string) {
