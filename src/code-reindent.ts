@@ -53,6 +53,50 @@ export function indentUnitFromOptions(insertSpaces: unknown, tabSize: unknown) {
 }
 
 /**
+ * Lineas que continuan una sentencia (dentro de un "(" o "[" abierto, despues de "\\" o de un
+ * operador al final, o que empiezan con "<<", ".", "&&"...). Su sangria es alineacion, no un
+ * nivel: si contaran, una linea alineada bajo un parentesis (columna 14) hacia creer que la
+ * unidad era 2 y se doblaba la sangria (revision independiente del 21/10/2026).
+ */
+export function continuationLines(lines: string[]) {
+  const flags: boolean[] = [];
+  let depth = 0;
+  let previousContinues = false;
+  for (const line of lines) {
+    const text = line.trim();
+    if (!text) {
+      flags.push(false);
+      continue;
+    }
+    const startsWithOperator = /^(?:<<|>>|\.(?!\.\.)|&&|\|\||\?|\+(?!\+)|-(?![-=>]))/.test(text);
+    flags.push(depth > 0 || previousContinues || startsWithOperator);
+    const code = text
+      .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""')
+      .replace(/\/\*.*?\*\//g, '')
+      .replace(/\/\/.*$/, '')
+      .replace(/(^|\s)#(?:\s.*)?$/, '$1');
+    for (const char of code) {
+      if (char === '(' || char === '[') {
+        depth += 1;
+      } else if ((char === ')' || char === ']') && depth > 0) {
+        depth -= 1;
+      }
+    }
+    previousContinues = /(?:\\|,|\+|-|\*|\/|%|=|&&|\|\||<<|>>|\?)\s*$/.test(code) && !/(?:\+\+|--|==|!=|<=|>=)\s*$/.test(code);
+  }
+  return flags;
+}
+
+/** Sangrias (columnas) de las lineas con texto que no continuan una sentencia. */
+function structuralWidths(lines: string[]) {
+  const flags = continuationLines(lines);
+  return lines
+    .map((line, index) => ({ line, continuation: flags[index] }))
+    .filter((item) => item.line.trim() && !item.continuation)
+    .map((item) => columns(leadingWhitespace(item.line)));
+}
+
+/**
  * Re-indenta `code` para que su primera sangria sea `targetIndent` y cada nivel use `unit`,
  * conservando la estructura relativa (los niveles del bloque y la alineacion sobrante).
  */
@@ -63,9 +107,10 @@ export function reindentCode(code: string, targetIndent: string, unit: string) {
     return '';
   }
   const base = Math.min(...widths);
-  const relative = widths.map((width) => width - base).filter((width) => width > 0);
-  // Unidad del bloque: el maximo comun divisor de las sangrias relativas (2 o 4 casi siempre).
-  // Si da 1 por una linea de continuacion alineada a mano, esa linea no define la unidad.
+  // Unidad del bloque: el maximo comun divisor de las sangrias relativas de las lineas que no
+  // continuan una sentencia (2 o 4 casi siempre); las de continuacion conservan su alineacion.
+  const structural = structuralWidths(lines);
+  const relative = (structural.length ? structural : widths).map((width) => width - base).filter((width) => width > 0);
   let blockUnit = relative.reduce((acc, width) => gcd(acc, width), 0);
   if (blockUnit === 1) {
     const even = relative.filter((width) => width % 2 === 0);
@@ -206,5 +251,9 @@ export function relativeIndentUnit(lines: string[]) {
     return 0;
   }
   const base = Math.min(...widths);
-  return widths.map((width) => width - base).filter((width) => width > 0).reduce((acc, width) => gcd(acc, width), 0);
+  const structural = structuralWidths(lines);
+  return (structural.length ? structural : widths)
+    .map((width) => width - base)
+    .filter((width) => width > 0)
+    .reduce((acc, width) => gcd(acc, width), 0);
 }

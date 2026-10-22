@@ -39,6 +39,11 @@ describe('sangria del codigo propuesto (0.0.35)', () => {
     assert.equal(reindentCode(fromModel, '    ', '    '), '    double a = base * altura;\n    return a;');
   });
 
+  it('una linea alineada bajo un parentesis no cambia la unidad del bloque (segunda revision)', () => {
+    const fromModel = 'if x:\n    r = sumar(a,\n              b)\n    print(r)';
+    assert.equal(reindentCode(fromModel, '    ', '    '), '    if x:\n        r = sumar(a,\n                  b)\n        print(r)');
+  });
+
   it('respeta una linea de continuacion alineada a mano', () => {
     const fromModel = 'int suma = a +\n           b;\nreturn suma;';
     assert.equal(reindentCode(fromModel, '  ', '  '), '  int suma = a +\n             b;\n  return suma;');
@@ -160,6 +165,32 @@ describe('resumenes "..." del modelo (0.0.35)', () => {
     ].join('\n'));
     // Y al aplicarlo sobre el bloque (sangria 4) queda Python valido.
     assert.equal(reindentCode(expanded!, '    ', '    ').split('\n')[3], '            total += n');
+  });
+
+  it('una linea alineada bajo un parentesis no dobla la sangria de las lineas traidas (segunda revision)', () => {
+    const original = [
+      '    def total(self):',
+      '        resultado = sumar(self.a,',
+      '                          self.b)',
+      '        if resultado > 0:',
+      '            print(resultado)',
+      '        return resultado',
+    ].join('\n');
+    const expanded = expandElisions('def total(self):\n    # ... resto igual\n    return resultado', original);
+    assert.equal(expanded, [
+      'def total(self):',
+      '    resultado = sumar(self.a,',
+      '                      self.b)',
+      '    if resultado > 0:',
+      '        print(resultado)',
+      '    return resultado',
+    ].join('\n'));
+  });
+
+  it('una linea cambiada dentro de un if, su "}" y el resumen se completan (segunda revision)', () => {
+    const block = 'void f() {\n    if (a) {\n        x();\n    }\n    y();\n    z();\n}';
+    const expanded = expandElisions('void f() {\n    if (a) {\n        x2();\n    }\n    // ...\n    z();\n}', block);
+    assert.equal(expanded, 'void f() {\n    if (a) {\n        x2();\n    }\n    y();\n    z();\n}');
   });
 
   it('prepareSuggestionCode completa en un reemplazo y avisa; sin anclas no se aplica', () => {

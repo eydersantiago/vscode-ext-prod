@@ -302,7 +302,7 @@ export function selectRelatedFiles<T extends RelatedFileCandidate>(activePath: s
   const includedNames = new Set<string>();
   // Primero las formas con ruta entre comillas (import x from './y', require('./y')): si no, el
   // "import x" de Python se quedaba con el nombre x en vez de la ruta.
-  for (const match of String(activeContent || '').matchAll(/^\s*#\s*include\s*"([^"]+)"|^\s*import\s+(?:[^'"\n]+\s+from\s+)?['"]([^'"]+)['"]|^\s*(?:const|let|var)\s+[^=\n]+=\s*require\(\s*['"]([^'"]+)['"]|^\s*require(?:_relative)?\s*\(?\s*['"]([^'"]+)['"]|^\s*from\s+([\w.]+)\s+import\b|^\s*import\s+([\w.]+)\s*(?:$|,|\bas\b)/gm)) {
+  for (const match of String(activeContent || '').matchAll(/^\s*#\s*include\s*"([^"]+)"|^\s*import\s+(?:[^'"\n]+\s+from\s+)?['"]([^'"]+)['"]|^\s*(?:const|let|var)\s+[^=\n]+=\s*require\(\s*['"]([^'"]+)['"]|^\s*require(?:_relative)?\s*\(?\s*['"]([^'"]+)['"]|^\s*from\s+([\w.]+)\s+import\b|^\s*import\s+(?:static\s+)?([\w.]+)\s*(?:$|[,;]|\bas\b)/gm)) {
     const target = match[1] || match[2] || match[3] || match[4] || match[5] || match[6] || '';
     const last = target.replace(/\\/g, '/').split(/[/.]/).filter(Boolean).pop() || '';
     const hasExtension = /\.(?:h|hh|hpp|hxx|py|rb|js|ts|jsx|tsx)$/i.test(target);

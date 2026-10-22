@@ -292,6 +292,15 @@ export function isElisionLine(line: string) {
   return COMMENT_START.test(text) && ELISION_PHRASE.test(text);
 }
 
+/** Primera posicion con texto desde `from` (o el largo si no hay). */
+function nextNonBlankIndex(lines: string[], from: number) {
+  let index = Math.max(0, from);
+  while (index < lines.length && !lines[index]) {
+    index += 1;
+  }
+  return index;
+}
+
 /**
  * Posicion del original donde empieza `run` (lineas sin sangria, sin vacias) terminando justo
  * antes de `endPos`; -1 si no coincide o se pasa de `minPos`.
@@ -360,6 +369,19 @@ export function expandElisions(code: string, original: string): string | null {
           if (found >= 0) {
             cursor = found + 1;
             matched = true;
+          } else {
+            // Linea cambiada que reemplaza 1 por 1 a la del original en `cursor`: la linea que
+            // le sigue en el modelo (no un resumen) es la que sigue en el original. Asi «cambio
+            // una linea de un if, cierro con "}" y resumo el resto» se completa bien.
+            const nextModel = codeLines.slice(index + 1).find((item) => item.trim());
+            const here = nextNonBlankIndex(originalTrimmed, cursor);
+            if (nextModel && !isElisionLine(nextModel) && here < originalTrimmed.length) {
+              const after = nextNonBlankIndex(originalTrimmed, here + 1);
+              if (after < originalTrimmed.length && originalTrimmed[after] === nextModel.trim()) {
+                cursor = here + 1;
+                matched = true;
+              }
+            }
           }
         } else {
           // Un cierre avanza solo si es la siguiente linea con texto del original.

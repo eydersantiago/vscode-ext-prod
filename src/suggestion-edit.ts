@@ -304,9 +304,14 @@ export function planSuggestionEdit(
     // Linea vacia: si el editor ya dejo la sangria (Enter), esa; si no, la de la linea con texto
     // de arriba (un nivel mas si abre un bloque). En Python, sin sangria ni bloque abierto, el
     // codigo sin sangria queda al margen (puede ser codigo de nivel superior).
+    // En Python, dentro de un bloque (la linea de abajo sigue con sangria) va a la sangria de esa
+    // linea; al final del archivo o antes de una linea al margen, al margen.
     const previous = previousNonEmptyLineText(document, insertLineIndex - 1);
+    const next = nextNonEmptyLineText(document, insertLineIndex + 1);
     const targetIndent = indentOf(insertLine.text)
-      || (opensBlock(previous) ? insertTargetIndent(previous, unit, rawCode) : semantic ? '' : indentOf(previous));
+      || (opensBlock(previous)
+        ? insertTargetIndent(previous, unit, rawCode)
+        : semantic ? (next.trim() ? indentOf(next) : '') : indentOf(previous));
     const range = new vscode.Range(new vscode.Position(insertLineIndex, 0), insertLine.range.end);
     const completionText = placeInsert(targetIndent, deepestIndentBelow(previous, unit));
     return {
@@ -365,6 +370,17 @@ function minIndentOfLines(document: vscode.TextDocument, startLine: number, endL
     }
   }
   return best;
+}
+
+/** Texto de la primera linea con contenido en `fromLine` o despues ('' si no hay). */
+function nextNonEmptyLineText(document: vscode.TextDocument, fromLine: number) {
+  for (let line = Math.max(0, fromLine); line < document.lineCount; line += 1) {
+    const text = document.lineAt(line).text;
+    if (text.trim()) {
+      return text;
+    }
+  }
+  return '';
 }
 
 /** Texto de la ultima linea con contenido en `fromLine` o antes ('' si no hay). */

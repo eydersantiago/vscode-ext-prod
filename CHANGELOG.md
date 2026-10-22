@@ -17,8 +17,8 @@ Revisión de precisión del tutor, con técnicas de otros asistentes de código 
 - **Llaves sin cerrar.** Una versión del bloque que deja llaves o paréntesis sin cerrar (sin contar los de cadenas y comentarios) no se aplica con un clic si el bloque original estaba completo: rompería el archivo (como el linter que SWE-agent corre antes de aceptar una edición). Al insertar, solo se avisa.
 - Si el modelo copia el margen numerado del contexto («16| …»), se quita antes de decidir la acción (con el margen, un bloque completo pasaba por fragmento para insertar y un `// TODO` por código).
 - El recorte del archivo para el prompt va centrado en el foco con el mismo tope (`adaceen.suggestions.maxCodeChars`): en un archivo largo el cursor de la línea 900 ya no queda fuera; la última línea vacía cuenta (el cursor tras el último Enter se marca bien).
-- Revisión independiente antes de publicar: encontró que la primera versión del re-indentado metía en el ciclo un `return` de Python, que el completado de «...» podía volver a poner la línea que el modelo había cambiado o saltarse líneas repetidas, y que la ventana marcaba mal el foco al final del archivo; todo corregido y con pruebas.
-- 34 pruebas unitarias nuevas (248 en total).
+- Revisión independiente antes de publicar, en dos vueltas: encontró que la primera versión del re-indentado metía en el ciclo un `return` de Python, que el completado de «...» podía volver a poner la línea que el modelo había cambiado o saltarse líneas repetidas, que la ventana marcaba mal el foco al final del archivo y, en la segunda vuelta, que una línea alineada bajo un paréntesis doblaba la sangría de las líneas traídas; todo corregido y con pruebas. Además: en Python, el código sin sangría que se inserta en una línea vacía dentro de un bloque toma la sangría de la línea de abajo (antes quedaba al margen y rompía el bloque), y «cambio una línea de un `if`, cierro con `}` y resumo el resto» ya se completa.
+- 37 pruebas unitarias nuevas (251 en total).
 
 ### Compatibilidad
 

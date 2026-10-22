@@ -137,6 +137,8 @@ describe('archivos relacionados (0.0.35)', () => {
     assert.deepEqual(selectRelatedFiles('src/main.cpp', 'int main() {}', files), []);
     const js = [{ path: 'src/util/formato.js', language: 'javascript', lines: 20, outline: '1: export function formato(x) {' }];
     assert.deepEqual(selectRelatedFiles('src/app.js', "import fmt from './util/formato';\nfmt(1);", js).map((file) => file.path), ['src/util/formato.js'], 'la ruta del import, no el nombre que se le da');
+    const java = [{ path: 'src/modelo/Figura.java', language: 'java', lines: 30, outline: '3: public abstract class Figura {' }];
+    assert.deepEqual(selectRelatedFiles('src/App.java', 'import modelo.Figura;\npublic class App {}', java).map((file) => file.path), ['src/modelo/Figura.java'], 'import de Java con ";"');
   });
 
   it('formatea las declaraciones con tope y la lista corta de los demas archivos', () => {
