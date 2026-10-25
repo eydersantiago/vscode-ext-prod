@@ -8,6 +8,7 @@ import { containsSecret, DEFAULT_MAX_TOTAL_SCAN_BYTES, describeScanPermission, e
 import { PROMPT_TIMED_OUT, promptWithTimeout } from './code-action-queue';
 import { isCodespaceRuntime, resolveScanOptions } from './settings';
 import type { ScanCommandArgs, ScanComputation, ScanMode, ScanOptions, ScanPayload, ScannedDocument, ScannedFile } from './types';
+import { decodeSourceBytes } from './source-text';
 
 export function selectFolders(
   requestedMode: ScanMode,
@@ -254,8 +255,9 @@ export async function performWorkspaceScan(args: ScanCommandArgs | undefined, ou
         continue;
       }
 
-      // Se lee de los bytes (no con openTextDocument, que despierta los servidores de lenguaje).
-      const text = new TextDecoder('utf-8').decode(bytes);
+      // Se lee de los bytes (no con openTextDocument, que despierta los servidores de lenguaje);
+      // un archivo en Latin-1 (Dev-C++) ya no llega con «�» (0.0.36).
+      const text = decodeSourceBytes(bytes);
       if (containsSecret(text, relativePath)) {
         privacy.skippedAsSecret += 1;
         output.appendLine(`Omitido por posible clave o contrasena: ${relativePath}`);

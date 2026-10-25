@@ -3,6 +3,7 @@
 import * as vscode from 'vscode';
 import type { BackendUrlSource } from './backend-url';
 import type { DiagnosticsSummary } from './error-signals';
+import type { ParsedImport } from './file-dependencies';
 
 export type ScanMode = 'auto' | 'local' | 'codespace' | 'all';
 
@@ -286,6 +287,16 @@ export type WorkspaceProjectIndexEntry = {
   preview: string;
   /** Firmas del archivo (clases, funciones; atributos en un encabezado) para el contexto (0.0.35). */
   outline?: string;
+  /** URI del archivo (para abrirlo desde el cuadro «Dependencias», 0.0.36). */
+  uri?: string;
+  /** Sus #include / import / require, para «La usan» en el cuadro «Dependencias» (0.0.36). */
+  imports?: ParsedImport[];
+  /** Java y C#: clases que nombra (las del mismo paquete se usan sin import). */
+  typeRefs?: string[];
+  /** C#: espacios de nombres que declara. */
+  namespaces?: string[];
+  /** Java: su linea package. */
+  javaPackage?: string;
 };
 
 export type WorkspaceProjectIndex = {
@@ -294,6 +305,8 @@ export type WorkspaceProjectIndex = {
   totalFiles: number;
   files: WorkspaceProjectIndexEntry[];
   folders: string[];
+  /** La busqueda llego al tope de archivos (0.0.36): hay archivos del proyecto que no estan. */
+  capped?: boolean;
 };
 
 export type BackendSuggestionSections = {

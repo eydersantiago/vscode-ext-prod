@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.35",
+  "version": "0.0.36",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -62,6 +62,11 @@
         "command": "adaceen.openFileView",
         "title": "ADACEEN: Ver de qué trata el archivo y el material del curso",
         "icon": "$(book)"
+      },
+      {
+        "command": "adaceen.showDependencies",
+        "title": "ADACEEN: Ver dependencias del archivo",
+        "icon": "$(references)"
       },
       {
         "command": "adaceen.openCourseMaterial",
@@ -233,12 +238,12 @@
         },
         "adaceen.scan.includeGlob": {
           "type": "string",
-          "default": "**/*.{ts,tsx,js,jsx,mjs,cjs,py,java,cpp,c,h,hpp,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}",
+          "default": "**/*.{ts,tsx,js,jsx,mjs,cjs,vue,svelte,py,java,cpp,cc,cxx,c,h,hh,hpp,hxx,tpp,ipp,inl,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}",
           "description": "Glob de inclusión para los archivos a escanear."
         },
         "adaceen.scan.excludeGlob": {
           "type": "string",
-          "default": "**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__}/**",
+          "default": "**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__,.venv,venv,site-packages,_deps,.tox,.gradle,.mypy_cache,.pytest_cache}/**",
           "description": "Glob de exclusión para evitar carpetas pesadas o generadas."
         },
         "adaceen.scan.maxFiles": {

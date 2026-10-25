@@ -91,8 +91,10 @@ const HIGH_CONFIDENCE_SECRET_PATTERNS: readonly RegExp[] = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/, // Slack
   /\bsk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{20,}\b/, // OpenAI / Stripe
   /\b(?:AccountKey|SharedAccessKey)=[A-Za-z0-9+/=]{20,}/, // cadenas de conexion de Azure
-  /\bmongodb(?:\+srv)?:\/\/[^\s:@/]+:[^\s@/]+@/, // URL con usuario y clave
-  /\bpostgres(?:ql)?:\/\/[^\s:@/]+:[^\s@/]+@/,
+  // URL con usuario (o sin el: redis://:clave@host) y clave
+  /\bmongodb(?:\+srv)?:\/\/[^\s:@/]*:[^\s@/]+@/,
+  /\bpostgres(?:ql)?:\/\/[^\s:@/]*:[^\s@/]+@/,
+  /\b(?:mysql|mariadb|rediss?|amqps?|mssql|sqlserver|ftps?|sftp)(?:\+\w+)?:\/\/[^\s:@/]*:[^\s@/]+@/i,
 ];
 
 /** Asignaciones genericas (password: ..., "apiKey": "...") que solo se miran en archivos de configuracion. */
@@ -118,6 +120,50 @@ export function containsSecret(text: string, relativePath: string) {
   const dot = fileName.lastIndexOf('.');
   const extension = dot > 0 ? fileName.slice(dot + 1) : '';
   return CONFIG_EXTENSIONS.has(extension) && CONFIG_ASSIGNMENT_PATTERN.test(text);
+}
+
+/** Nombres que suelen guardar una clave: su valor no viaja en la estructura del archivo. */
+const SECRET_NAME = /(?:pass(?:word|wd)?|pwd|secret|token|api_?key|apikey|clave|contrase|credential|private_?key)/i;
+
+/**
+ * Una cadena entre comillas, cerrada o cortada al final de la linea (la estructura recorta las
+ * lineas a 160 caracteres). Sin ambiguedad con la barra invertida: una version anterior
+ * (`(?:\\.|(?!\1).)*`) tardaba minutos en una linea con muchas `\` y la cadena sin cerrar
+ * (revision independiente del 25/10/2026).
+ */
+const STRING_LITERAL = /(["'`])(?:\\[\s\S]|(?!\1)[^\\\n])*(?:\1|$)/g;
+/** usuario:clave en una direccion (mysql://root:clave@host), con cualquier nombre de variable. */
+const URL_CREDENTIALS = /\b([a-z][a-z0-9+.-]{1,15}:\/\/)[^\s:@/"'`]*:[^\s@/"'`]+@/gi;
+/** password=... dentro de una cadena de conexion (ADO.NET `Password=x;`, JDBC `&password=x`). */
+const INLINE_PASSWORD = /\b((?:password|passwd|pwd|contrase(?:ña|na)|clave)\s*=\s*)[^;&\s"'`]+/gi;
+/** nombre = "valor" o nombre: "valor" (tambien argumentos por defecto: clave = "..."). */
+const NAMED_STRING = /([A-Za-z_][\w]*)(\s*(?:=|:)\s*)(["'`])((?:\\[\s\S]|(?!\3)[^\\\n])*)(\3|$)/g;
+
+/**
+ * La estructura de un archivo del indice (workspace-index.ts) que viaja al tutor en
+ * «Declaraciones de archivos relacionados» (0.0.36): sin las lineas que parecen traer una clave
+ * (los patrones de containsSecret) y sin el valor de las cadenas con nombre de clave:
+ * `const std::string API_KEY = "...";`, `password="..."` como argumento por defecto o una
+ * cadena cortada al final. En un encabezado la estructura lleva los atributos con su valor
+ * inicial, y el estudiante no abrio ese archivo para mandarlo.
+ */
+export function scrubOutline(outline: string, relativePath: string) {
+  return String(outline || '')
+    .split('\n')
+    .filter((line) => !containsSecret(line, relativePath))
+    .map((raw) => raw.replace(URL_CREDENTIALS, '$1…@').replace(INLINE_PASSWORD, '$1…'))
+    .map((line) => {
+      // La declaracion entera tiene nombre de clave (`const char* CLAVES[] = {"a", "b"};`).
+      const equals = line.indexOf('=');
+      if (equals > 0 && SECRET_NAME.test(line.slice(0, equals))) {
+        return line.replace(STRING_LITERAL, (_match, quote: string) => `${quote}…${quote}`);
+      }
+      // Cada nombre = "valor" de la linea (argumentos por defecto, varias asignaciones).
+      return line.replace(NAMED_STRING, (match, name: string, separator: string, quote: string) => (
+        SECRET_NAME.test(name) ? `${name}${separator}${quote}…${quote}` : match
+      ));
+    })
+    .join('\n');
 }
 
 /**
