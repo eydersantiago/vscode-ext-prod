@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import type { FileDependencies } from '../file-dependencies';
-import { buildDependencyViewState, buildFileViewState, EMPTY_MATERIAL_STATE } from '../file-view-model';
+import { buildDependencyViewState, buildFileViewState, dependencyItemId, EMPTY_MATERIAL_STATE } from '../file-view-model';
 import type { ActiveSuggestionModel } from '../types';
 
 // Vista «Este archivo» 0.0.36: el archivo es el del editor activo y trae el cuadro «Dependencias».
@@ -154,6 +154,17 @@ describe('cuadro «Dependencias»: revision independiente (0.0.36)', () => {
       ['Circulo.java', 'en src/modelo/ · línea 3'],
     ]);
     assert.equal(view?.key, 'file:///repo/src/App.java|7', 'el clic dice de que cuadro era');
+  });
+
+  it('cada elemento lleva el id con que el clic lo encuentra (no lo que se muestra)', () => {
+    const view = buildDependencyViewState(DEPS, 'src/main.cpp', false);
+    assert.ok(view);
+    assert.equal(view.local[1].label, 'rectangulo.h', 'se ve el nombre del archivo');
+    assert.equal(view.local[1].id, dependencyItemId(DEPS.local[1]), 'el id es el del resultado');
+    assert.notEqual(view.local[1].id, view.local[1].label);
+    const ids = [...view.local, ...view.libraries, ...view.missing, ...view.dependents].map((item) => item.id);
+    assert.equal(new Set(ids).size, ids.length, 'no se repiten');
+    assert.equal(dependencyItemId({ label: 'main.cpp', path: 'src/main.cpp' }), dependencyItemId({ label: 'main.cpp', path: 'src/main.cpp' }));
   });
 
   it('un archivo fuera de la carpeta abierta lo dice', () => {

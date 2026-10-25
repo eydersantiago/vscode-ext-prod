@@ -4,7 +4,7 @@
 // indice no tiene (tope de 90 archivos y solo algunas extensiones: un .tpp o un .hh no estan).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_INDEX_MAX_FILES } from './constants';
-import { resolveFileDependencies } from './file-dependencies';
+import { isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
 import type { FileDependencies } from './file-dependencies';
 import { resolveScanOptions } from './settings';
 import { inferActiveLanguage } from './suggestion-results';
@@ -13,6 +13,8 @@ import type { WorkspaceProjectIndex, WorkspaceProjectIndexEntry } from './types'
 export type ActiveFileDependencies = {
   uriString: string;
   filePath: string;
+  /** Lenguaje con el que se calculo (cambiarlo, un .tpp a C++, obliga a recalcular). */
+  languageId: string;
   /** Version del documento cuyo texto se leyo (se toma junto con el texto, antes de esperar nada). */
   version: number;
   /** Indice con el que se calculo (para no repetir el calculo si nada cambio). */
@@ -63,6 +65,41 @@ export class DependencyProbeCache {
   }
 }
 
+/**
+ * Archivos de compilacion o de proyecto por carpeta (CMakeLists.txt, Makefile, pom.xml,
+ * build.gradle...): no estan en el indice (no son codigo) y dicen donde empieza cada proyecto.
+ */
+const BUILD_FILES_GLOB = '**/{CMakeLists.txt,Makefile,makefile,GNUmakefile,meson.build,build.ninja,compile_commands.json,*.vcxproj,pom.xml,build.gradle,build.gradle.kts,settings.gradle,settings.gradle.kts,pyproject.toml,setup.py,Gemfile}';
+
+export class BuildFileCache {
+  private readonly entries = new Map<string, { at: number; paths: string[] }>();
+
+  clear() {
+    this.entries.clear();
+  }
+
+  async list(folder: vscode.WorkspaceFolder): Promise<string[]> {
+    const key = folder.uri.toString();
+    const cached = this.entries.get(key);
+    if (cached && Date.now() - cached.at < PROBE_TTL_MS * 10) {
+      return cached.paths;
+    }
+    let paths: string[] = [];
+    try {
+      const uris = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(folder, BUILD_FILES_GLOB),
+        new vscode.RelativePattern(folder, resolveScanOptions(undefined).excludeGlob),
+        60,
+      );
+      paths = uris.map((uri) => workspaceRelativePath(uri));
+    } catch {
+      paths = [];
+    }
+    this.entries.set(key, { at: Date.now(), paths });
+    return paths;
+  }
+}
+
 /** Identifica un indice armado (no solo su contenido): uno rearmado tras guardar cuenta como otro. */
 export function indexKeyOf(index: WorkspaceProjectIndex | null) {
   return index ? `${index.cacheKey}|${index.generatedAt}` : '';
@@ -89,15 +126,21 @@ export function indexFilesInFolderOf(index: WorkspaceProjectIndex | null, uri: v
   return index.files.filter((entry) => !entry.uri || entry.uri.startsWith(prefix));
 }
 
-/** ¿El documento es un archivo de la carpeta abierta (no uno sin guardar ni de otra parte)? */
+/**
+ * ¿El documento es un archivo del proyecto? No uno sin guardar, ni de otra parte, ni el codigo
+ * de un paquete instalado (un .py de .venv abierto con F12): esos solo muestran sus bibliotecas.
+ */
 export function isWorkspaceDocument(document: vscode.TextDocument) {
-  return !document.isUntitled && !!vscode.workspace.getWorkspaceFolder(document.uri);
+  return !document.isUntitled
+    && !!vscode.workspace.getWorkspaceFolder(document.uri)
+    && !isThirdPartyPath(workspaceRelativePath(document.uri));
 }
 
-async function exists(uri: vscode.Uri) {
+/** ¿Existe y es un archivo? (`#include "modelo/"` a medio escribir no es la carpeta modelo). */
+async function isFile(uri: vscode.Uri) {
   try {
-    await vscode.workspace.fs.stat(uri);
-    return true;
+    const stat = await vscode.workspace.fs.stat(uri);
+    return (stat.type & vscode.FileType.File) !== 0;
   } catch {
     return false;
   }
@@ -112,11 +155,13 @@ export async function computeActiveFileDependencies(
   document: vscode.TextDocument,
   index: WorkspaceProjectIndex | null,
   probes: DependencyProbeCache,
+  buildFiles: BuildFileCache,
 ): Promise<ActiveFileDependencies> {
   // El texto y su version juntos, antes de esperar nada (si no, un resultado del texto viejo
   // quedaba guardado con la version nueva y no se volvia a calcular).
   const text = document.getText();
   const version = document.version;
+  const languageId = document.languageId;
   const folder = vscode.workspace.getWorkspaceFolder(document.uri);
   const inWorkspace = isWorkspaceDocument(document) && !!folder;
   const filePath = workspaceRelativePath(document.uri);
@@ -128,7 +173,8 @@ export async function computeActiveFileDependencies(
       uris.set(entry.path, entry.uri);
     }
   }
-  let deps = resolveFileDependencies({ activePath: filePath, language, text, files });
+  const projectFiles = inWorkspace && folder ? await buildFiles.list(folder) : [];
+  let deps = resolveFileDependencies({ activePath: filePath, language, text, files, buildFiles: projectFiles });
   if (inWorkspace && folder && (deps.probes.length || deps.expectedPaths.length)) {
     const extraPaths: string[] = [];
     const remember = (uri: vscode.Uri) => {
@@ -142,7 +188,7 @@ export async function computeActiveFileDependencies(
     // unos cuantos y podia elegir el de otra carpeta.
     for (const path of deps.expectedPaths) {
       const uri = vscode.Uri.joinPath(folder.uri, ...path.split('/').filter(Boolean));
-      if (await exists(uri)) {
+      if (await isFile(uri)) {
         remember(uri);
       }
     }
@@ -152,7 +198,7 @@ export async function computeActiveFileDependencies(
       }
     }
     if (extraPaths.length) {
-      deps = resolveFileDependencies({ activePath: filePath, language, text, files, extraPaths });
+      deps = resolveFileDependencies({ activePath: filePath, language, text, files, extraPaths, buildFiles: projectFiles });
     }
   }
   if (!inWorkspace) {
@@ -170,6 +216,7 @@ export async function computeActiveFileDependencies(
   return {
     uriString: document.uri.toString(),
     filePath,
+    languageId,
     version,
     indexKey: indexKeyOf(index),
     deps,

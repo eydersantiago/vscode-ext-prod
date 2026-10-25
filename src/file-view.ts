@@ -29,7 +29,7 @@ type FileViewHandlers = {
   refreshSummary: () => void;
   openQuiz: () => void;
   /** key y label: de que cuadro y que elemento era el clic (el cuadro pudo cambiar despues). */
-  openDependency: (group: FileViewDependencyGroup, index: number, key: string, label: string) => void;
+  openDependency: (group: FileViewDependencyGroup, index: number, key: string, id: string) => void;
 };
 
 function randomId(length: number) {
@@ -153,7 +153,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
             data.group as FileViewDependencyGroup,
             Number(data.index),
             typeof data.key === 'string' ? data.key : '',
-            typeof data.label === 'string' ? data.label.slice(0, 400) : '',
+            typeof data.id === 'string' ? data.id.slice(0, 2000) : '',
           );
         }
         return;
@@ -325,7 +325,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
 
       function depItem(item, group, index, key) {
         return el('li', {}, [
-          el('button', { title: item.title || '', onclick: function () { send({ type: 'openDependency', group: group, index: index, key: key, label: item.label }); } }, [
+          el('button', { title: item.title || '', onclick: function () { send({ type: 'openDependency', group: group, index: index, key: key, id: item.id }); } }, [
             el('span', { class: 'dep-name', text: item.label }),
             item.meta ? el('span', { class: 'dep-meta', text: item.meta }) : null,
             item.warning ? el('span', { class: 'dep-warn', text: item.warning }) : null,

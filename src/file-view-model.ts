@@ -40,6 +40,12 @@ export type FileViewActiveFile = { uriString: string; fileName: string; language
 export type FileViewDependencyGroup = 'local' | 'libraries' | 'missing' | 'dependents';
 
 export type FileViewDependencyItem = {
+  /**
+   * Identifica el elemento en el resultado (nombre del import y ruta): el clic lo devuelve y la
+   * extension busca ese mismo elemento. Lo que se muestra no sirve para eso: «figura.h» se ve por
+   * el nombre del archivo y el import dice "modelo/figura.h" (revision del 25/10/2026).
+   */
+  id: string;
   label: string;
   meta: string;
   /** Lo que hace el clic (tooltip): «Abrir src/figura.h» o «Ir a la línea 3». */
@@ -117,6 +123,15 @@ function implicitNote(family: DependencyFamily) {
  * Del resultado de file-dependencies.ts a lo que pinta el cuadro. Conserva el orden de cada
  * grupo: el clic llega con (grupo, posicion) y extension.ts busca el elemento en el resultado.
  */
+/**
+ * Lo que identifica un elemento del cuadro entre el resultado y la vista: el nombre del import
+ * y la ruta (sin la linea: si otro archivo se guardo, quien lo usa puede haber cambiado de linea
+ * y el clic debe abrirlo igual).
+ */
+export function dependencyItemId(item: Pick<FileDependencyItem, 'label' | 'path'>) {
+  return `${item.label}\n${item.path || ''}`;
+}
+
 export function buildDependencyViewState(
   deps: FileDependencies | null,
   activePath: string,
@@ -134,6 +149,7 @@ export function buildDependencyViewState(
     return null;
   }
   const local = deps.local.map((item: FileDependencyItem) => ({
+    id: dependencyItemId(item),
     // Un paquete (modelo.*) o un espacio de nombres va por su nombre, no por su primer archivo.
     label: item.implicit || !item.path || item.description ? item.label : baseOf(item.path),
     meta: [
@@ -146,12 +162,14 @@ export function buildDependencyViewState(
     warning: item.warning || '',
   }));
   const libraries = deps.libraries.map((item) => ({
+    id: dependencyItemId(item),
     label: item.label,
     meta: item.description || '',
     title: item.line ? `Ir a la línea ${item.line}` : '',
     warning: item.warning || '',
   }));
   const missing = deps.missing.map((item) => ({
+    id: dependencyItemId(item),
     label: item.label,
     // El grupo ya dice «No encontradas»: con sugerencia basta la sugerencia.
     meta: item.hint || item.description || '',
@@ -159,6 +177,7 @@ export function buildDependencyViewState(
     warning: '',
   }));
   const dependents = deps.dependents.map((item) => ({
+    id: dependencyItemId(item),
     label: item.label,
     meta: [
       item.path ? folderNote(item.path, activePath) : '',

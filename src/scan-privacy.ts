@@ -93,6 +93,7 @@ const HIGH_CONFIDENCE_SECRET_PATTERNS: readonly RegExp[] = [
   /\b(?:AccountKey|SharedAccessKey)=[A-Za-z0-9+/=]{20,}/, // cadenas de conexion de Azure
   /\bmongodb(?:\+srv)?:\/\/[^\s:@/]+:[^\s@/]+@/, // URL con usuario y clave
   /\bpostgres(?:ql)?:\/\/[^\s:@/]+:[^\s@/]+@/,
+  /\b(?:mysql|mariadb|rediss?|amqps?|mssql|sqlserver|ftps?|sftp)(?:\+\w+)?:\/\/[^\s:@/]+:[^\s@/]+@/i,
 ];
 
 /** Asignaciones genericas (password: ..., "apiKey": "...") que solo se miran en archivos de configuracion. */
@@ -130,6 +131,8 @@ const SECRET_NAME = /(?:pass(?:word|wd)?|secret|token|api_?key|apikey|clave|cont
  * (revision independiente del 25/10/2026).
  */
 const STRING_LITERAL = /(["'`])(?:\\[\s\S]|(?!\1)[^\\\n])*(?:\1|$)/g;
+/** usuario:clave en una direccion (mysql://root:clave@host), con cualquier nombre de variable. */
+const URL_CREDENTIALS = /\b([a-z][a-z0-9+.-]{1,15}:\/\/)[^\s:@/"'`]+:[^\s@/"'`]+@/gi;
 /** nombre = "valor" o nombre: "valor" (tambien argumentos por defecto: clave = "..."). */
 const NAMED_STRING = /([A-Za-z_][\w]*)(\s*(?:=|:)\s*)(["'`])((?:\\[\s\S]|(?!\3)[^\\\n])*)(\3|$)/g;
 
@@ -145,6 +148,7 @@ export function scrubOutline(outline: string, relativePath: string) {
   return String(outline || '')
     .split('\n')
     .filter((line) => !containsSecret(line, relativePath))
+    .map((raw) => raw.replace(URL_CREDENTIALS, '$1…@'))
     .map((line) => {
       // La declaracion entera tiene nombre de clave (`const char* CLAVES[] = {"a", "b"};`).
       const equals = line.indexOf('=');

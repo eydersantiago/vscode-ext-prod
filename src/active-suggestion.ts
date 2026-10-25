@@ -5,7 +5,7 @@ import { buildSessionHeaders, fetchJsonWithTimeout } from './backend-http';
 import { ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS, ACTIVE_SUGGESTION_PROMPT_RELATED_CHARS, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS, ACTIVE_SUGGESTION_PROMPT_TOTAL_CHARS, ACTIVE_SUGGESTION_PROMPT_WINDOW_CHARS, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import type { SuggestDiagnostic } from './error-signals';
 import { indexFilesInFolderOf } from './dependency-scan';
-import { formatDependenciesForPrompt, resolveFileDependencies } from './file-dependencies';
+import { formatDependenciesForPrompt, isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
 import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionReadyForMode } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
@@ -256,9 +256,11 @@ export function buildBackendSuggestionContent(
   const others = formatOtherFilesLine(ranked, snapshot.filePath, isFileSummary ? 20 : 8);
   // 0.0.36: en el resumen, lo que usa del proyecto, sus bibliotecas y quien lo usa (el mismo
   // calculo del cuadro «Dependencias», sin lo no encontrado: el indice no tiene todo). Solo para
-  // un archivo de la carpeta abierta, comparado con los de su misma carpeta del proyecto.
+  // un archivo de la carpeta abierta, comparado con los de su misma carpeta del proyecto (no el
+  // codigo de un paquete instalado abierto con F12, igual que el cuadro).
   const documentUri = snapshot.uriString ? vscode.Uri.parse(snapshot.uriString) : null;
-  const inWorkspace = !!documentUri && documentUri.scheme !== 'untitled' && !!vscode.workspace.getWorkspaceFolder(documentUri);
+  const inWorkspace = !!documentUri && documentUri.scheme !== 'untitled' && !!vscode.workspace.getWorkspaceFolder(documentUri)
+    && !isThirdPartyPath(snapshot.filePath);
   const dependencies = isFileSummary && projectIndex && documentUri && inWorkspace
     ? formatDependenciesForPrompt(resolveFileDependencies({
       activePath: snapshot.filePath,

@@ -133,5 +133,16 @@ describe('scan-privacy: estructura sin claves, rapido (revision independiente, 0
     );
     assert.equal(scrubOutline('9:   std::string password_bd = "MiClaveSuperSecreta-1234567890…', 'cfg.h'), '9:   std::string password_bd = "…"');
   });
+
+  it('una direccion con usuario y clave no llega al tutor, se llame como se llame la variable', () => {
+    const mysql = '3:   const std::string url = "mysql://root:MiClave2026@localhost/tienda";';
+    assert.equal(containsSecret(mysql, 'db.h'), true);
+    assert.equal(scrubOutline(mysql, 'db.h'), '', 'la linea no viaja');
+    assert.equal(
+      scrubOutline('5: API = "https://ana:MiClave2026@api.ejemplo.com/v1"', 'cliente.py'),
+      '5: API = "https://…@api.ejemplo.com/v1"',
+    );
+    assert.equal(scrubOutline('6: DOCS = "https://docs.ejemplo.com/v1"', 'cliente.py'), '6: DOCS = "https://docs.ejemplo.com/v1"');
+  });
 });
 

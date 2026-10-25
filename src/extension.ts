@@ -15,10 +15,10 @@ import { EditorConnection } from './editor-connect';
 import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnchor, hasActiveSelection, isCursorIdleAnchorStillActive, isSnapshotStillActive, isSuggestionModelDocumentVisible, isSupportedActiveDocument } from './editor-snapshot';
 import { ERROR_TEXT_MAX_CHARS, ErrorSignalTracker } from './error-signals';
 import type { BlockingSignal, ErrorSignal } from './error-signals';
-import { computeActiveFileDependencies, DependencyProbeCache, indexKeyOf, workspaceRelativePath } from './dependency-scan';
+import { BuildFileCache, computeActiveFileDependencies, DependencyProbeCache, indexKeyOf, workspaceRelativePath } from './dependency-scan';
 import type { ActiveFileDependencies } from './dependency-scan';
 import { AdaceenFileViewProvider } from './file-view';
-import { buildDependencyViewState, buildFileViewState, EMPTY_MATERIAL_STATE } from './file-view-model';
+import { buildDependencyViewState, buildFileViewState, dependencyItemId, EMPTY_MATERIAL_STATE } from './file-view-model';
 import type { FileSummaryEntry, FileViewActiveFile, FileViewDependencyGroup, FileViewMaterialState } from './file-view-model';
 import { detectBranchName, detectRepoFullName, parseRepoFromGitConfig, readGitConfigText } from './git-repo';
 import { applyEditToText, PROPOSAL_SCHEME, ProposalContentProvider } from './proposal-diff';
@@ -154,15 +154,22 @@ export async function activate(context: vscode.ExtensionContext) {
   let fileViewDocument: vscode.TextDocument | null = initialEditor && isSupportedActiveDocument(initialEditor.document)
     ? initialEditor.document
     : null;
+  // Archivo y lenguaje de la vista cuando se fijo: al cambiar el lenguaje (un .tpp marcado como
+  // C++) el documento es el mismo objeto, asi que hay que comparar con lo guardado.
+  let fileViewIdentity = fileViewDocument ? `${fileViewDocument.uri.toString()}|${fileViewDocument.languageId}` : '';
   let dependencyState: { uriString: string; loading: boolean; result: ActiveFileDependencies | null } | null = null;
   let dependencyTimer: ReturnType<typeof setTimeout> | null = null;
   let dependencyRun = 0;
   const dependencyProbes = new DependencyProbeCache();
-  // El indice que usa el cuadro. Solo se pide uno nuevo si cambio otro archivo (o se creo o
-  // borro uno): guardar el archivo que se esta viendo no cambia quien lo usa, y con autoguardado
-  // cada segundo el indice (90 lecturas) se rearmaba sin parar (revision del 25/10/2026).
+  const dependencyBuildFiles = new BuildFileCache();
+  // El indice que usa el cuadro. Se pide uno nuevo si cambio otro archivo: uno guardado que no
+  // es el que se ve, o uno que se guardo mientras se veia y ahora se ve otro (el estudiante
+  // agrega #include "figura.h" en main.cpp y vuelve a figura.h: «La usan» tiene que mostrarlo).
+  // Guardar el archivo que se esta viendo no lo pide: con autoguardado cada segundo el indice
+  // (90 lecturas) se rearmaba sin parar (revisiones del 25/10/2026).
   let dependencyIndex: WorkspaceProjectIndex | null = null;
   let dependencyIndexDirty = 1;
+  const savedSinceDependencyIndex = new Set<string>();
   const markDependencyIndexDirty = () => {
     dependencyIndexDirty += 1;
   };
@@ -461,9 +468,13 @@ export async function activate(context: vscode.ExtensionContext) {
       refreshFileView();
     }
     try {
+      if ([...savedSinceDependencyIndex].some((saved) => saved !== uriString)) {
+        markDependencyIndexDirty();
+      }
       let index = dependencyIndex;
       if (dependencyIndexDirty || !index) {
         const dirtyAt = dependencyIndexDirty;
+        savedSinceDependencyIndex.clear();
         index = await getWorkspaceProjectIndex({ allowStale: true });
         if (dependencyIndexDirty === dirtyAt) {
           dependencyIndex = index;
@@ -474,10 +485,11 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
       }
       const previous = dependencyState?.result;
-      if (previous && previous.uriString === uriString && previous.version === document.version && previous.indexKey === indexKeyOf(index)) {
+      if (previous && previous.uriString === uriString && previous.version === document.version
+        && previous.languageId === document.languageId && previous.indexKey === indexKeyOf(index)) {
         dependencyState = { uriString, loading: false, result: previous };
       } else {
-        const result = await computeActiveFileDependencies(document, index, dependencyProbes);
+        const result = await computeActiveFileDependencies(document, index, dependencyProbes, dependencyBuildFiles);
         if (run !== dependencyRun) {
           return;
         }
@@ -511,9 +523,10 @@ export async function activate(context: vscode.ExtensionContext) {
   /** El archivo de la vista cambio (otra pestaña, o se cerro el que se mostraba). */
   const setFileViewDocument = (document: vscode.TextDocument | null) => {
     // Otro archivo, o el mismo con otro lenguaje (un .tpp que se marca como C++).
-    const identity = (item: vscode.TextDocument | null) => (item ? `${item.uri.toString()}|${item.languageId}` : '');
-    const changed = identity(fileViewDocument) !== identity(document);
+    const identity = document ? `${document.uri.toString()}|${document.languageId}` : '';
+    const changed = identity !== fileViewIdentity;
     fileViewDocument = document;
+    fileViewIdentity = identity;
     if (changed) {
       refreshFileView();
       scheduleDependencyRefresh(120);
@@ -529,18 +542,19 @@ export async function activate(context: vscode.ExtensionContext) {
 
   /**
    * Clic en el cuadro «Dependencias»: abre el archivo del proyecto o va a la linea del import.
-   * El clic trae el archivo y la version del cuadro que se vio: si el cuadro ya cambio, se busca
-   * el mismo elemento por su nombre (o no se hace nada) en vez de abrir otro.
+   * El clic trae el archivo y la version del cuadro que se vio, y el id del elemento: si el
+   * cuadro ya cambio (otro archivo se guardo y «La usan» se reordeno), se busca el mismo elemento
+   * por su id (o no se hace nada) en vez de abrir otro.
    */
-  const openDependency = async (group: FileViewDependencyGroup, index: number, key: string, label: string) => {
+  const openDependency = async (group: FileViewDependencyGroup, index: number, key: string, id: string) => {
     const result = dependencyState?.result;
     if (!result || (key && key !== `${result.uriString}|${result.version}`)) {
       return;
     }
     const list = result.deps[group];
-    const item = list[index] && (!label || list[index].label === label)
+    const item = list[index] && (!id || dependencyItemId(list[index]) === id)
       ? list[index]
-      : list.find((entry) => entry.label === label);
+      : list.find((entry) => dependencyItemId(entry) === id);
     if (!item) {
       return;
     }
@@ -1689,8 +1703,8 @@ export async function activate(context: vscode.ExtensionContext) {
       void requestFileSummary(false);
       scheduleDependencyRefresh(0);
     },
-    openDependency: (group, index, key, label) => {
-      void openDependency(group, index, key, label);
+    openDependency: (group, index, key, id) => {
+      void openDependency(group, index, key, id);
     },
     openSource: (index) => {
       const source = activeSuggestionModel?.ragSources[index];
@@ -2219,7 +2233,9 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidSaveTextDocument((document) => {
       clearWorkspaceProjectIndexCache();
       // Otro archivo pudo empezar (o dejar) de incluir al de la vista: «La usan» cambia. Guardar
-      // el mismo archivo de la vista no cambia quien lo usa (y lo suyo se lee del editor).
+      // el mismo archivo de la vista no cambia quien lo usa (y lo suyo se lee del editor); queda
+      // anotado para cuando se vea otro archivo.
+      savedSinceDependencyIndex.add(document.uri.toString());
       if (document !== fileViewDocument) {
         markDependencyIndexDirty();
         scheduleDependencyRefresh(600);
@@ -2231,7 +2247,7 @@ export async function activate(context: vscode.ExtensionContext) {
       const watcher = vscode.workspace.createFileSystemWatcher('**/*', false, true, false);
       // Se mira la ruta dentro del proyecto: un proyecto guardado en una carpeta llamada build u
       // out ignoraba todo (revision del 25/10/2026).
-      const ignored = /(?:^|\/)(?:node_modules|\.git|dist|build|out|coverage|\.next|target|bin|obj|vendor|__pycache__|\.vscode-test|\.venv|venv|env|site-packages|\.tox|\.gradle|\.mypy_cache|\.pytest_cache)\//;
+      const ignored = /(?:^|\/)(?:node_modules|\.git|dist|build|out|coverage|\.next|target|bin|obj|vendor|__pycache__|\.vscode-test|\.venv|venv|site-packages|\.tox|\.gradle|\.mypy_cache|\.pytest_cache)\//;
       const onFilesChanged = (uri: vscode.Uri) => {
         if (ignored.test(workspaceRelativePath(uri))) {
           return;
@@ -2239,6 +2255,7 @@ export async function activate(context: vscode.ExtensionContext) {
         clearWorkspaceProjectIndexCache();
         markDependencyIndexDirty();
         dependencyProbes.clear();
+        dependencyBuildFiles.clear();
         scheduleDependencyRefresh(800);
       };
       watcher.onDidCreate(onFilesChanged);
@@ -2250,6 +2267,7 @@ export async function activate(context: vscode.ExtensionContext) {
       clearBackendSuggestionCaches();
       markDependencyIndexDirty();
       dependencyProbes.clear();
+      dependencyBuildFiles.clear();
       scheduleCursorIdleSuggestionRefresh();
       scheduleDependencyRefresh(500);
     }),
@@ -2267,6 +2285,7 @@ export async function activate(context: vscode.ExtensionContext) {
         clearWorkspaceProjectIndexCache();
         markDependencyIndexDirty();
         dependencyProbes.clear();
+        dependencyBuildFiles.clear();
         scheduleDependencyRefresh(500);
       }
       if (event.affectsConfiguration('adaceen.triggers')) {

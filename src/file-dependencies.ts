@@ -86,6 +86,12 @@ export type DependencyInput = {
   files: DependencyIndexFile[];
   /** Rutas que existen aunque no esten en el indice (lo que encontro la busqueda en el disco). */
   extraPaths?: string[];
+  /**
+   * Archivos de compilacion o de proyecto de la carpeta (CMakeLists.txt, Makefile, pom.xml,
+   * build.gradle, pyproject.toml...): el indice no los tiene (no son codigo) y dicen donde
+   * empieza cada proyecto.
+   */
+  buildFiles?: string[];
 };
 
 /** Lo que se lee de un archivo largo: los imports van arriba. */
@@ -179,6 +185,50 @@ const C_HEADER_WARNINGS: Record<string, string> = {
   'windows.h': 'Solo existe en Windows: en Linux no compila.',
   'iostream.h': 'Ya no existe: usa #include <iostream>.',
 };
+
+/**
+ * Bibliotecas de C/C++ instaladas que se incluyen tambien con comillas (`#include "gtest/gtest.h"`
+ * como en los ejemplos de GoogleTest, `#include "json.hpp"` con -I/usr/include/nlohmann en la VM
+ * de editores): no son archivos que falten en el proyecto.
+ */
+const C_LIBRARY_HEADERS: Record<string, string> = {
+  'json.hpp': 'JSON (nlohmann/json)',
+  'catch.hpp': 'pruebas (Catch2)',
+  'doctest.h': 'pruebas (doctest)',
+  'sqlite3.h': 'base de datos SQLite',
+  'raylib.h': 'juegos y gráficos (raylib)',
+  'sdl.h': 'juegos y gráficos (SDL)',
+  'curl.h': 'peticiones HTTP (libcurl)',
+};
+const C_LIBRARY_PREFIXES: Array<[string, string]> = [
+  ['gtest/', 'pruebas (GoogleTest)'],
+  ['gmock/', 'objetos simulados para pruebas (GoogleMock)'],
+  ['nlohmann/', 'JSON (nlohmann/json)'],
+  ['catch2/', 'pruebas (Catch2)'],
+  ['doctest/', 'pruebas (doctest)'],
+  ['curl/', 'peticiones HTTP (libcurl)'],
+  ['boost/', 'biblioteca Boost'],
+  ['sfml/', 'gráficos y juegos (SFML)'],
+  ['sdl2/', 'juegos y gráficos (SDL)'],
+  ['gl/', 'gráficos (OpenGL)'],
+  ['glfw/', 'ventanas para OpenGL (GLFW)'],
+  ['glm/', 'matemática para gráficos (GLM)'],
+  ['eigen3/', 'álgebra lineal (Eigen)'],
+  ['eigen/', 'álgebra lineal (Eigen)'],
+  ['fmt/', 'formato de texto (fmt)'],
+  ['spdlog/', 'mensajes de registro (spdlog)'],
+  ['opencv2/', 'visión por computador (OpenCV)'],
+  ['mysql/', 'base de datos MySQL'],
+];
+
+function cLibraryDescription(spec: string) {
+  const lower = spec.toLowerCase();
+  if (C_LIBRARY_HEADERS[lower]) {
+    return C_LIBRARY_HEADERS[lower];
+  }
+  const prefix = C_LIBRARY_PREFIXES.find(([start]) => lower.startsWith(start));
+  return prefix ? prefix[1] : '';
+}
 
 /** Modulos de la biblioteca estandar de Python (nombre de primer nivel). */
 const PY_STDLIB = new Set([
@@ -422,8 +472,12 @@ export function dependencyFamily(language: string, filePath = ''): DependencyFam
 // ---------------------------------------------------------------------------------------------
 // Texto sin comentarios (y, si se pide, sin el contenido de las cadenas)
 
-/** Antes de un `/` que abre una expresion regular de JS (no una division). */
-const JS_REGEX_PREVIOUS = /[(,=:[!&|?{};+\-*%<>~^]/;
+/**
+ * Antes de un `/` que abre una expresion regular de JS (no una division). Sin `)`, `]` ni `}`:
+ * despues de ellos suele ser una division (`(a + b) / 2`, `${x}/${y}` en una plantilla). Sin `<`:
+ * en JSX `</p>` cierra una etiqueta, no abre una expresion regular (se comia el resto de la linea).
+ */
+const JS_REGEX_PREVIOUS = /[(,=:[!&|?{;+\-*%>~^]/;
 const JS_REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'void', 'yield', 'await', 'throw', 'delete', 'new', 'instanceof']);
 const C_RAW_PREFIXES = new Set(['R', 'u8R', 'uR', 'UR', 'LR']);
 
@@ -432,7 +486,8 @@ const C_RAW_PREFIXES = new Set(['R', 'u8R', 'uR', 'UR', 'LR']);
  * linea no cambian). Con `maskStrings`, tambien el contenido de las cadenas. Siempre se borran
  * las cadenas de triple comilla de Python (un docstring no declara imports), las cadenas crudas
  * de C++ (`R"(...)"`) y el contenido de las expresiones regulares de JS (una comilla o un `//`
- * adentro confundian lo que seguia; revision independiente del 25/10/2026).
+ * adentro confundian lo que seguia). En las plantillas de JS el codigo de `${ ... }` sigue
+ * siendo codigo, tambien con plantillas anidadas (revisiones independientes del 25/10/2026).
  */
 export function maskSource(text: string, family: DependencyFamily, maskStrings: boolean) {
   const source = String(text || '');
@@ -445,12 +500,47 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
   const hashComments = family === 'python' || family === 'ruby';
   let i = 0;
   let lineStart = true;
-  // JS: el ultimo caracter con algo y la ultima palabra, para distinguir /regex/ de una division.
+  // JS: el ultimo caracter con algo y la ultima palabra (sin pegar palabras de lineas distintas),
+  // para distinguir /regex/ de una division.
   let previous = '';
   let previousWord = '';
+  let spaceSincePrevious = false;
+  // JS: plantillas abiertas y, dentro de ellas, expresiones ${ } con su profundidad de llaves.
+  const templates: Array<{ kind: 'template' } | { kind: 'expression'; depth: number }> = [];
+  const top = () => templates[templates.length - 1];
   while (i < n) {
     const ch = source[i];
     const next = source[i + 1];
+    const context = family === 'js' ? top() : undefined;
+    if (context?.kind === 'template') {
+      // Texto de una plantilla: hasta la comilla invertida o el proximo ${.
+      if (ch === '\\' && i + 1 < n) {
+        out.push(maskStrings ? blank(ch) : ch, maskStrings ? blank(source[i + 1]) : source[i + 1]);
+        i += 2;
+        continue;
+      }
+      if (ch === '`') {
+        out.push(ch);
+        templates.pop();
+        previous = '`';
+        previousWord = '';
+        spaceSincePrevious = false;
+        i += 1;
+        continue;
+      }
+      if (ch === '$' && next === '{') {
+        out.push('$', '{');
+        templates.push({ kind: 'expression', depth: 0 });
+        previous = '{';
+        previousWord = '';
+        spaceSincePrevious = false;
+        i += 2;
+        continue;
+      }
+      out.push(maskStrings ? blank(ch) : ch);
+      i += 1;
+      continue;
+    }
     if (family === 'ruby' && lineStart && source.startsWith('=begin', i)) {
       const end = source.indexOf('\n=end', i);
       const stop = end < 0 ? n : end + 5;
@@ -521,43 +611,66 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
       i += 1;
       continue;
     }
-    if (family === 'js' && ch === '/' && (previous === '' || JS_REGEX_PREVIOUS.test(previous) || JS_REGEX_KEYWORDS.has(previousWord))) {
-      // Expresion regular: su contenido se borra (una comilla o un // adentro no son codigo).
-      out.push('/');
-      i += 1;
-      let inClass = false;
-      while (i < n && source[i] !== '\n') {
-        const current = source[i];
-        if (current === '\\' && i + 1 < n && source[i + 1] !== '\n') {
-          out.push(' ', ' ');
-          i += 2;
-          continue;
-        }
-        if (current === '/' && !inClass) {
-          break;
-        }
-        if (current === '[') {
-          inClass = true;
-        } else if (current === ']') {
-          inClass = false;
-        }
-        out.push(' ');
+    if (family === 'js') {
+      if (ch === '`') {
+        out.push(ch);
+        templates.push({ kind: 'template' });
         i += 1;
+        lineStart = false;
+        continue;
       }
-      if (i < n && source[i] === '/') {
+      if (context?.kind === 'expression') {
+        if (ch === '{') {
+          context.depth += 1;
+        } else if (ch === '}') {
+          if (context.depth === 0) {
+            out.push(ch); // fin del ${ }: vuelve el texto de la plantilla
+            templates.pop();
+            i += 1;
+            continue;
+          }
+          context.depth -= 1;
+        }
+      }
+      if (ch === '/' && (previous === '' || JS_REGEX_PREVIOUS.test(previous) || JS_REGEX_KEYWORDS.has(previousWord))) {
+        // Expresion regular: su contenido se borra (una comilla o un // adentro no son codigo).
         out.push('/');
         i += 1;
+        let inClass = false;
+        while (i < n && source[i] !== '\n') {
+          const current = source[i];
+          if (current === '\\' && i + 1 < n && source[i + 1] !== '\n') {
+            out.push(' ', ' ');
+            i += 2;
+            continue;
+          }
+          if (current === '/' && !inClass) {
+            break;
+          }
+          if (current === '[') {
+            inClass = true;
+          } else if (current === ']') {
+            inClass = false;
+          }
+          out.push(' ');
+          i += 1;
+        }
+        if (i < n && source[i] === '/') {
+          out.push('/');
+          i += 1;
+        }
+        previous = 'a';
+        previousWord = '';
+        spaceSincePrevious = false;
+        lineStart = false;
+        continue;
       }
-      previous = 'a';
-      previousWord = '';
-      lineStart = false;
-      continue;
     }
-    if (ch === '"' || ch === "'" || (ch === '`' && family === 'js')) {
+    if (ch === '"' || ch === "'") {
       out.push(ch);
       i += 1;
       while (i < n && source[i] !== ch) {
-        if (source[i] === '\n' && ch !== '`') {
+        if (source[i] === '\n') {
           break; // cadena sin cerrar: termina en el salto de linea
         }
         if (source[i] === '\\' && i + 1 < n && source[i + 1] !== '\n') {
@@ -574,14 +687,19 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
       }
       previous = ch;
       previousWord = '';
+      spaceSincePrevious = false;
       lineStart = false;
       continue;
     }
     out.push(ch);
     lineStart = ch === '\n';
-    if (!/\s/.test(ch)) {
-      previousWord = /[\w$]/.test(ch) ? (/[\w$]/.test(previous) ? previousWord + ch : ch) : '';
+    if (/\s/.test(ch)) {
+      spaceSincePrevious = true;
+    } else {
+      const wordChar = /[\w$]/.test(ch);
+      previousWord = wordChar ? (/[\w$]/.test(previous) && !spaceSincePrevious ? previousWord + ch : ch) : '';
       previous = ch;
+      spaceSincePrevious = false;
     }
     i += 1;
   }
@@ -739,12 +857,12 @@ function parseRuby(lines: string[]): ParsedImport[] {
   return out;
 }
 
-// Las llaves con tope de largo: un archivo con miles de `import {` sin cerrar tardaba segundos.
-const JS_CLAUSE = '(?:type\\s+)?(?:[\\w$]+(?:\\s*,\\s*)?)?(?:\\*(?:\\s*as\\s+[\\w$]+)?|\\{[^}]{0,1500}\\})?';
-const JS_IMPORT_FROM = new RegExp(`(?:^|[;\\n}])[ \\t]*(?:import|export)\\s+(${JS_CLAUSE})\\s*from\\s*(['"])([^'"\\n]*)\\2`, 'gd');
-const JS_IMPORT_BARE = /(?:^|[;\n}])[ \t]*import\s*(['"])([^'"\n]*)\1/gd;
-const JS_REQUIRE = /(?:(?:const|let|var)\s+(\{[^}]{0,1500}\}|[\w$]+)\s*=\s*)?(?<![\w$.])require\s*\(\s*(['"])([^'"\n]*)\2\s*\)/gd;
+/** Comienzo de una sentencia import o export (al inicio, o despues de ; } o un salto de linea). */
+const JS_STATEMENT_START = /(?:^|[;\n}])[ \t]*(import|export)\b/g;
+const JS_REQUIRE = /(?<![\w$.])require\s*\(\s*(['"])([^'"\n]*)\1\s*\)/gd;
 const JS_DYNAMIC = /(?<![\w$.])import\s*\(\s*(['"])([^'"\n]*)\1\s*\)/gd;
+/** `const { a, b } = ` o `const x = ` justo antes de un require (se mira un trozo corto). */
+const JS_REQUIRE_TARGET = /(?:const|let|var)\s+(\{[^}]*\}|[\w$]+)\s*=\s*$/;
 
 function jsClauseNames(clause: string) {
   const text = clause.trim().replace(/^type\s+/, '');
@@ -766,36 +884,113 @@ function jsClauseNames(clause: string) {
 }
 
 /**
- * JS/TS: las palabras (import, require, from) se buscan en el texto sin cadenas ni plantillas
- * (un `require('x')` dentro de un texto no cuenta) y la ruta se lee del original en la misma
- * posicion.
+ * JS/TS: las sentencias se leen en el texto sin cadenas ni plantillas (un `require('x')` dentro
+ * de un texto no cuenta) y la ruta se toma del original en la misma posicion. Las llaves de un
+ * import se saltan con el indice de la proxima `}` (lineal: antes, miles de `import {` sin
+ * cerrar tardaban segundos, y un tope de largo perdia listas largas de export).
  */
 function parseJs(masked: string, original: string): ParsedImport[] {
   const starts = lineStartsOf(masked);
   const found: Array<ParsedImport & { index: number }> = [];
-  const add = (match: RegExpMatchArray, group: number, names: string[]) => {
-    const range = match.indices?.[group];
-    if (!range) {
-      return;
-    }
-    const specifier = original.slice(range[0], range[1]).trim();
+  const add = (from: number, to: number, names: string[]) => {
+    const specifier = original.slice(from, to).trim();
     if (!specifier) {
       return;
     }
     const kind: ImportKind = /^(?:\.{1,2}(?:[/\\]|$)|\/)/.test(specifier) ? 'relative' : 'module';
-    found.push({ specifier, line: lineOfIndex(starts, range[0]), kind, names, index: range[0] });
+    found.push({ specifier, line: lineOfIndex(starts, from), kind, names, index: from });
   };
-  for (const match of masked.matchAll(JS_IMPORT_FROM)) {
-    add(match, 3, jsClauseNames(match[1]));
+  const nextClose = new Int32Array(masked.length + 1).fill(-1);
+  for (let index = masked.length - 1, close = -1; index >= 0; index -= 1) {
+    if (masked[index] === '}') {
+      close = index;
+    }
+    nextClose[index] = close;
   }
-  for (const match of masked.matchAll(JS_IMPORT_BARE)) {
-    add(match, 2, []);
+  const isSpace = (ch: string | undefined) => ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+  const quotedAt = (at: number) => {
+    const quote = masked[at];
+    if (quote !== '"' && quote !== "'") {
+      return null;
+    }
+    const end = masked.indexOf(quote, at + 1);
+    return end > at && !masked.slice(at + 1, end).includes('\n') ? { from: at + 1, to: end } : null;
+  };
+  for (const match of masked.matchAll(JS_STATEMENT_START)) {
+    let k = (match.index || 0) + match[0].length;
+    const skip = () => {
+      while (k < masked.length && isSpace(masked[k])) {
+        k += 1;
+      }
+    };
+    const word = () => {
+      const found = /^[\w$]+/.exec(masked.slice(k, k + 200));
+      return found ? found[0] : '';
+    };
+    skip();
+    if (match[1] === 'import') {
+      const bare = quotedAt(k); // import './estilos.css'
+      if (bare) {
+        add(bare.from, bare.to, []);
+        continue;
+      }
+    }
+    const clauseStart = k;
+    if (word() === 'type' && isSpace(masked[k + 4])) {
+      k += 4;
+      skip();
+    }
+    const first = word();
+    if (first && first !== 'from') {
+      k += first.length;
+      skip();
+      if (masked[k] === ',') {
+        k += 1;
+        skip();
+      }
+    }
+    if (masked[k] === '*') {
+      k += 1;
+      skip();
+      if (word() === 'as') {
+        k += 2;
+        skip();
+        k += word().length;
+        skip();
+      }
+    } else if (masked[k] === '{') {
+      const close = nextClose[k];
+      if (close < 0) {
+        continue;
+      }
+      k = close + 1;
+      skip();
+    }
+    const clauseEnd = k;
+    if (word() !== 'from') {
+      continue;
+    }
+    k += 4;
+    skip();
+    const target = quotedAt(k);
+    if (target) {
+      add(target.from, target.to, jsClauseNames(masked.slice(clauseStart, clauseEnd)));
+    }
   }
   for (const match of masked.matchAll(JS_REQUIRE)) {
-    add(match, 3, match[1] ? jsClauseNames(match[1]) : []);
+    const range = match.indices?.[2];
+    if (!range) {
+      continue;
+    }
+    const start = match.index || 0;
+    const declaration = JS_REQUIRE_TARGET.exec(masked.slice(Math.max(0, start - 300), start));
+    add(range[0], range[1], declaration ? jsClauseNames(declaration[1]) : []);
   }
   for (const match of masked.matchAll(JS_DYNAMIC)) {
-    add(match, 2, []);
+    const range = match.indices?.[2];
+    if (range) {
+      add(range[0], range[1], []);
+    }
   }
   return found.sort((left, right) => left.index - right.index).map(({ index: _index, ...rest }) => rest);
 }
@@ -984,6 +1179,11 @@ type Found = { path: string; caseMismatch: boolean };
 /** Carpetas de paquetes instalados: lo que hay ahi nunca es «de tu proyecto». */
 const THIRD_PARTY_SEGMENT = /(?:^|\/)(?:site-packages|dist-packages|node_modules|__pycache__|\.git|\.venv|venv)\//;
 
+/** ¿La ruta es de un paquete instalado (un .py de .venv abierto con F12)? Se trata como de afuera. */
+export function isThirdPartyPath(path: string) {
+  return THIRD_PARTY_SEGMENT.test(normalizePath(path));
+}
+
 /** Ruta de `fromDir` a `target` ("../include/figura.h"). */
 function relativeFrom(fromDir: string, target: string) {
   const from = normalizePath(fromDir).split('/').filter(Boolean);
@@ -1017,8 +1217,10 @@ class ProjectFiles {
   readonly namespaces = new Map<string, string[]>();
   /** Java: paquete -> archivos. */
   readonly javaPackages = new Map<string, string[]>();
+  /** Carpetas con un archivo de compilacion de C/C++ (CMakeLists.txt, Makefile...). */
+  readonly cProjectDirs = new Set<string>();
 
-  constructor(files: DependencyIndexFile[], extraPaths: string[]) {
+  constructor(files: DependencyIndexFile[], extraPaths: string[], buildFiles: string[] = []) {
     const add = (raw: string) => {
       const path = normalizePath(raw);
       if (!path || this.exact.has(path) || THIRD_PARTY_SEGMENT.test(path)) {
@@ -1042,7 +1244,13 @@ class ProjectFiles {
       }
     }
     extraPaths.forEach(add);
-    this.hasJavaBuild = this.paths.some((path) => /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?)$/i.test(path));
+    const known = [...this.paths, ...buildFiles.map(normalizePath)];
+    this.hasJavaBuild = known.some((path) => /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?)$/i.test(path));
+    for (const path of known) {
+      if (/(?:^|\/)(?:CMakeLists\.txt|[Mm]akefile|GNUmakefile|meson\.build|build\.ninja|compile_commands\.json|[^/]+\.vcxproj)$/.test(path)) {
+        this.cProjectDirs.add(dirnameOf(path));
+      }
+    }
     for (const [path, file] of this.entries) {
       // Del indice (0.0.36) o, si no viene, de la estructura ("3: namespace Taller.Modelo {").
       const declared = file.namespaces
@@ -1140,6 +1348,20 @@ class ProjectFiles {
   elsewhere(name: string, nearDir: string, except: string[] = []) {
     const list = (this.byBase.get(basenameOf(name).toLowerCase()) || []).filter((path) => !except.includes(path));
     return list.length ? this.nearest(list, nearDir) : '';
+  }
+
+  /** Archivos dentro de `root` (o de todo el proyecto si root es '') cuya ruta termina en `suffix`. */
+  under(root: string, suffix: string, nearDir: string): Found | null {
+    const clean = normalizePath(suffix);
+    const prefix = root ? `${normalizePath(root)}/` : '';
+    const list = (this.byBase.get(basenameOf(clean).toLowerCase()) || [])
+      .filter((path) => (!prefix || path.startsWith(prefix)) && (path === clean || path.endsWith(`/${clean}`)));
+    return list.length ? { path: this.nearest(list, nearDir), caseMismatch: false } : null;
+  }
+
+  /** La carpeta de arriba mas cercana con un archivo de compilacion de C/C++ ('' si es la raiz; null si no hay). */
+  cProjectRoot(fromDir: string) {
+    return ancestorsOf(fromDir).find((dir) => this.cProjectDirs.has(dir)) ?? null;
   }
 
   /** «¿Quisiste decir ...?»: el archivo de nombre mas parecido (misma extension o mismo nombre). */
@@ -1242,7 +1464,7 @@ function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, op
     if (own) {
       return [local(spec, own.found, `Es tuyo: inclúyelo con comillas, #include "${spec}".`)];
     }
-    return [{ label: spec, type: 'library', description: 'biblioteca del sistema o externa' }];
+    return [{ label: spec, type: 'library', description: cLibraryDescription(spec) || 'biblioteca del sistema o externa' }];
   }
   if (relative === null) {
     return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
@@ -1255,12 +1477,38 @@ function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, op
     : findCInclude(spec, fromDir, project);
   if (own) {
     const source = C_SOURCE_FILES.exec(own.found.path);
+    // Con CMakeLists.txt o Makefile, sus -I lo encuentran: el aviso de la carpeta de arriba sobra.
+    const ancestorWarning = own.ancestor && project.cProjectRoot(fromDir) === null
+      ? `Está en una carpeta de arriba: escribe #include "${relativeFrom(fromDir, own.found.path)}" o compila con -I.`
+      : undefined;
     return [local(spec, own.found, backslashWarning
-      || (own.ancestor ? `Está en una carpeta de arriba: escribe #include "${relativeFrom(fromDir, own.found.path)}" o compila con -I.` : undefined)
+      || ancestorWarning
       || (source ? `Incluir un ${source[0]} suele dar «multiple definition»: incluye su .h.` : undefined))];
   }
   if (known) {
     return [{ label: spec, type: 'library', description: known, warning: warning || caseWarning }];
+  }
+  if (!explicitRelative) {
+    // En el mismo proyecto pero en otra carpeta: con un CMakeLists.txt o un Makefile, sus -I lo
+    // encuentran (headers/, src/, lib/...); sin ellos, solo compila agregando -I. Lo que esta en
+    // la carpeta de otro ejercicio (taller1 desde taller2) sigue siendo «No encontrado».
+    const projectRoot = project.cProjectRoot(fromDir);
+    const exerciseRoot = projectRoot ?? (fromDir.split('/').filter(Boolean)[0] || '');
+    const inProject = project.under(exerciseRoot, spec, fromDir);
+    if (inProject) {
+      // La carpeta que hay que pasar con -I: la ruta del archivo sin lo que dice el #include.
+      const includeDir = inProject.path.slice(0, inProject.path.length - spec.length).replace(/\/$/, '');
+      const flagDir = exerciseRoot && includeDir.startsWith(`${exerciseRoot}/`)
+        ? includeDir.slice(exerciseRoot.length + 1)
+        : includeDir === exerciseRoot ? '.' : includeDir;
+      return [local(spec, inProject, projectRoot !== null
+        ? undefined
+        : `Está en «${includeDir || '.'}»: compila con -I${flagDir || '.'} o escribe #include "${relativeFrom(fromDir, inProject.path)}".`)];
+    }
+  }
+  const library = cLibraryDescription(spec);
+  if (library) {
+    return [{ label: spec, type: 'library', description: library }];
   }
   // En otra carpeta: el compilador no lo encuentra, pero el estudiante si sabe donde esta.
   const other = project.elsewhere(spec, fromDir);
@@ -1346,7 +1594,9 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
     }];
   }
   const asPath = spec.replace(/\./g, '/');
-  const roots = [...new Set([fromDir, '', 'src'])];
+  // Junto al archivo y en cada carpeta de arriba (python -m desde la carpeta del proyecto, pytest,
+  // Django en backend/), tambien en su src/. Lo de una carpeta hermana no se importa.
+  const roots = [...new Set(ancestorsOf(fromDir).flatMap((dir) => [dir, joinPath(dir, 'src') || 'src']))];
   const found = project.findFirst(roots.flatMap((root) => [joinPath(root, `${asPath}.py`), joinPath(root, `${asPath}/__init__.py`)]));
   if (found) {
     // random.py, turtle.py o math.py del estudiante tapan el modulo de Python del mismo nombre.
@@ -1496,8 +1746,44 @@ function findJsFile(base: string, project: ProjectFiles): Found | null {
   }
   return project.findFirst([
     ...JS_SCRIPT_EXTENSIONS.map((extension) => `${base}${extension}`),
+    `${base}.d.ts`,
     ...JS_SCRIPT_EXTENSIONS.slice(0, 8).map((extension) => `${base}/index${extension}`),
   ]) || direct;
+}
+
+/** './App' con App.vue: webpack (Vue CLI) lo encuentra; Vite pide la extension. */
+function findComponentFile(base: string, project: ProjectFiles): Found | null {
+  return /\.[^/.]+$/.test(base) ? null : project.findFirst([`${base}.vue`, `${base}.svelte`]);
+}
+
+/**
+ * Organizaciones de npm conocidas: '@vue/test-utils' es un paquete aunque el proyecto tenga una
+ * carpeta vue/ (un alias como '@components/Boton' no esta en esta lista).
+ */
+const NPM_SCOPES = new Set(['@types', '@angular', '@vue', '@babel', '@mui', '@testing-library', '@reduxjs', '@tanstack', '@nestjs', '@prisma', '@firebase', '@supabase', '@aws-sdk', '@google-cloud', '@emotion', '@fortawesome', '@radix-ui', '@sveltejs', '@vitejs', '@playwright', '@jest', '@storybook', '@react-navigation', '@expo', '@ionic', '@capacitor', '@apollo', '@headlessui', '@heroicons', '@typescript-eslint', '@eslint']);
+
+/**
+ * Un alias de tsconfig o de Vite ('@components/Boton' -> src/components/Boton.tsx): un archivo
+ * del proyecto cuya ruta termina igual (con las mayusculas iguales: una coincidencia floja no basta).
+ */
+function findJsAliasFile(rest: string, nearDir: string, project: ProjectFiles): Found | null {
+  const hasExtension = /\.[^/.]+$/.test(basenameOf(rest));
+  const candidates = hasExtension
+    ? [rest]
+    : [
+      ...JS_SCRIPT_EXTENSIONS.map((extension) => `${rest}${extension}`),
+      `${rest}.d.ts`,
+      `${rest}.vue`,
+      `${rest}.svelte`,
+      ...JS_SCRIPT_EXTENSIONS.slice(0, 8).map((extension) => `${rest}/index${extension}`),
+    ];
+  for (const candidate of candidates) {
+    const found = project.findSuffix(candidate, nearDir);
+    if (found && !found.caseMismatch) {
+      return found;
+    }
+  }
+  return null;
 }
 
 function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
@@ -1509,9 +1795,23 @@ function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, o
   const fromDir = dirnameOf(fromPath);
   const names = imp.names;
   const isRelative = /^(?:\.{1,2}(?:\/|$)|\/)/.test(spec);
-  if (isRelative || spec.startsWith('@/')) {
-    const base = spec.startsWith('@/')
-      ? joinPath('src', spec.slice(2))
+  const appAlias = spec.startsWith('@/') || spec.startsWith('~/') ? spec.slice(0, 2) : '';
+  if (isRelative || appAlias) {
+    // @/ y ~/ son la carpeta de la aplicacion: la src/ (o app/) de arriba mas cercana (la app puede
+    // no estar en la raiz), o la carpeta de la app misma (Nuxt).
+    const rest = spec.slice(2);
+    const exists = (dir: string) => {
+      const candidate = joinPath(dir, rest) || '';
+      return !!(findJsFile(candidate, project) || findComponentFile(candidate, project));
+    };
+    const aliasRoot = appAlias
+      ? [
+        ...ancestorsOf(fromDir).flatMap((dir) => [joinPath(dir, 'src') || 'src', joinPath(dir, 'app') || 'app']),
+        ...ancestorsOf(fromDir).reverse(),
+      ].find(exists) ?? 'src'
+      : '';
+    const base = appAlias
+      ? joinPath(aliasRoot, rest)
       : spec.startsWith('/') ? joinPath('', spec.slice(1)) : joinPath(fromDir, spec);
     if (base === null) {
       return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
@@ -1520,12 +1820,16 @@ function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, o
     if (found) {
       return [{ ...local(spec, found, backslashWarning), names }];
     }
+    const component = findComponentFile(base, project);
+    if (component) {
+      return [{ ...local(spec, component, `Con Vite escribe la extensión: '${spec}${component.path.slice(component.path.lastIndexOf('.'))}'.`), names }];
+    }
     const name = basenameOf(base);
     const hasExtension = /\.[^.]+$/.test(name);
     return [{
       label: spec,
       type: 'missing',
-      description: spec.startsWith('@/') ? 'El alias @/ suele apuntar a src/ y ahí no está.' : 'Revisa el nombre y la carpeta.',
+      description: appAlias ? `El alias ${appAlias} suele apuntar a src/ y ahí no está.` : 'Revisa el nombre y la carpeta.',
       // Sin extension escrita es un modulo de codigo: no se sugiere util.css para './util'.
       hint: options.hints ? project.suggest(hasExtension ? name : `${name}.js`, hasExtension ? JS_FILES : JS_SCRIPT_FILES) : '',
       probe: name && !/[*?[\]{}]/.test(name) ? (hasExtension ? name : `${name}.*`) : undefined,
@@ -1536,6 +1840,13 @@ function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, o
   const pkg = bare.startsWith('@') ? bare.split('/').slice(0, 2).join('/') : bare.split('/')[0];
   if (spec.startsWith('node:') || NODE_BUILTINS[bare] || NODE_BUILTINS[pkg]) {
     return [{ label: spec, type: 'library', description: `${NODE_BUILTINS[bare] || NODE_BUILTINS[pkg] || 'módulo'} (Node.js)` }];
+  }
+  // '@components/Boton' con un archivo components/Boton.tsx en el proyecto: un alias, no npm.
+  if (/^@[\w.-]+\/./.test(spec) && !NPM_KNOWN[pkg] && !NPM_SCOPES.has(pkg.split('/')[0])) {
+    const aliased = findJsAliasFile(spec.slice(1), fromDir, project);
+    if (aliased) {
+      return [{ ...local(spec, aliased), names }];
+    }
   }
   return [{ label: spec, type: 'library', description: NPM_KNOWN[pkg] || 'paquete de npm' }];
 }
@@ -1566,9 +1877,14 @@ function resolveRuby(imp: ParsedImport, fromPath: string, project: ProjectFiles,
       expected: [base],
     }];
   }
-  const inLib = project.findFirst(ancestorsOf(fromDir).map((dir) => joinPath(dir, `lib/${withExtension}`)));
-  if (inLib) {
-    return [local(spec, inLib)];
+  // $LOAD_PATH: lib/ (con -Ilib o bundler) y spec/ o test/ (RSpec y Minitest los agregan).
+  const ancestors = ancestorsOf(fromDir);
+  const inLoadPath = project.findFirst([
+    ...ancestors.flatMap((dir) => ['lib', 'spec', 'test'].map((folder) => joinPath(dir, `${folder}/${withExtension}`))),
+    ...ancestors.filter((dir) => /(?:^|\/)(?:lib|spec|test)$/.test(dir)).map((dir) => joinPath(dir, withExtension)),
+  ]);
+  if (inLoadPath) {
+    return [local(spec, inLoadPath)];
   }
   const sibling = project.find(joinPath(fromDir, withExtension));
   if (sibling) {
@@ -1679,7 +1995,7 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
   const family = dependencyFamily(input.language, activePath);
   // El activo cuenta aunque el indice no lo tenga (archivo recien creado, o un proyecto de mas de
   // 90 archivos): si no, «La usan» no encontraba los #include que llegan a el.
-  const project = new ProjectFiles(input.files || [], [...(input.extraPaths || []), activePath]);
+  const project = new ProjectFiles(input.files || [], [...(input.extraPaths || []), activePath], input.buildFiles || []);
   const result: FileDependencies = { family, local: [], libraries: [], missing: [], dependents: [], probes: [], expectedPaths: [] };
   const probes = new Set<string>();
   const expected = new Set<string>();
@@ -1709,7 +2025,9 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
           continue; // se incluye a si mismo
         }
         // Un mismo archivo escrito de dos formas ("figura.h" y "./figura.h") va una vez.
-        const key = item.type === 'local' ? `local:${item.path || item.label}` : `${item.type}:${item.label}`;
+        const key = item.type === 'local'
+          ? (item.description || !item.path ? `package:${item.label}` : `local:${item.path}`)
+          : `${item.type}:${item.label}`;
         if (seen.has(key)) {
           continue;
         }

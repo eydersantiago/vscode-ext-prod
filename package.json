@@ -243,7 +243,7 @@
         },
         "adaceen.scan.excludeGlob": {
           "type": "string",
-          "default": "**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__,.venv,venv,env,site-packages,.tox,.gradle,.mypy_cache,.pytest_cache}/**",
+          "default": "**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__,.venv,venv,site-packages,.tox,.gradle,.mypy_cache,.pytest_cache}/**",
           "description": "Glob de exclusión para evitar carpetas pesadas o generadas."
         },
         "adaceen.scan.maxFiles": {

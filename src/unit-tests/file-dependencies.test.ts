@@ -184,7 +184,7 @@ describe('dependencias de un archivo C++ (0.0.36)', () => {
     const deps = resolveFileDependencies({ activePath: 'src/main.cpp', language: 'cpp', text: '#include <figura.h>\n#include <GL/glut.h>', files });
     assert.equal(deps.local[0].path, 'src/figura.h');
     assert.equal(deps.local[0].warning, 'Es tuyo: inclúyelo con comillas, #include "figura.h".');
-    assert.deepEqual(deps.libraries.map((item) => [item.label, item.description]), [['GL/glut.h', 'biblioteca del sistema o externa']]);
+    assert.deepEqual(deps.libraries.map((item) => [item.label, item.description]), [['GL/glut.h', 'gráficos (OpenGL)']]);
   });
 });
 
@@ -594,3 +594,124 @@ describe('JS: una division no se confunde con una expresion regular (0.0.36)', (
   });
 });
 
+
+describe('segunda revision independiente del cuadro (0.0.36)', () => {
+  // Como en la maquina del piloto (deploy/gcp/workspaces/startup-ws.sh): CMake con GoogleTest y
+  // nlohmann/json. CMakeLists.txt no esta en el indice (no es codigo): llega como archivo de compilacion.
+  const pilot = [
+    indexFile('src/Calculadora.h', 'class Calculadora {};', 'cpp'),
+    indexFile('src/Calculadora.cpp', '#include "Calculadora.h"', 'cpp'),
+    indexFile('src/main.cpp', '#include "Calculadora.h"\n#include "json.hpp"', 'cpp'),
+    indexFile('test/test_calculadora.cpp', '#include "gtest/gtest.h"\n#include "Calculadora.h"', 'cpp'),
+  ];
+
+  it('C++ del piloto: la prueba encuentra src/ (CMake), y gtest y json.hpp son bibliotecas', () => {
+    const test = resolveFileDependencies({
+      activePath: 'test/test_calculadora.cpp', language: 'cpp', files: pilot, buildFiles: ['CMakeLists.txt'],
+      text: '#include "gtest/gtest.h"\n#include <gmock/gmock.h>\n#include "Calculadora.h"',
+    });
+    assert.deepEqual(test.local.map((item) => [item.path, item.warning]), [['src/Calculadora.h', undefined]]);
+    assert.deepEqual(test.libraries.map((item) => [item.label, item.description]), [
+      ['gtest/gtest.h', 'pruebas (GoogleTest)'],
+      ['gmock/gmock.h', 'objetos simulados para pruebas (GoogleMock)'],
+    ]);
+    assert.deepEqual(test.missing, []);
+    const main = resolveFileDependencies({
+      activePath: 'src/main.cpp', language: 'cpp', files: pilot, buildFiles: ['CMakeLists.txt'],
+      text: '#include "Calculadora.h"\n#include "json.hpp"\n#include <nlohmann/json.hpp>',
+    });
+    assert.deepEqual(main.libraries.map((item) => [item.label, item.description]), [
+      ['json.hpp', 'JSON (nlohmann/json)'],
+      ['nlohmann/json.hpp', 'JSON (nlohmann/json)'],
+    ]);
+    assert.deepEqual(main.missing, []);
+    const header = resolveFileDependencies({ activePath: 'src/Calculadora.h', language: 'cpp', text: 'class Calculadora {};', files: pilot, buildFiles: ['CMakeLists.txt'] });
+    assert.deepEqual(header.dependents.map((item) => item.path), ['src/Calculadora.cpp', 'src/main.cpp', 'test/test_calculadora.cpp']);
+  });
+
+  it('C++ sin CMake: un .h de otra carpeta queda «sin encontrar» con la ruta que funciona', () => {
+    const deps = resolveFileDependencies({ activePath: 'test/test_calculadora.cpp', language: 'cpp', text: '#include "Calculadora.h"', files: pilot });
+    assert.deepEqual(deps.missing.map((item) => item.hint), ['Está en «src/Calculadora.h»: escribe #include "../src/Calculadora.h".']);
+  });
+
+  it('C++: un .h en headers/ del mismo ejercicio pide -Iheaders; con Makefile no se avisa', () => {
+    const files = [indexFile('ejercicio/headers/lista.h', '', 'cpp'), indexFile('ejercicio/src/main.cpp', '#include "lista.h"', 'cpp')];
+    const loose = resolveFileDependencies({ activePath: 'ejercicio/src/main.cpp', language: 'cpp', text: '#include "lista.h"', files });
+    assert.deepEqual(loose.local.map((item) => [item.path, item.warning]), [
+      ['ejercicio/headers/lista.h', 'Está en «ejercicio/headers»: compila con -Iheaders o escribe #include "../headers/lista.h".'],
+    ]);
+    const built = resolveFileDependencies({ activePath: 'ejercicio/src/main.cpp', language: 'cpp', text: '#include "lista.h"', files, buildFiles: ['ejercicio/Makefile'] });
+    assert.deepEqual(built.local.map((item) => [item.path, item.warning]), [['ejercicio/headers/lista.h', undefined]]);
+  });
+
+  it('Python: se puede ejecutar desde una carpeta de arriba (python -m app, tests/, Django)', () => {
+    const app = [indexFile('taller3/app/__init__.py', '', 'python'), indexFile('taller3/app/modelo.py', 'class Figura: pass', 'python')];
+    const run = resolveFileDependencies({ activePath: 'taller3/app/main.py', language: 'python', text: 'from app.modelo import Figura', files: app });
+    assert.deepEqual(run.local.map((item) => item.path), ['taller3/app/modelo.py']);
+    const tests = resolveFileDependencies({
+      activePath: 'tests/test_modelo.py', language: 'python', text: 'import modelo\nimport pytest',
+      files: [indexFile('modelo.py', '', 'python')],
+    });
+    assert.deepEqual(tests.local.map((item) => item.path), ['modelo.py']);
+    assert.deepEqual(tests.missing, []);
+    const django = [
+      indexFile('backend/tienda/__init__.py', '', 'python'),
+      indexFile('backend/tienda/models.py', 'class Producto: pass', 'python'),
+      indexFile('backend/tienda/views.py', 'from tienda.models import Producto', 'python'),
+    ];
+    const views = resolveFileDependencies({ activePath: 'backend/tienda/views.py', language: 'python', text: 'from tienda.models import Producto\nfrom django.shortcuts import render', files: django });
+    assert.deepEqual(views.local.map((item) => item.path), ['backend/tienda/models.py']);
+    assert.deepEqual(views.libraries.map((item) => item.label), ['django.shortcuts']);
+    const models = resolveFileDependencies({ activePath: 'backend/tienda/models.py', language: 'python', text: 'class Producto: pass', files: django });
+    assert.deepEqual(models.dependents.map((item) => item.path), ['backend/tienda/views.py']);
+  });
+
+  it('Python: import modelo e import modelo.figura son dos dependencias', () => {
+    const files = [indexFile('tarea/modelo/__init__.py', '', 'python'), indexFile('tarea/modelo/figura.py', '', 'python')];
+    const deps = resolveFileDependencies({ activePath: 'tarea/main.py', language: 'python', text: 'import modelo\nimport modelo.figura', files });
+    assert.deepEqual(deps.local.map((item) => [item.label, item.path]), [
+      ['modelo', 'tarea/modelo/__init__.py'],
+      ['modelo.figura', 'tarea/modelo/figura.py'],
+    ]);
+  });
+
+  it('Ruby: RSpec busca en spec/ y lib/ (spec_helper no es una gema)', () => {
+    const files = [indexFile('spec/spec_helper.rb', '', 'ruby'), indexFile('lib/figura.rb', '', 'ruby')];
+    const deps = resolveFileDependencies({ activePath: 'spec/figura_spec.rb', language: 'ruby', text: "require 'spec_helper'\nrequire 'figura'\nrequire 'json'", files });
+    assert.deepEqual(deps.local.map((item) => item.path), ['spec/spec_helper.rb', 'lib/figura.rb']);
+    assert.deepEqual(deps.libraries.map((item) => item.label), ['json']);
+  });
+
+  it('JS: los alias ~/ y de tsconfig (@components/...) son del proyecto; @vue/... sigue siendo npm', () => {
+    const files = [indexFile('src/components/Boton.tsx', 'export default 1', 'typescriptreact'), indexFile('src/vue/x.ts', '', 'typescript')];
+    const tilde = resolveFileDependencies({ activePath: 'src/pages/Inicio.tsx', language: 'typescriptreact', text: "import Boton from '~/components/Boton'\nimport Y from '~/nada/Y'", files });
+    assert.deepEqual(tilde.local.map((item) => [item.label, item.path]), [['~/components/Boton', 'src/components/Boton.tsx']]);
+    assert.deepEqual(tilde.missing.map((item) => [item.label, item.description]), [['~/nada/Y', 'El alias ~/ suele apuntar a src/ y ahí no está.']]);
+    const scoped = resolveFileDependencies({ activePath: 'src/pages/Inicio.tsx', language: 'typescriptreact', text: "import Boton from '@components/Boton'\nimport { x } from '@vue/x'", files });
+    assert.deepEqual(scoped.local.map((item) => [item.label, item.path]), [['@components/Boton', 'src/components/Boton.tsx']]);
+    assert.deepEqual(scoped.libraries.map((item) => [item.label, item.description]), [['@vue/x', 'paquete de npm']]);
+  });
+
+  it('Vue: ./App con App.vue se encuentra, con el aviso de Vite', () => {
+    const deps = resolveFileDependencies({ activePath: 'src/main.js', language: 'javascript', text: "import App from './App'", files: [indexFile('src/App.vue', '', 'vue')] });
+    assert.deepEqual(deps.local.map((item) => [item.path, item.warning]), [['src/App.vue', "Con Vite escribe la extensión: './App.vue'."]]);
+  });
+
+  it('Java con Gradle (build.gradle no esta en el indice): una dependencia externa no queda «sin encontrar»', () => {
+    const files = [indexFile('src/main/java/App.java', '', 'java')];
+    const text = 'import okhttp3.OkHttpClient;\npublic class App {}';
+    const gradle = resolveFileDependencies({ activePath: 'src/main/java/App.java', language: 'java', text, files, buildFiles: ['build.gradle'] });
+    assert.deepEqual(gradle.libraries.map((item) => [item.label, item.description]), [['okhttp3.OkHttpClient', 'dependencia del proyecto (Maven o Gradle)']]);
+    const plain = resolveFileDependencies({ activePath: 'src/main/java/App.java', language: 'java', text, files });
+    assert.deepEqual(plain.missing.map((item) => item.label), ['okhttp3.OkHttpClient'], 'sin Maven ni Gradle, javac no la encuentra');
+  });
+
+  it('JS: plantillas anidadas, return /`/ sin punto y coma, </p> de JSX y listas de export largas', () => {
+    const imports = (text: string) => parseImports(text, 'js').map((item) => [item.specifier, item.line]);
+    assert.deepEqual(imports("const ruta = `${base(`${dir}/${nombre}`)}`; const otra = a / b;\nconst fs = require('fs');\nconst util = require('./util');\n"), [['fs', 2], ['./util', 3]]);
+    assert.deepEqual(imports("function f(t) {\n  const s = t\n  return /`/.test(s)\n}\nconst fs = require('fs')\nconst util = require('./util')\n"), [['fs', 5], ['./util', 6]]);
+    assert.deepEqual(imports("const T = () => <p>{hechas}/{total}</p>; import('./x');\n"), [['./x', 1]]);
+    const exportList = `export {\n${Array.from({ length: 120 }, (_, i) => `  Componente${i}`).join(',\n')}\n} from './componentes';\n`;
+    assert.deepEqual(imports(exportList), [['./componentes', 122]]);
+  });
+});

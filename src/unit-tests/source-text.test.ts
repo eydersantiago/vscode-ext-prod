@@ -11,3 +11,15 @@ describe('texto de un archivo leido de sus bytes (0.0.36)', () => {
     assert.equal(decodeSourceBytes(latin1), '// año, área');
   });
 });
+
+describe('un byte suelto no cambia la codificacion de todo el archivo (0.0.36)', () => {
+  it('UTF-8 con un byte pegado de otra parte sigue siendo UTF-8; solo ese byte se pierde', () => {
+    const utf8 = new TextEncoder();
+    const bytes = Uint8Array.from([...utf8.encode('// año\n'), 0xe9, ...utf8.encode('\n#include "señal.h"')]);
+    assert.equal(decodeSourceBytes(bytes), '// año\n�\n#include "señal.h"');
+  });
+
+  it('sin ninguna tilde en UTF-8, un byte alto es Windows-1252', () => {
+    assert.equal(decodeSourceBytes(Uint8Array.from([0x2f, 0x2f, 0x20, 0x63, 0x61, 0x66, 0xe9])), '// café');
+  });
+});
