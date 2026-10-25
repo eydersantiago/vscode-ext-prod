@@ -27,6 +27,11 @@ export type ParsedImport = {
   kind: ImportKind;
   /** Nombres que trae: from x import a, b / import { a } from './x' / import static ...C.m. */
   names: string[];
+  /**
+   * C/C++: dentro de un `#ifdef _WIN32 ... #else ... #endif` (o de otra macro de plataforma):
+   * `#include <windows.h>` ahi es a proposito y no lleva el aviso de Linux.
+   */
+  platformGuarded?: boolean;
 };
 
 export type FileDependencyItem = {
@@ -100,6 +105,7 @@ const MAX_ITEMS_PER_GROUP = 40;
 const MAX_PROBES = 8;
 const MAX_SYMBOLS = 4;
 const MAX_TYPE_REFS = 500;
+const MAX_IMPORTS = 2000;
 
 // ---------------------------------------------------------------------------------------------
 // Bibliotecas conocidas: una linea de para que sirven (lo que un estudiante necesita saber).
@@ -323,7 +329,106 @@ const PY_THIRD_PARTY: Record<string, string> = {
   bs4: 'leer HTML (BeautifulSoup)',
   sympy: 'matemática simbólica (paquete externo)',
   openpyxl: 'archivos de Excel (paquete externo)',
+  // Paquetes de pip comunes en cursos: sin ellos, `keyboard` salia como error de tipeo de
+  // `keyword` y `reqeusts` como «instálalo con pip» (revision independiente del 25/10/2026).
+  keyboard: 'leer el teclado (paquete externo)',
+  psutil: 'información del sistema (paquete externo)',
+  tkcalendar: 'calendario para tkinter (paquete externo)',
+  customtkinter: 'ventanas modernas con tkinter (paquete externo)',
+  ttkbootstrap: 'temas para tkinter (paquete externo)',
+  pyautogui: 'controlar el mouse y el teclado (paquete externo)',
+  pynput: 'leer y controlar el teclado y el mouse (paquete externo)',
+  colorama: 'colores en la consola (paquete externo)',
+  termcolor: 'colores en la consola (paquete externo)',
+  rich: 'texto con formato en la consola (paquete externo)',
+  tabulate: 'tablas en la consola (paquete externo)',
+  prettytable: 'tablas en la consola (paquete externo)',
+  tqdm: 'barras de progreso (paquete externo)',
+  art: 'letras grandes en ASCII (paquete externo)',
+  pyfiglet: 'letras grandes en ASCII (paquete externo)',
+  emoji: 'emojis en el texto (paquete externo)',
+  faker: 'datos de prueba (paquete externo)',
+  dotenv: 'leer el archivo .env (python-dotenv)',
+  yaml: 'archivos YAML (PyYAML)',
+  plotly: 'gráficas interactivas (paquete externo)',
+  dash: 'tableros web (paquete externo)',
+  streamlit: 'aplicaciones web de datos (paquete externo)',
+  uvicorn: 'servidor para FastAPI (paquete externo)',
+  pydantic: 'validar datos (paquete externo)',
+  sqlalchemy: 'bases de datos (paquete externo)',
+  pymysql: 'base de datos MySQL (paquete externo)',
+  mysql: 'base de datos MySQL (mysql-connector)',
+  psycopg2: 'base de datos PostgreSQL (paquete externo)',
+  pymongo: 'base de datos MongoDB (paquete externo)',
+  redis: 'base de datos Redis (paquete externo)',
+  selenium: 'controlar el navegador (paquete externo)',
+  lxml: 'leer XML y HTML (paquete externo)',
+  docx: 'documentos de Word (python-docx)',
+  PyPDF2: 'archivos PDF (paquete externo)',
+  pypdf: 'archivos PDF (paquete externo)',
+  fpdf: 'crear PDF (paquete externo)',
+  reportlab: 'crear PDF (paquete externo)',
+  qrcode: 'códigos QR (paquete externo)',
+  pyttsx3: 'texto a voz (paquete externo)',
+  speech_recognition: 'reconocimiento de voz (SpeechRecognition)',
+  pyperclip: 'portapapeles (paquete externo)',
+  playsound: 'reproducir sonidos (paquete externo)',
+  schedule: 'tareas programadas (paquete externo)',
+  pytz: 'zonas horarias (paquete externo)',
+  dateutil: 'fechas (python-dateutil)',
+  arrow: 'fechas (paquete externo)',
+  httpx: 'peticiones HTTP (paquete externo)',
+  aiohttp: 'peticiones HTTP asíncronas (paquete externo)',
+  websockets: 'websockets (paquete externo)',
+  jinja2: 'plantillas HTML (paquete externo)',
+  werkzeug: 'utilidades web de Flask (paquete externo)',
+  flask_cors: 'CORS para Flask (paquete externo)',
+  flask_sqlalchemy: 'bases de datos con Flask (paquete externo)',
+  nltk: 'procesamiento de lenguaje (paquete externo)',
+  spacy: 'procesamiento de lenguaje (paquete externo)',
+  transformers: 'modelos de lenguaje (Hugging Face)',
+  openai: 'API de OpenAI (paquete externo)',
+  keras: 'redes neuronales (paquete externo)',
+  xgboost: 'aprendizaje automático (paquete externo)',
+  statsmodels: 'estadística (paquete externo)',
+  networkx: 'grafos (paquete externo)',
+  kivy: 'aplicaciones con interfaz (paquete externo)',
+  PyQt5: 'ventanas con Qt (paquete externo)',
+  PyQt6: 'ventanas con Qt (paquete externo)',
+  PySide6: 'ventanas con Qt (paquete externo)',
+  wx: 'ventanas (wxPython)',
+  serial: 'puerto serie (pyserial)',
+  boto3: 'servicios de AWS (paquete externo)',
+  firebase_admin: 'Firebase (paquete externo)',
+  gspread: 'hojas de cálculo de Google (paquete externo)',
+  telebot: 'bots de Telegram (pyTelegramBotAPI)',
+  telegram: 'bots de Telegram (python-telegram-bot)',
+  discord: 'bots de Discord (paquete externo)',
+  tweepy: 'API de X/Twitter (paquete externo)',
+  wikipedia: 'consultar Wikipedia (paquete externo)',
+  pywhatkit: 'WhatsApp y YouTube (paquete externo)',
+  moviepy: 'editar video (paquete externo)',
+  pydub: 'editar audio (paquete externo)',
+  imageio: 'imágenes y video (paquete externo)',
+  skimage: 'procesamiento de imágenes (scikit-image)',
+  numba: 'acelerar código numérico (paquete externo)',
+  loguru: 'mensajes de registro (paquete externo)',
+  click: 'programas de consola (paquete externo)',
+  typer: 'programas de consola (paquete externo)',
+  attrs: 'clases de datos (paquete externo)',
+  mock: 'objetos simulados (paquete externo)',
+  hypothesis: 'pruebas con datos generados (paquete externo)',
+  setuptools: 'empaquetar proyectos (paquete externo)',
 };
+
+/**
+ * Modulos que Python trae dentro del interprete: un archivo del estudiante con ese nombre no los
+ * tapa (`import time` carga el de Python aunque haya un time.py al lado). En Linux (la VM del
+ * piloto) tambien math, cmath, array, zlib...; en las Mac esos son archivos aparte y ahi si se
+ * tapan (revision independiente del 25/10/2026, con sys.builtin_module_names de Ubuntu).
+ */
+const PY_ALWAYS_BUILTIN = new Set(['sys', 'builtins', 'time', 'itertools', 'gc', 'errno', 'marshal', 'atexit', 'faulthandler']);
+const PY_LINUX_BUILTIN = new Set(['math', 'cmath', 'array', 'binascii', 'select', 'unicodedata', 'zlib', 'fcntl', 'grp', 'syslog', 'pyexpat']);
 
 const JAVA_CLASSES: Record<string, string> = {
   'java.util.Scanner': 'leer datos del teclado',
@@ -508,7 +613,19 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
   // JS: plantillas abiertas y, dentro de ellas, expresiones ${ } con su profundidad de llaves.
   const templates: Array<{ kind: 'template' } | { kind: 'expression'; depth: number }> = [];
   const top = () => templates[templates.length - 1];
+  // Ruby: cuerpos de heredoc pendientes (<<~TEXTO ... TEXTO empieza en la linea de abajo).
+  const heredocs: Array<{ line: number; start: number; end: number }> = [];
+  const heredocMisses = new Map<string, number>();
+  let heredocCount = 0;
   while (i < n) {
+    if (heredocs.length && i === heredocs[0].start) {
+      const body = heredocs.shift() as { end: number };
+      for (; i < body.end; i += 1) {
+        out.push(blank(source[i]));
+      }
+      lineStart = true;
+      continue;
+    }
     const ch = source[i];
     const next = source[i + 1];
     const context = family === 'js' ? top() : undefined;
@@ -589,7 +706,9 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
       while (wordStart > 0 && /\w/.test(source[wordStart - 1])) {
         wordStart -= 1;
       }
-      const open = source.indexOf('(', i + 1);
+      // El delimitador tiene a lo sumo 16 caracteres: no se busca el ( en todo lo que sigue.
+      const openAt = source.slice(i + 1, i + 18).indexOf('(');
+      const open = openAt < 0 ? -1 : i + 1 + openAt;
       const delimiter = open > i ? source.slice(i + 1, open) : '';
       if (C_RAW_PREFIXES.has(source.slice(wordStart, i)) && open > i && open - i <= 17 && !/[\s\\)"]/.test(delimiter)) {
         const end = source.indexOf(`)${delimiter}"`, open + 1);
@@ -666,6 +785,63 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
         continue;
       }
     }
+    if ((family === 'java' || family === 'csharp') && ch === '"' && next === '"' && source[i + 2] === '"') {
+      // Bloque de texto de Java (""""") o cadena cruda de C# (tres o mas comillas): puede tener
+      // varias lineas con cualquier cosa adentro (un "import x;" de ejemplo no es un import).
+      let run = 3;
+      while (source[i + run] === '"') {
+        run += 1;
+      }
+      const end = source.indexOf('"'.repeat(run), i + run);
+      const stop = end < 0 ? n : end + run;
+      for (; i < stop; i += 1) {
+        out.push(blank(source[i]));
+      }
+      previous = '"';
+      previousWord = '';
+      spaceSincePrevious = false;
+      lineStart = false;
+      continue;
+    }
+    if (family === 'csharp' && (ch === '@' || ch === '$') && (next === '"' || ((next === '@' || next === '$') && next !== ch && source[i + 2] === '"'))
+      && (ch === '@' || next === '@')) {
+      // @"..." o $@"..." de C#: pueden tener varias lineas, y "" es una comilla adentro.
+      let k = (next === '"' ? i + 1 : i + 2) + 1;
+      while (k < n && !(source[k] === '"' && source[k + 1] !== '"')) {
+        k += source[k] === '"' ? 2 : 1;
+      }
+      const stop = Math.min(n, k + 1);
+      for (; i < stop; i += 1) {
+        out.push(blank(source[i]));
+      }
+      previous = '"';
+      previousWord = '';
+      spaceSincePrevious = false;
+      lineStart = false;
+      continue;
+    }
+    if (family === 'ruby' && ch === '<' && next === '<' && heredocCount < 200) {
+      const heredoc = /^<<(?:([~-])(['"`]?)([A-Za-z_]\w*)\2|(['"`])([A-Za-z_]\w*)\4|([A-Z_][A-Z0-9_]*)\b)/.exec(source.slice(i, i + 80));
+      const lineEnd = heredoc ? source.indexOf('\n', i) : -1;
+      if (heredoc && lineEnd >= 0) {
+        heredocCount += 1;
+        const id = heredoc[3] || heredoc[5] || heredoc[6];
+        const last = heredocs[heredocs.length - 1];
+        const start = last && last.line === lineEnd ? last.end : lineEnd + 1;
+        // Una busqueda que ya fallo desde antes no se repite (miles de <<FIN sin cierre).
+        const missedFrom = heredocMisses.get(id);
+        if (missedFrom === undefined || start < missedFrom) {
+          const terminator = new RegExp(`^[ \\t]*${id}[ \\t]*$`, 'm');
+          const found = terminator.exec(source.slice(start));
+          if (found) {
+            const end = start + found.index + found[0].length;
+            heredocs.push({ line: lineEnd, start, end });
+          } else {
+            heredocMisses.set(id, start);
+          }
+        }
+      }
+    }
     if (ch === '"' || ch === "'") {
       out.push(ch);
       i += 1;
@@ -734,33 +910,64 @@ function lineOfIndex(starts: number[], index: number) {
 // ---------------------------------------------------------------------------------------------
 // Lectura de los imports
 
-const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+/** Un nombre de Python, Java o JS (con tildes: geometría, Canción). */
+const IDENTIFIER = /^[\p{L}_$][\p{L}\p{N}_$]*$/u;
+
+/** Macros de plataforma: lo que va dentro de `#ifdef _WIN32 ... #else ... #endif` es a proposito. */
+const C_PLATFORM_MACRO = /\b(?:_WIN32|_WIN64|WIN32|_MSC_VER|__MINGW32__|__MINGW64__|__CYGWIN__|__linux__|__unix__|__APPLE__|__MACH__|_POSIX_VERSION)\b/;
 
 /** #include (sin los de un bloque #if 0 ... #endif). */
 function parseC(lines: string[]): ParsedImport[] {
   const out: ParsedImport[] = [];
-  // Por cada #if abierto: ¿esa rama esta apagada? Solo se sabe de #if 0 / #if false.
-  const disabled: boolean[] = [];
+  // Por cada #if abierto: ¿esa rama esta apagada (#if 0 / #if false)? ¿pregunta por la plataforma?
+  // Con contadores: recorrer la pila en cada linea era lento con muchos #if anidados.
+  const stack: Array<{ disabled: boolean; platform: boolean }> = [];
+  let disabledDepth = 0;
+  let platformDepth = 0;
   lines.forEach((line, index) => {
     const directive = /^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$/.exec(line);
     if (directive) {
       const kind = directive[1];
       if (kind === 'if' || kind === 'ifdef' || kind === 'ifndef') {
-        disabled.push(kind === 'if' && /^\s*(?:0|false)\s*$/.test(directive[2]));
+        const entry = {
+          disabled: kind === 'if' && /^\s*(?:0|false)\s*$/.test(directive[2]),
+          platform: C_PLATFORM_MACRO.test(directive[2]),
+        };
+        stack.push(entry);
+        disabledDepth += entry.disabled ? 1 : 0;
+        platformDepth += entry.platform ? 1 : 0;
       } else if (kind === 'endif') {
-        disabled.pop();
-      } else if (disabled.length) {
-        disabled[disabled.length - 1] = false; // #else / #elif de un #if 0: esa rama si cuenta
+        const entry = stack.pop();
+        if (entry) {
+          disabledDepth -= entry.disabled ? 1 : 0;
+          platformDepth -= entry.platform ? 1 : 0;
+        }
+      } else if (stack.length) {
+        const entry = stack[stack.length - 1];
+        if (entry.disabled) {
+          entry.disabled = false; // #else / #elif de un #if 0: esa rama si cuenta
+          disabledDepth -= 1;
+        }
+        if (!entry.platform && kind === 'elif' && C_PLATFORM_MACRO.test(directive[2])) {
+          entry.platform = true; // #elif defined(__linux__)
+          platformDepth += 1;
+        }
       }
       return;
     }
-    if (disabled.some(Boolean)) {
+    if (disabledDepth > 0) {
       return;
     }
     const match = /^\s*#\s*include\s*(?:"([^"\n]+)"|<([^>\n]+)>)/.exec(line);
     if (match) {
       const quoted = match[1] !== undefined;
-      out.push({ specifier: (quoted ? match[1] : match[2]).trim(), line: index + 1, kind: quoted ? 'quoted' : 'angle', names: [] });
+      out.push({
+        specifier: (quoted ? match[1] : match[2]).trim(),
+        line: index + 1,
+        kind: quoted ? 'quoted' : 'angle',
+        names: [],
+        ...(platformDepth > 0 ? { platformGuarded: true } : {}),
+      });
     }
   });
   return out;
@@ -788,14 +995,16 @@ function parsePython(lines: string[]): ParsedImport[] {
       if (plain) {
         const rest = joinContinued(index, plain[1], false);
         for (const part of rest.split(',')) {
-          const name = /^\s*([A-Za-z_][\w.]*)(?:\s+as\s+[A-Za-z_]\w*)?\s*$/.exec(part);
+          const name = /^\s*([\p{L}_][\p{L}\p{N}_.]*)(?:\s+as\s+[\p{L}_][\p{L}\p{N}_]*)?\s*$/u.exec(part);
           if (name) {
             out.push({ specifier: name[1].replace(/\.+$/, ''), line: index + 1, kind: 'module', names: [] });
           }
         }
         continue;
       }
-      const from = /^\s*from\s+(\.+[\w.]*|[A-Za-z_][\w.]*)\s+import\s+(.*)$/.exec(statement);
+      // Despues de los puntos, un nombre que empieza con letra: con `\.+[\w.]*` una linea de
+      // miles de puntos tardaba segundos (revision independiente del 25/10/2026).
+      const from = /^\s*from\s+(\.+(?:[\p{L}_][\p{L}\p{N}_.]*)?|[\p{L}_][\p{L}\p{N}_.]*)\s+import\s+(.*)$/u.exec(statement);
       if (from) {
         const rest = joinContinued(index, from[2], from[2].trim().startsWith('('));
         const names = rest
@@ -810,9 +1019,11 @@ function parsePython(lines: string[]): ParsedImport[] {
   return out;
 }
 
-// Java y C#: todos los de la linea (`import a.B; import c.D;`), sobre el texto sin cadenas.
-const JAVA_IMPORT = /(?<=^|;)[ \t]*import\s+(static\s+)?([A-Za-z_][\w.]*?)(\.\*)?\s*;/gmd;
-const CSHARP_USING = /(?<=^|;)[ \t]*(?:global\s+)?using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)\s*;/gmd;
+// Java y C#: todos los de la linea (`import a.B; import c.D;`), sobre el texto sin cadenas. El ;
+// del final se mira sin consumirlo (lo usa el siguiente) y sin lookbehind: un Safari anterior a
+// 16.4 no carga una expresion regular con lookbehind y se caia toda la extension web.
+const JAVA_IMPORT = /(?:^|;)[ \t]*import\s+(static\s+)?([\p{L}_$][\p{L}\p{N}_$.]*?)(\.\*)?(?=\s*;)/gmdu;
+const CSHARP_USING = /(?:^|;)[ \t]*(?:global\s+)?using\s+(?:static\s+)?(?:[\p{L}_][\p{L}\p{N}_]*\s*=\s*)?([\p{L}_][\p{L}\p{N}_.]*)(?=\s*;)/gmdu;
 
 function parseJava(code: string): ParsedImport[] {
   const starts = lineStartsOf(code);
@@ -859,8 +1070,10 @@ function parseRuby(lines: string[]): ParsedImport[] {
 
 /** Comienzo de una sentencia import o export (al inicio, o despues de ; } o un salto de linea). */
 const JS_STATEMENT_START = /(?:^|[;\n}])[ \t]*(import|export)\b/g;
-const JS_REQUIRE = /(?<![\w$.])require\s*\(\s*(['"])([^'"\n]*)\1\s*\)/gd;
-const JS_DYNAMIC = /(?<![\w$.])import\s*\(\s*(['"])([^'"\n]*)\1\s*\)/gd;
+// El caracter de antes (no parte de un nombre: `x.require(` o `miimport(` no cuentan) va en el
+// grupo 1, sin lookbehind (Safari < 16.4).
+const JS_REQUIRE = /(^|[^\w$.])require\s*\(\s*(['"])([^'"\n]*)\2\s*\)/gd;
+const JS_DYNAMIC = /(^|[^\w$.])import\s*\(\s*(['"])([^'"\n]*)\2\s*\)/gd;
 /** `const { a, b } = ` o `const x = ` justo antes de un require (se mira un trozo corto). */
 const JS_REQUIRE_TARGET = /(?:const|let|var)\s+(\{[^}]*\}|[\w$]+)\s*=\s*$/;
 
@@ -978,16 +1191,16 @@ function parseJs(masked: string, original: string): ParsedImport[] {
     }
   }
   for (const match of masked.matchAll(JS_REQUIRE)) {
-    const range = match.indices?.[2];
+    const range = match.indices?.[3];
     if (!range) {
       continue;
     }
-    const start = match.index || 0;
+    const start = (match.index || 0) + match[1].length;
     const declaration = JS_REQUIRE_TARGET.exec(masked.slice(Math.max(0, start - 300), start));
     add(range[0], range[1], declaration ? jsClauseNames(declaration[1]) : []);
   }
   for (const match of masked.matchAll(JS_DYNAMIC)) {
-    const range = match.indices?.[2];
+    const range = match.indices?.[3];
     if (range) {
       add(range[0], range[1], []);
     }
@@ -995,12 +1208,20 @@ function parseJs(masked: string, original: string): ParsedImport[] {
   return found.sort((left, right) => left.index - right.index).map(({ index: _index, ...rest }) => rest);
 }
 
+/**
+ * El texto que se lee, con saltos de linea \n: un archivo guardado en Windows (\r\n) no mostraba
+ * ningun import de Python y `#if 0\r` no se reconocia (revision independiente del 25/10/2026).
+ */
+function sourceText(text: string, maxChars = MAX_PARSE_CHARS) {
+  return String(text || '').slice(0, maxChars).replace(/\r\n?/g, '\n');
+}
+
 /** Los imports del archivo, en orden, con su linea. */
 export function parseImports(text: string, family: DependencyFamily): ParsedImport[] {
   if (family === 'none') {
     return [];
   }
-  const original = String(text || '').slice(0, MAX_PARSE_CHARS);
+  const original = sourceText(text);
   switch (family) {
     case 'js':
       return parseJs(maskSource(original, family, true), original);
@@ -1030,14 +1251,14 @@ const DECLARATION_LINES: Partial<Record<DependencyFamily, RegExp>> = {
 
 /** El codigo sin comentarios, sin el contenido de las cadenas y sin las lineas de import. */
 export function codeOnly(text: string, family: DependencyFamily) {
-  const masked = maskSource(String(text || '').slice(0, MAX_PARSE_CHARS), family, true);
+  const masked = maskSource(sourceText(text), family, true);
   const declarations = DECLARATION_LINES[family];
   return declarations ? masked.replace(declarations, (line) => ' '.repeat(line.length)) : masked;
 }
 
 /** Identificadores del codigo (sin comentarios ni cadenas), para ver que clases y funciones usa. */
 export function collectIdentifiers(text: string, family: DependencyFamily) {
-  return new Set(codeOnly(text, family).match(/[A-Za-z_$][\w$]*/g) || []);
+  return new Set(codeOnly(text, family).match(/[\p{L}_$][\p{L}\p{N}_$]*/gu) || []);
 }
 
 /** Nombres con mayuscula (Java y C#): las clases que usa un archivo sin importarlas. */
@@ -1047,8 +1268,8 @@ export function collectTypeReferences(text: string, family: DependencyFamily) {
   }
   const code = codeOnly(text, family);
   const names = new Set<string>();
-  for (const match of code.matchAll(/\b[A-Z][A-Za-z0-9_]*\b/g)) {
-    names.add(match[0]);
+  for (const match of code.matchAll(/(?:^|[^\p{L}\p{N}_$])(\p{Lu}[\p{L}\p{N}_]*)/gu)) {
+    names.add(match[1]);
     if (names.size >= MAX_TYPE_REFS) {
       break;
     }
@@ -1064,11 +1285,11 @@ export function collectNamespaces(text: string, family: DependencyFamily) {
   if (family !== 'csharp') {
     return [];
   }
-  const code = maskSource(String(text || '').slice(0, MAX_PARSE_CHARS), family, true);
+  const code = maskSource(sourceText(text), family, true);
   const names = new Set<string>();
   const stack: Array<{ name: string; depth: number }> = [];
   let depth = 0;
-  for (const match of code.matchAll(/\bnamespace\s+([A-Za-z_][\w.]*)\s*([{;])|[{}]/g)) {
+  for (const match of code.matchAll(/\bnamespace\s+([\p{L}_][\p{L}\p{N}_.]*)\s*([{;])|[{}]/gu)) {
     if (match[1]) {
       names.add([...stack.map((item) => item.name), match[1]].join('.'));
       if (match[2] === '{') {
@@ -1097,7 +1318,7 @@ export function collectJavaPackage(text: string, family: DependencyFamily) {
   if (family !== 'java') {
     return '';
   }
-  const match = /^[ \t]*package\s+([A-Za-z_][\w.]*)\s*;/m.exec(maskSource(String(text || '').slice(0, 20_000), family, true));
+  const match = /^[ \t]*package\s+([\p{L}_$][\p{L}\p{N}_$.]*)\s*;/mu.exec(maskSource(sourceText(text, 20_000), family, true));
   return match ? match[1] : '';
 }
 
@@ -1152,23 +1373,32 @@ function sharedPrefix(left: string, right: string) {
   return count;
 }
 
-/** Distancia de edicion (Levenshtein) con tope: mas alla de `max` devuelve max + 1. */
+/**
+ * Distancia de edicion con trasposiciones («turtel» esta a 1 de «turtle», «reqeusts» a 1 de
+ * «requests») y con tope: mas alla de `max` devuelve max + 1.
+ */
 function editDistance(left: string, right: string, max: number) {
   if (Math.abs(left.length - right.length) > max) {
     return max + 1;
   }
+  let before: number[] = [];
   let previous = Array.from({ length: right.length + 1 }, (_value, index) => index);
   for (let i = 1; i <= left.length; i += 1) {
     const current = [i];
     let best = i;
     for (let j = 1; j <= right.length; j += 1) {
       const cost = left[i - 1] === right[j - 1] ? 0 : 1;
-      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
-      best = Math.min(best, current[j]);
+      let value = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+      if (i > 1 && j > 1 && left[i - 1] === right[j - 2] && left[i - 2] === right[j - 1]) {
+        value = Math.min(value, before[j - 2] + 1);
+      }
+      current[j] = value;
+      best = Math.min(best, value);
     }
     if (best > max) {
       return max + 1;
     }
+    before = previous;
     previous = current;
   }
   return previous[right.length];
@@ -1177,7 +1407,7 @@ function editDistance(left: string, right: string, max: number) {
 type Found = { path: string; caseMismatch: boolean };
 
 /** Carpetas de paquetes instalados: lo que hay ahi nunca es «de tu proyecto». */
-const THIRD_PARTY_SEGMENT = /(?:^|\/)(?:site-packages|dist-packages|node_modules|__pycache__|\.git|\.venv|venv)\//;
+const THIRD_PARTY_SEGMENT = /(?:^|\/)(?:site-packages|dist-packages|node_modules|__pycache__|\.git|\.venv|venv|_deps)\//;
 
 /** ¿La ruta es de un paquete instalado (un .py de .venv abierto con F12)? Se trata como de afuera. */
 export function isThirdPartyPath(path: string) {
@@ -1205,14 +1435,30 @@ function ancestorsOf(dir: string) {
   return out;
 }
 
+/** Un nombre con las tildes compuestas (NFC): «lógica» escrita en el editor y la creada por macOS. */
+function composed(text: string) {
+  return /[^\x00-\x7f]/.test(text) ? text.normalize('NFC') : text;
+}
+
+/** Para comparar sin mirar mayusculas ni la forma de las tildes. */
+function foldPath(text: string) {
+  return composed(text).toLowerCase();
+}
+
 /** Los archivos del proyecto (indice mas lo que encontro la busqueda en el disco). */
 class ProjectFiles {
   private readonly exact = new Set<string>();
   private readonly lower = new Map<string, string>();
   private readonly byBase = new Map<string, string[]>();
+  /** Nombre compuesto (NFC) -> ruta, para los nombres descompuestos que crea macOS (lo\u0301gica.h). */
+  private readonly composedPaths = new Map<string, string>();
   readonly entries = new Map<string, DependencyIndexFile>();
   readonly paths: string[] = [];
-  readonly hasJavaBuild: boolean;
+  /** Carpetas con pom.xml, build.gradle o settings.gradle (cada proyecto Maven o Gradle). */
+  private readonly javaProjectDirs = new Set<string>();
+  private readonly suggestions = new Map<string, string>();
+  /** Cuantos «¿Quisiste decir...?» se calculan por vuelta (el cuadro muestra a lo sumo 40). */
+  private suggestBudget = MAX_ITEMS_PER_GROUP * 2;
   /** C#: espacio de nombres -> archivos que lo declaran. */
   readonly namespaces = new Map<string, string[]>();
   /** Java: paquete -> archivos. */
@@ -1228,10 +1474,14 @@ class ProjectFiles {
       }
       this.exact.add(path);
       this.paths.push(path);
-      if (!this.lower.has(path.toLowerCase())) {
-        this.lower.set(path.toLowerCase(), path);
+      const folded = foldPath(path);
+      if (!this.lower.has(folded)) {
+        this.lower.set(folded, path);
       }
-      const base = basenameOf(path).toLowerCase();
+      if (composed(path) !== path && !this.composedPaths.has(composed(path))) {
+        this.composedPaths.set(composed(path), path);
+      }
+      const base = foldPath(basenameOf(path));
       const list = this.byBase.get(base) || [];
       list.push(path);
       this.byBase.set(base, list);
@@ -1245,8 +1495,10 @@ class ProjectFiles {
     }
     extraPaths.forEach(add);
     const known = [...this.paths, ...buildFiles.map(normalizePath)];
-    this.hasJavaBuild = known.some((path) => /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?)$/i.test(path));
     for (const path of known) {
+      if (/(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?)$/i.test(path)) {
+        this.javaProjectDirs.add(dirnameOf(path));
+      }
       if (/(?:^|\/)(?:CMakeLists\.txt|[Mm]akefile|GNUmakefile|meson\.build|build\.ninja|compile_commands\.json|[^/]+\.vcxproj)$/.test(path)) {
         this.cProjectDirs.add(dirnameOf(path));
       }
@@ -1254,7 +1506,7 @@ class ProjectFiles {
     for (const [path, file] of this.entries) {
       // Del indice (0.0.36) o, si no viene, de la estructura ("3: namespace Taller.Modelo {").
       const declared = file.namespaces
-        || [...String(file.outline || '').matchAll(/^\d+:\s*namespace\s+([A-Za-z_][\w.]*)/gm)].map((match) => match[1]);
+        || [...String(file.outline || '').matchAll(/^\d+:\s*namespace\s+([\p{L}_][\p{L}\p{N}_.]*)/gmu)].map((match) => match[1]);
       for (const name of declared) {
         const list = this.namespaces.get(name) || [];
         list.push(path);
@@ -1275,8 +1527,12 @@ class ProjectFiles {
     if (this.exact.has(path)) {
       return { path, caseMismatch: false };
     }
-    const loose = this.lower.get(path.toLowerCase());
-    return loose ? { path: loose, caseMismatch: true } : null;
+    const same = this.composedPaths.get(composed(path));
+    if (same) {
+      return { path: same, caseMismatch: false };
+    }
+    const loose = this.lower.get(foldPath(path));
+    return loose ? { path: loose, caseMismatch: composed(loose) !== composed(path) } : null;
   }
 
   /** El primero que exista de una lista de rutas (primero igual, despues sin mirar mayusculas). */
@@ -1302,20 +1558,25 @@ class ProjectFiles {
     if (!clean) {
       return null;
     }
-    const candidates = this.byBase.get(basenameOf(clean).toLowerCase()) || [];
-    const exact = candidates.filter((path) => path === clean || path.endsWith(`/${clean}`));
+    const candidates = this.byBase.get(foldPath(basenameOf(clean))) || [];
+    const target = composed(clean);
+    const exact = candidates.filter((path) => composed(path) === target || composed(path).endsWith(`/${target}`));
     if (exact.length) {
       return { path: this.nearest(exact, nearDir), caseMismatch: false };
     }
-    const lowerSuffix = clean.toLowerCase();
-    const loose = candidates.filter((path) => path.toLowerCase() === lowerSuffix || path.toLowerCase().endsWith(`/${lowerSuffix}`));
+    const lowerSuffix = foldPath(clean);
+    const loose = candidates.filter((path) => foldPath(path) === lowerSuffix || foldPath(path).endsWith(`/${lowerSuffix}`));
     return loose.length ? { path: this.nearest(loose, nearDir), caseMismatch: true } : null;
   }
 
   /** De varias rutas, la mas cercana a `nearDir` (mas carpetas en comun, despues la mas corta). */
   nearest(list: string[], nearDir: string) {
+    // A igual distancia, la de una carpeta de codigo (src/, include/, headers/...) antes que una
+    // copia en old/ o respaldo/ (antes ganaba la primera por orden alfabetico).
+    const conventional = (path: string) => (PREFERRED_DIR.test(path) ? 0 : 1);
     return [...list].sort((left, right) =>
       sharedPrefix(dirnameOf(right), nearDir) - sharedPrefix(dirnameOf(left), nearDir)
+      || conventional(left) - conventional(right)
       || left.split('/').length - right.split('/').length
       || left.localeCompare(right))[0];
   }
@@ -1346,16 +1607,16 @@ class ProjectFiles {
 
   /** Otro archivo con ese nombre en cualquier carpeta (para «Está en ...»). */
   elsewhere(name: string, nearDir: string, except: string[] = []) {
-    const list = (this.byBase.get(basenameOf(name).toLowerCase()) || []).filter((path) => !except.includes(path));
+    const list = (this.byBase.get(foldPath(basenameOf(name))) || []).filter((path) => !except.includes(path));
     return list.length ? this.nearest(list, nearDir) : '';
   }
 
   /** Archivos dentro de `root` (o de todo el proyecto si root es '') cuya ruta termina en `suffix`. */
   under(root: string, suffix: string, nearDir: string): Found | null {
-    const clean = normalizePath(suffix);
+    const clean = composed(normalizePath(suffix));
     const prefix = root ? `${normalizePath(root)}/` : '';
-    const list = (this.byBase.get(basenameOf(clean).toLowerCase()) || [])
-      .filter((path) => (!prefix || path.startsWith(prefix)) && (path === clean || path.endsWith(`/${clean}`)));
+    const list = (this.byBase.get(foldPath(basenameOf(clean))) || [])
+      .filter((path) => (!prefix || path.startsWith(prefix)) && (composed(path) === clean || composed(path).endsWith(`/${clean}`)));
     return list.length ? { path: this.nearest(list, nearDir), caseMismatch: false } : null;
   }
 
@@ -1364,9 +1625,35 @@ class ProjectFiles {
     return ancestorsOf(fromDir).find((dir) => this.cProjectDirs.has(dir)) ?? null;
   }
 
-  /** «¿Quisiste decir ...?»: el archivo de nombre mas parecido (misma extension o mismo nombre). */
-  suggest(name: string, extensions: RegExp): string {
-    const target = basenameOf(name).toLowerCase();
+  /**
+   * La carpeta de arriba mas cercana con un proyecto Maven o Gradle (null si no hay). Antes un
+   * pom.xml en cualquier parte volvia «biblioteca» lo no encontrado de una carpeta de javac.
+   */
+  javaBuildRoot(fromDir: string) {
+    return ancestorsOf(fromDir).find((dir) => this.javaProjectDirs.has(dir)) ?? null;
+  }
+
+  /**
+   * «¿Quisiste decir ...?»: el archivo de nombre mas parecido (misma extension o mismo nombre),
+   * sin `except` (el archivo activo: en Lista.h, un Lista.tpp que falta no es «src/Lista.h»).
+   */
+  suggest(name: string, extensions: RegExp, except = ''): string {
+    const key = `${name}\n${extensions.source}\n${except}`;
+    const cached = this.suggestions.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    if (this.suggestBudget <= 0) {
+      return '';
+    }
+    this.suggestBudget -= 1;
+    const result = this.closest(name, extensions, except);
+    this.suggestions.set(key, result);
+    return result;
+  }
+
+  private closest(name: string, extensions: RegExp, except: string): string {
+    const target = foldPath(basenameOf(name));
     if (!target) {
       return '';
     }
@@ -1375,10 +1662,10 @@ class ProjectFiles {
     let bestScore = Number.MAX_SAFE_INTEGER;
     const max = target.length >= 6 ? 2 : 1;
     for (const path of this.paths) {
-      if (!extensions.test(path)) {
+      if (!extensions.test(path) || path === except) {
         continue;
       }
-      const base = basenameOf(path).toLowerCase();
+      const base = foldPath(basenameOf(path));
       const stem = base.replace(/\.[^.]+$/, '');
       const score = stem === targetStem && base !== target ? 0.5 : editDistance(base, target, max);
       if (score <= max && score < bestScore) {
@@ -1390,7 +1677,30 @@ class ProjectFiles {
   }
 }
 
-const CASE_WARNING = (path: string) => `Se llama «${basenameOf(path)}»: en Linux las mayúsculas cuentan.`;
+/** Carpetas de codigo: a igual distancia se prefieren a una copia en otra carpeta. */
+const PREFERRED_DIR = /(?:^|\/)(?:include|inc|headers|src|source|lib|app)\//i;
+
+/**
+ * Aviso de mayusculas: con la parte que se escribio distinta («Modelo/figura.h» con la carpeta
+ * modelo/ dice «Se escribe «modelo/figura.h»», no el nombre del archivo, que estaba bien).
+ */
+function caseWarning(label: string, path: string) {
+  if (basenameOf(path) === '__init__.py') {
+    return `La carpeta se llama «${basenameOf(dirnameOf(path))}»: en Linux las mayúsculas cuentan.`;
+  }
+  const dotted = !label.includes('/') && label.includes('.') && /\.(?:py|java)$/i.test(path);
+  const typed = (dotted ? label.replace(/^\.+/, '').split('.') : label.replace(/\\/g, '/').split('/'))
+    .filter((part) => part && part !== '.' && part !== '..');
+  const actual = path.split('/');
+  if (typed.length > 1 && typed.length <= actual.length) {
+    const tail = actual.slice(actual.length - typed.length);
+    // Solo si lo distinto es una carpeta: si es el archivo, basta su nombre.
+    if (typed.slice(0, -1).some((part, index) => part !== tail[index])) {
+      return `Se escribe «${tail.join('/')}»: en Linux las mayúsculas cuentan.`;
+    }
+  }
+  return `Se llama «${basenameOf(path)}»: en Linux las mayúsculas cuentan.`;
+}
 
 type Resolved = {
   label: string;
@@ -1413,6 +1723,8 @@ type ResolveOptions = {
   uses: (name: string) => boolean;
   /** Calcular «¿Quisiste decir...?» (no hace falta para «La usan»). */
   hints: boolean;
+  /** Java: el paquete del archivo que importa (una clase de un paquete parecido puede ser suya). */
+  ownPackage?: string;
 };
 
 const C_HEADER_FILES = /\.(?:h|hh|hpp|hxx|h\+\+|inl|ipp|tpp|txx)$/i;
@@ -1420,28 +1732,54 @@ const C_SOURCE_FILES = /\.(?:c|cc|cpp|cxx|c\+\+)$/i;
 const C_FAMILY_FILES = /\.(?:h|hh|hpp|hxx|inl|ipp|tpp|txx|c|cc|cpp|cxx)$/i;
 
 function local(label: string, found: Found, warning?: string): Resolved {
-  return { label, type: 'local', path: found.path, warning: found.caseMismatch ? CASE_WARNING(found.path) : warning };
+  return { label, type: 'local', path: found.path, warning: found.caseMismatch ? caseWarning(label, found.path) : warning };
 }
 
 /**
  * #include "x": donde lo busca el compilador. Junto al archivo; en `include/` o `inc/` de esa
- * carpeta o de una de arriba (el -Iinclude de casi todo CMake o Makefile); y, con aviso, en
- * una carpeta de arriba (solo compila con -I). Lo que esta en otra carpeta cualquiera ya no
- * cuenta como encontrado: es el error que el cuadro tiene que mostrar (revision independiente
- * del 25/10/2026: `taller2/main.cpp` con `#include "figura.h"` y solo `taller1/figura.h`).
+ * carpeta o de una de arriba; y en una carpeta de arriba. Sin CMakeLists.txt ni Makefile, lo que
+ * no esta junto al archivo solo compila con -I (el cuadro lo avisa). Lo que esta en otra carpeta
+ * cualquiera no cuenta como encontrado: es el error que el cuadro tiene que mostrar.
  */
 function findCInclude(spec: string, fromDir: string, project: ProjectFiles) {
   const near = project.findFirst([joinPath(fromDir, spec)]);
   if (near) {
-    return { found: near, ancestor: false };
+    return { found: near, via: 'same' as const };
   }
   const ancestors = ancestorsOf(fromDir);
   const included = project.findFirst(ancestors.flatMap((dir) => [joinPath(dir, `include/${spec}`), joinPath(dir, `inc/${spec}`)]));
   if (included) {
-    return { found: included, ancestor: false };
+    return { found: included, via: 'include' as const };
   }
   const above = project.findFirst(ancestors.slice(1).map((dir) => joinPath(dir, spec)));
-  return above ? { found: above, ancestor: true } : null;
+  return above ? { found: above, via: 'above' as const } : null;
+}
+
+/** Encabezados precompilados de Visual Studio: un proyecto copiado de Windows los incluye. */
+const C_VISUAL_STUDIO_HEADERS = new Set(['stdafx.h', 'pch.h']);
+
+/** Carpetas de codigo dentro de un ejercicio: la carpeta del ejercicio es la de arriba. */
+const C_CODE_DIRS = new Set(['src', 'source', 'sources', 'test', 'tests', 'app', 'lib', 'include', 'inc', 'headers']);
+
+/**
+ * La carpeta del ejercicio de `fromDir` (sin archivo de compilacion): lo de antes de su primera
+ * carpeta de codigo (`ejercicio/src/modelo` -> `ejercicio`) o la carpeta misma (`semana3/taller2`).
+ * Antes era la primera carpeta del proyecto, y `semana3/taller1/figura.h` contaba como del mismo
+ * ejercicio que `semana3/taller2/main.cpp` (revision independiente del 25/10/2026).
+ */
+function cExerciseRoot(fromDir: string) {
+  const parts = normalizePath(fromDir).split('/').filter(Boolean);
+  const index = parts.findIndex((part) => C_CODE_DIRS.has(part.toLowerCase()));
+  return (index >= 0 ? parts.slice(0, index) : parts).join('/');
+}
+
+/** La carpeta que hay que pasar con -I (relativa a la del ejercicio) para que `spec` se encuentre en `path`. */
+function cIncludeFlag(path: string, spec: string, root: string) {
+  const includeDir = path.slice(0, Math.max(0, path.length - spec.length)).replace(/\/$/, '');
+  const flagDir = root && includeDir.startsWith(`${root}/`)
+    ? includeDir.slice(root.length + 1)
+    : includeDir === root ? '.' : includeDir;
+  return { includeDir: includeDir || '.', flagDir: flagDir || '.' };
 }
 
 function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
@@ -1450,21 +1788,49 @@ function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, op
   const backslashWarning = spec !== written ? `En Linux usa / en la ruta: #include "${spec}".` : undefined;
   const lower = spec.toLowerCase();
   const known = C_HEADERS[lower];
-  const warning = C_HEADER_WARNINGS[lower];
+  // Dentro de `#ifdef _WIN32` (o de otra macro de plataforma), windows.h o conio.h son a proposito.
+  const warning = imp.platformGuarded ? undefined : C_HEADER_WARNINGS[lower];
   const fromDir = dirnameOf(fromPath);
   const explicitRelative = /^\.{1,2}\//.test(spec);
   const relative = joinPath(fromDir, spec);
+  // Con CMakeLists.txt o Makefile, sus -I encuentran lo del proyecto; sin ellos, el ejercicio.
+  const projectRoot = project.cProjectRoot(fromDir);
+  const exerciseRoot = projectRoot ?? cExerciseRoot(fromDir);
   // <Vector> o <String> pasan en Windows y macOS, no en Linux.
-  const caseWarning = known && spec !== lower && !warning ? `En Linux se escribe en minúsculas: #include <${lower}>.` : undefined;
+  const caseWarning = !imp.platformGuarded && known && spec !== lower && !C_HEADER_WARNINGS[lower]
+    ? `En Linux se escribe en minúsculas: #include <${lower}>.`
+    : undefined;
+  const flagWarning = (path: string) => {
+    const { includeDir, flagDir } = cIncludeFlag(path, spec, exerciseRoot);
+    return `Está en «${includeDir}»: compila con -I${flagDir} o escribe #include "${relativeFrom(fromDir, path)}".`;
+  };
+  // Si se encontro lejos del archivo, se mira tambien junto a el en el disco: el indice puede no
+  // tener la copia de al lado (tope de 90 archivos) y se abria la de otra carpeta.
+  const besides = (found: Found) => (dirnameOf(found.path) !== fromDir && relative && relative !== found.path ? [relative] : undefined);
   if (imp.kind === 'angle') {
     if (known) {
       return [{ label: spec, type: 'library', description: known, warning: warning || caseWarning }];
     }
-    const own = findCInclude(spec, fromDir, project);
-    if (own) {
-      return [local(spec, own.found, `Es tuyo: inclúyelo con comillas, #include "${spec}".`)];
+    const library = cLibraryDescription(spec);
+    if (library) {
+      return [{ label: spec, type: 'library', description: library }];
     }
-    return [{ label: spec, type: 'library', description: cLibraryDescription(spec) || 'biblioteca del sistema o externa' }];
+    // <figura.h> de tu proyecto: junto al archivo, o en el proyecto con CMake o Makefile, basta
+    // cambiar a comillas; sin ellos, tampoco compila sin -I.
+    const own = findCInclude(spec, fromDir, project);
+    const found = own?.found || project.under(exerciseRoot, spec, fromDir);
+    if (found) {
+      const needsFlag = projectRoot === null && own?.via !== 'same';
+      return [{
+        ...local(spec, found, needsFlag
+          ? `Es tuyo: escribe #include "${relativeFrom(fromDir, found.path)}" o compila con -I${cIncludeFlag(found.path, spec, exerciseRoot).flagDir}.`
+          : `Es tuyo: inclúyelo con comillas, #include "${spec}".`),
+        expected: besides(found),
+      }];
+    }
+    // Se mira junto al archivo en el disco: un figura.h de al lado que el indice no tiene (tope de
+    // 90 archivos) no es una biblioteca.
+    return [{ label: spec, type: 'library', description: 'biblioteca del sistema o externa', expected: relative ? [relative] : undefined }];
   }
   if (relative === null) {
     return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
@@ -1472,52 +1838,61 @@ function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, op
   const own = explicitRelative
     ? (() => {
       const found = project.find(relative);
-      return found ? { found, ancestor: false } : null;
+      return found ? { found, via: 'same' as const } : null;
     })()
     : findCInclude(spec, fromDir, project);
   if (own) {
     const source = C_SOURCE_FILES.exec(own.found.path);
-    // Con CMakeLists.txt o Makefile, sus -I lo encuentran: el aviso de la carpeta de arriba sobra.
-    const ancestorWarning = own.ancestor && project.cProjectRoot(fromDir) === null
-      ? `Está en una carpeta de arriba: escribe #include "${relativeFrom(fromDir, own.found.path)}" o compila con -I.`
-      : undefined;
-    return [local(spec, own.found, backslashWarning
-      || ancestorWarning
-      || (source ? `Incluir un ${source[0]} suele dar «multiple definition»: incluye su .h.` : undefined))];
+    const placement = projectRoot !== null || own.via === 'same'
+      ? undefined
+      : own.via === 'above'
+        ? `Está en una carpeta de arriba: escribe #include "${relativeFrom(fromDir, own.found.path)}" o compila con -I.`
+        : flagWarning(own.found.path);
+    return [{
+      ...local(spec, own.found, backslashWarning
+        || placement
+        || (source ? `Incluir un ${source[0]} suele dar «multiple definition»: incluye su .h.` : undefined)),
+      expected: besides(own.found),
+    }];
   }
   if (known) {
     return [{ label: spec, type: 'library', description: known, warning: warning || caseWarning }];
   }
   if (!explicitRelative) {
-    // En el mismo proyecto pero en otra carpeta: con un CMakeLists.txt o un Makefile, sus -I lo
-    // encuentran (headers/, src/, lib/...); sin ellos, solo compila agregando -I. Lo que esta en
-    // la carpeta de otro ejercicio (taller1 desde taller2) sigue siendo «No encontrado».
-    const projectRoot = project.cProjectRoot(fromDir);
-    const exerciseRoot = projectRoot ?? (fromDir.split('/').filter(Boolean)[0] || '');
+    // En el mismo proyecto (o ejercicio) pero en otra carpeta: con CMakeLists.txt o Makefile sus
+    // -I lo encuentran; sin ellos, solo compila agregando -I. Lo de la carpeta de otro ejercicio
+    // (taller1 desde taller2) sigue siendo «No encontrado».
     const inProject = project.under(exerciseRoot, spec, fromDir);
     if (inProject) {
-      // La carpeta que hay que pasar con -I: la ruta del archivo sin lo que dice el #include.
-      const includeDir = inProject.path.slice(0, inProject.path.length - spec.length).replace(/\/$/, '');
-      const flagDir = exerciseRoot && includeDir.startsWith(`${exerciseRoot}/`)
-        ? includeDir.slice(exerciseRoot.length + 1)
-        : includeDir === exerciseRoot ? '.' : includeDir;
-      return [local(spec, inProject, projectRoot !== null
-        ? undefined
-        : `Está en «${includeDir || '.'}»: compila con -I${flagDir || '.'} o escribe #include "${relativeFrom(fromDir, inProject.path)}".`)];
+      return [{
+        ...local(spec, inProject, backslashWarning || (projectRoot !== null ? undefined : flagWarning(inProject.path))),
+        expected: besides(inProject),
+      }];
     }
   }
   const library = cLibraryDescription(spec);
   if (library) {
     return [{ label: spec, type: 'library', description: library }];
   }
-  // En otra carpeta: el compilador no lo encuentra, pero el estudiante si sabe donde esta.
-  const other = project.elsewhere(spec, fromDir);
-  if (other) {
+  if (C_VISUAL_STUDIO_HEADERS.has(lower)) {
     return [{
       label: spec,
       type: 'missing',
-      description: 'Está en otra carpeta.',
-      hint: `Está en «${other}»: escribe #include "${relativeFrom(fromDir, other)}".`,
+      description: 'Es de Visual Studio (encabezado precompilado).',
+      hint: 'Con g++ no hace falta: borra esta línea.',
+      expected: [relative],
+      probe: basenameOf(spec),
+    }];
+  }
+  // En otra carpeta: el compilador no lo encuentra, pero el estudiante si sabe donde esta.
+  const other = project.elsewhere(spec, fromDir, [fromPath]);
+  if (other) {
+    const sameFolder = dirnameOf(other) === fromDir; // "../figura.h" con figura.h al lado
+    return [{
+      label: spec,
+      type: 'missing',
+      description: sameFolder ? 'Está en esta misma carpeta.' : 'Está en otra carpeta.',
+      hint: sameFolder ? `Escribe #include "${basenameOf(other)}".` : `Está en «${other}»: escribe #include "${relativeFrom(fromDir, other)}".`,
       expected: [relative],
       probe: basenameOf(spec),
     }];
@@ -1526,7 +1901,7 @@ function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, op
     label: spec,
     type: 'missing',
     description: 'Revisa el nombre y la carpeta.',
-    hint: options.hints ? project.suggest(spec, C_HEADER_FILES.test(spec) ? C_HEADER_FILES : C_SOURCE_FILES.test(spec) ? C_SOURCE_FILES : C_FAMILY_FILES) : '',
+    hint: options.hints ? project.suggest(spec, C_HEADER_FILES.test(spec) ? C_HEADER_FILES : C_SOURCE_FILES.test(spec) ? C_SOURCE_FILES : C_FAMILY_FILES, fromPath) : '',
     probe: basenameOf(spec),
     expected: [relative],
   }];
@@ -1537,8 +1912,73 @@ function pythonLibrary(spec: string): Resolved | null {
   if (PY_STDLIB.has(top)) {
     return { label: spec, type: 'library', description: PY_DESCRIPTIONS[spec] || PY_DESCRIPTIONS[top] || 'biblioteca estándar de Python', warning: PY_WARNINGS[top] };
   }
-  const third = PY_THIRD_PARTY[top] || PY_THIRD_PARTY[top.toLowerCase()];
+  // Con las mayusculas exactas: `import Numpy` falla en todos los equipos («¿Quisiste decir...?»).
+  const third = PY_THIRD_PARTY[top];
   return third ? { label: spec, type: 'library', description: third } : null;
+}
+
+/**
+ * Un modulo de Python o un paquete conocido a una letra (o a dos letras cambiadas de lugar) del
+ * nombre: casi siempre un error de tipeo (`import maths`, `Tkinter`, `reqeusts`). Antes no se
+ * comparaba con los paquetes de pip, y `reqeusts` salia como «instálalo con pip» (un paquete con
+ * ese nombre puede ser malicioso).
+ */
+const PY_TYPO_CACHE = new Map<string, string>();
+
+function pythonTypo(name: string) {
+  if (name.length < 4) {
+    return '';
+  }
+  const cached = PY_TYPO_CACHE.get(name);
+  if (cached !== undefined) {
+    return cached;
+  }
+  if (PY_TYPO_CACHE.size > 5000) {
+    PY_TYPO_CACHE.clear();
+  }
+  const best = closestPythonModule(name);
+  PY_TYPO_CACHE.set(name, best);
+  return best;
+}
+
+function closestPythonModule(name: string) {
+  const lower = name.toLowerCase();
+  const max = name.length >= 9 ? 2 : 1;
+  let best = '';
+  let bestScore = max + 1;
+  for (const candidate of [...PY_STDLIB, ...Object.keys(PY_THIRD_PARTY)]) {
+    if (candidate === name || candidate.startsWith('_')) {
+      continue;
+    }
+    const score = editDistance(candidate.toLowerCase(), lower, max);
+    if (score < bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return bestScore <= max ? best : '';
+}
+
+/**
+ * `from paquete import a, b` con paquete/__init__.py: a y b pueden ser modulos (paquete/a.py).
+ * Antes se mostraba solo el __init__.py (casi siempre vacio) y «La usan» de a.py no veia el import.
+ */
+function packageSubmodules(found: Found, names: string[], label: string, project: ProjectFiles): Resolved[] | null {
+  if (basenameOf(found.path) !== '__init__.py' || !names.length) {
+    return null;
+  }
+  const dir = dirnameOf(found.path);
+  const modules = names
+    .map((name) => ({ name, found: project.findFirst([joinPath(dir, `${name}.py`), joinPath(dir, `${name}/__init__.py`)]) }))
+    .filter((item): item is { name: string; found: Found } => !!item.found);
+  if (!modules.length) {
+    return null;
+  }
+  const others = names.filter((name) => !modules.some((item) => item.name === name));
+  return [
+    ...modules.map((item) => local(`${label}${label.endsWith('.') ? '' : '.'}${item.name}`, item.found)),
+    ...(others.length ? [{ ...local(label, found), names: others }] : []),
+  ];
 }
 
 /**
@@ -1565,7 +2005,7 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
     if (rest) {
       const found = findModule(modulePath);
       if (found) {
-        return [{ ...local(spec, found), names }];
+        return packageSubmodules(found, names, spec, project) || [{ ...local(spec, found), names }];
       }
     }
     // from . import a, b  /  from .paquete import modulo: cada nombre puede ser un modulo.
@@ -1588,7 +2028,7 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
       label: spec,
       type: 'missing',
       description: 'Revisa el nombre y la carpeta.',
-      hint: options.hints && missingName ? project.suggest(`${missingName}.py`, /\.py$/i) : '',
+      hint: options.hints && missingName ? project.suggest(`${missingName}.py`, /\.py$/i, fromPath) : '',
       probe: missingName ? `${missingName}.py` : undefined,
       expected: modulePath && rest ? [`${modulePath}.py`] : undefined,
     }];
@@ -1599,9 +2039,23 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
   const roots = [...new Set(ancestorsOf(fromDir).flatMap((dir) => [dir, joinPath(dir, 'src') || 'src']))];
   const found = project.findFirst(roots.flatMap((root) => [joinPath(root, `${asPath}.py`), joinPath(root, `${asPath}/__init__.py`)]));
   if (found) {
-    // random.py, turtle.py o math.py del estudiante tapan el modulo de Python del mismo nombre.
     const top = spec.split('.')[0];
     const ownName = stemOf(found.path) === '__init__' ? basenameOf(dirnameOf(found.path)) : stemOf(found.path);
+    if (ownName === top && (PY_ALWAYS_BUILTIN.has(top) || PY_LINUX_BUILTIN.has(top))) {
+      // time.py no tapa a time: Python usa el suyo (y en Linux tambien el de math, zlib...).
+      const file = basenameOf(found.path) === '__init__.py' ? `${ownName}/` : basenameOf(found.path);
+      return [{
+        ...(pythonLibrary(spec) || { label: spec, type: 'library' as const, description: 'biblioteca estándar de Python' }),
+        warning: PY_ALWAYS_BUILTIN.has(top)
+          ? `Python usa su módulo «${top}», no tu ${file}: cámbiale el nombre a tu archivo.`
+          : `Tu ${file} se llama como el módulo «${top}» de Python: en Linux se usa el de Python y en otros equipos el tuyo. Cámbiale el nombre.`,
+      }];
+    }
+    const submodules = packageSubmodules(found, names, spec, project);
+    if (submodules) {
+      return submodules;
+    }
+    // random.py o turtle.py del estudiante tapan el modulo de Python del mismo nombre.
     const shadowed = ownName === top && pythonLibrary(top)
       ? `Tapa el módulo «${top}» de Python: si querías ese, cámbiale el nombre.`
       : undefined;
@@ -1637,10 +2091,10 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
     }];
   }
   if (options.hints) {
-    // Un nombre casi igual a un modulo tuyo o de Python es casi siempre un error de tipeo.
-    const own = project.suggest(`${top}.py`, /\.py$/i);
-    const max = top.length >= 6 ? 2 : 1;
-    const std = own ? '' : [...PY_STDLIB].find((name) => name !== top && editDistance(name.toLowerCase(), top.toLowerCase(), max) <= max) || '';
+    // Un nombre casi igual a un modulo tuyo, de Python o de un paquete conocido es casi siempre
+    // un error de tipeo.
+    const own = project.suggest(`${top}.py`, /\.py$/i, fromPath);
+    const std = own ? '' : pythonTypo(top);
     if (own || std) {
       return [{
         label: spec,
@@ -1687,7 +2141,7 @@ function resolveJava(imp: ParsedImport, fromPath: string, project: ProjectFiles,
         ? used.map((path) => local(`${spec}.${stemOf(path)}`, { path, caseMismatch: false }))
         : [{ label: `${spec}.*`, type: 'local', path: project.nearest(classes, fromDir), description: `${classes.length} clase(s) de tu proyecto` }];
     }
-    if (JAVA_STD_PREFIX.test(`${spec}.`) || JAVA_THIRD_PARTY_PREFIX.test(spec) || project.hasJavaBuild) {
+    if (JAVA_STD_PREFIX.test(`${spec}.`) || JAVA_THIRD_PARTY_PREFIX.test(spec) || project.javaBuildRoot(fromDir) !== null) {
       return [{ label: `${spec}.*`, type: 'library', description: javaLibraryDescription(spec) }];
     }
     return [{ label: `${spec}.*`, type: 'missing', description: 'No hay una carpeta con ese paquete en tu proyecto.' }];
@@ -1702,6 +2156,22 @@ function resolveJava(imp: ParsedImport, fromPath: string, project: ProjectFiles,
   if (found) {
     return [local(spec, found)];
   }
+  // import modelo.Carta.Palo; (un enum o una clase dentro de Carta): el archivo es Carta.java.
+  const parts = spec.split('.');
+  for (let length = parts.length - 1; length >= 1; length -= 1) {
+    const outer = parts[length - 1];
+    if (!/^\p{Lu}/u.test(outer)) {
+      break; // los paquetes van en minusculas
+    }
+    const outerPackage = parts.slice(0, length - 1).join('.');
+    const byOuter = (project.javaPackages.get(outerPackage) || []).filter((path) => stemOf(path) === outer);
+    const nested = byOuter.length
+      ? { path: project.nearest(byOuter, fromDir), caseMismatch: false }
+      : project.findSuffix(`${parts.slice(0, length).join('/')}.java`, fromDir);
+    if (nested) {
+      return [local(spec, nested)];
+    }
+  }
   if (JAVA_STD_PREFIX.test(spec) || JAVA_THIRD_PARTY_PREFIX.test(spec)) {
     return [{ label: spec, type: 'library', description: javaLibraryDescription(spec) }];
   }
@@ -1714,14 +2184,25 @@ function resolveJava(imp: ParsedImport, fromPath: string, project: ProjectFiles,
       hint: `Está en «${elsewhere.path}»: revisa su línea package o el import.`,
     }];
   }
-  if (project.hasJavaBuild) {
-    return [{ label: spec, type: 'library', description: 'dependencia del proyecto (Maven o Gradle)' }];
+  const buildRoot = project.javaBuildRoot(fromDir);
+  if (buildRoot !== null) {
+    // En un proyecto Maven o Gradle grande una clase tuya puede no estar en el indice (90
+    // archivos): si su paquete empieza como el del archivo, se busca en el disco antes.
+    const likelyOwn = !!options.ownPackage && options.ownPackage.split('.')[0] === parts[0];
+    return [{
+      label: spec,
+      type: 'library',
+      description: 'dependencia del proyecto (Maven o Gradle)',
+      ...(likelyOwn
+        ? { probe: `${className}.java`, expected: [joinPath(buildRoot, `src/main/java/${parts.join('/')}.java`) || `${parts.join('/')}.java`] }
+        : {}),
+    }];
   }
   return [{
     label: spec,
     type: 'missing',
     description: 'Revisa el nombre y el paquete.',
-    hint: options.hints ? project.suggest(`${className}.java`, /\.java$/i) : '',
+    hint: options.hints ? project.suggest(`${className}.java`, /\.java$/i, fromPath) : '',
     probe: `${className}.java`,
   }];
 }
@@ -1751,10 +2232,24 @@ function findJsFile(base: string, project: ProjectFiles): Found | null {
   ]) || direct;
 }
 
+/** Archivos que se importan por su nombre completo en JS (imagenes, fuentes, textos). */
+const JS_ASSET_FILES = /\.(?:png|jpe?g|gif|svg|webp|ico|bmp|avif|mp3|wav|ogg|mp4|webm|woff2?|ttf|otf|eot|txt|md|csv|xml|ya?ml|wasm|glsl)$/i;
+
+/**
+ * ¿La ruta trae extension? `./usuario.routes` o `./auth.service` no: el archivo es
+ * usuario.routes.ts (antes se buscaba en el disco un archivo llamado «usuario.routes»).
+ */
+function hasJsExtension(path: string) {
+  return JS_FILES.test(path) || JS_ASSET_FILES.test(path);
+}
+
 /** './App' con App.vue: webpack (Vue CLI) lo encuentra; Vite pide la extension. */
 function findComponentFile(base: string, project: ProjectFiles): Found | null {
-  return /\.[^/.]+$/.test(base) ? null : project.findFirst([`${base}.vue`, `${base}.svelte`]);
+  return hasJsExtension(base) ? null : project.findFirst([`${base}.vue`, `${base}.svelte`]);
 }
+
+/** Paquetes de npm que se importan por partes ('firebase/app'): nunca son un archivo del proyecto. */
+const NPM_SUBPATH_PACKAGES = new Set(['firebase', 'rxjs', 'date-fns', 'three', 'bootstrap', 'swiper', 'react-icons', 'chart.js', 'primereact', 'antd', 'dayjs', 'i18next', 'yup', 'zod', 'sweetalert2', 'leaflet', 'd3', 'echarts', 'next', 'nuxt', 'vue-router', 'pinia', 'vuex', 'redux', 'react-router-dom', 'socket.io-client', 'highlight.js', 'katex', 'codemirror', 'monaco-editor']);
 
 /**
  * Organizaciones de npm conocidas: '@vue/test-utils' es un paquete aunque el proyecto tenga una
@@ -1825,13 +2320,15 @@ function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, o
       return [{ ...local(spec, component, `Con Vite escribe la extensión: '${spec}${component.path.slice(component.path.lastIndexOf('.'))}'.`), names }];
     }
     const name = basenameOf(base);
-    const hasExtension = /\.[^.]+$/.test(name);
+    const hasExtension = hasJsExtension(name);
     return [{
       label: spec,
       type: 'missing',
       description: appAlias ? `El alias ${appAlias} suele apuntar a src/ y ahí no está.` : 'Revisa el nombre y la carpeta.',
       // Sin extension escrita es un modulo de codigo: no se sugiere util.css para './util'.
-      hint: options.hints ? project.suggest(hasExtension ? name : `${name}.js`, hasExtension ? JS_FILES : JS_SCRIPT_FILES) : '',
+      hint: options.hints
+        ? project.suggest(hasExtension ? name : `${name}.js`, hasExtension ? (JS_FILES.test(name) ? JS_FILES : JS_ASSET_FILES) : JS_SCRIPT_FILES, fromPath)
+        : '',
       probe: name && !/[*?[\]{}]/.test(name) ? (hasExtension ? name : `${name}.*`) : undefined,
       expected: hasExtension ? [base] : ['.ts', '.js', '.tsx', '.jsx'].map((extension) => `${base}${extension}`),
     }];
@@ -1844,6 +2341,13 @@ function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, o
   // '@components/Boton' con un archivo components/Boton.tsx en el proyecto: un alias, no npm.
   if (/^@[\w.-]+\/./.test(spec) && !NPM_KNOWN[pkg] && !NPM_SCOPES.has(pkg.split('/')[0])) {
     const aliased = findJsAliasFile(spec.slice(1), fromDir, project);
+    if (aliased) {
+      return [{ ...local(spec, aliased), names }];
+    }
+  }
+  // 'components/Boton' con baseUrl en tsconfig o jsconfig: un archivo del proyecto que termina igual.
+  if (!spec.startsWith('@') && spec.includes('/') && !NPM_KNOWN[pkg] && !NPM_SUBPATH_PACKAGES.has(pkg)) {
+    const aliased = findJsAliasFile(spec, fromDir, project);
     if (aliased) {
       return [{ ...local(spec, aliased), names }];
     }
@@ -1938,13 +2442,13 @@ export function declaredNames(outline: string) {
     if (!text || /^(?:#|import\b|from\b|require|using\b|package\b|\(\d+ declaracion)/.test(text) || /\boperator\b/.test(text)) {
       continue;
     }
-    const type = /\b(?:class|struct|interface|enum(?:\s+class)?|union|record|module)\s+([A-Za-z_]\w*)/.exec(text);
+    const type = /\b(?:class|struct|interface|enum(?:\s+class)?|union|record|module)\s+([\p{L}_][\p{L}\p{N}_]*)/u.exec(text);
     if (type && !GENERIC_NAMES.has(type[1])) {
       names.set(type[1], 'type');
       continue;
     }
-    const def = /^(?:async\s+)?def\s+([A-Za-z_]\w*)/.exec(text);
-    const call = def || /([A-Za-z_~][\w]*)\s*\(/.exec(text);
+    const def = /^(?:async\s+)?def\s+([\p{L}_][\p{L}\p{N}_]*)/u.exec(text);
+    const call = def || /([\p{L}_~][\p{L}\p{N}_]*)\s*\(/u.exec(text);
     const name = call ? call[1] : '';
     if (!name || name.startsWith('~') || name.startsWith('__') || GENERIC_NAMES.has(name) || names.has(name)) {
       continue;
@@ -1973,9 +2477,10 @@ function symbolsUsed(resolved: Resolved, entry: DependencyIndexFile | undefined,
 
 /** Primera linea donde aparece `name` como palabra en el codigo (0 si no aparece). */
 function firstUseLine(code: string, starts: number[], name: string, skip = -1) {
-  const pattern = new RegExp(`\\b${name.replace(/[$]/g, '\\$')}\\b`, 'g');
+  // Bordes de palabra con tildes (\b no ve la ó de «Canción» como letra).
+  const pattern = new RegExp(`(?:^|[^\\p{L}\\p{N}_$])${name.replace(/[$]/g, '\\$')}(?![\\p{L}\\p{N}_$])`, 'gu');
   for (const match of code.matchAll(pattern)) {
-    const line = lineOfIndex(starts, match.index || 0);
+    const line = lineOfIndex(starts, (match.index || 0) + match[0].length - name.length);
     if (line !== skip) {
       return line;
     }
@@ -2004,25 +2509,55 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
 
   if (family !== 'none') {
     const identifiers = collectIdentifiers(text, family);
-    const options: ResolveOptions = { uses: (name) => identifiers.has(name), hints: true };
+    const options: ResolveOptions = { uses: (name) => identifiers.has(name), hints: true, ownPackage: activePackage };
     const seen = new Set<string>();
-    const imports = parseImports(text, family);
+    // A lo sumo 2000 imports (el cuadro muestra 40 por grupo); el mismo import repetido se
+    // resuelve una vez (un archivo con miles de `import nada` tardaba mas de un segundo).
+    const imports = parseImports(text, family).slice(0, MAX_IMPORTS);
+    const resolvedByImport = new Map<string, Resolved[]>();
+    const resolveOnce = (imp: ParsedImport) => {
+      const key = `${imp.kind}\n${imp.specifier}\n${imp.names.join(',')}\n${imp.platformGuarded ? 1 : 0}`;
+      let resolved = resolvedByImport.get(key);
+      if (!resolved) {
+        resolved = resolveImport(imp, activePath, family, project, options);
+        resolvedByImport.set(key, resolved);
+      }
+      return resolved;
+    };
     for (const imp of imports) {
-      for (const item of resolveImport(imp, activePath, family, project, options)) {
+      for (const item of resolveOnce(imp)) {
         if (item.type === 'local' && item.path === activePath) {
           // turtle.py con `import turtle` se importa a si mismo: el error clasico de nombrar el
           // archivo como la biblioteca. Se muestra la biblioteca con el aviso.
           const library = family === 'python' ? pythonLibrary(imp.specifier) : null;
-          if (library && !seen.has(`library:${library.label}`)) {
-            seen.add(`library:${library.label}`);
-            result.libraries.push({
-              label: library.label,
+          if (library) {
+            if (!seen.has(`library:${library.label}`)) {
+              seen.add(`library:${library.label}`);
+              result.libraries.push({
+                label: library.label,
+                line: imp.line,
+                description: library.description || '',
+                warning: `«import ${imp.specifier.split('.')[0]}» importa este mismo archivo (${basenameOf(activePath)}), no la biblioteca: cámbiale el nombre.`,
+              });
+            }
+            continue;
+          }
+          // #include "figura.h" dentro de figura.h, o `import main` en main.py (que lo vuelve a
+          // ejecutar): antes se omitia sin decir nada.
+          if (!seen.has(`self:${activePath}`)) {
+            seen.add(`self:${activePath}`);
+            result.local.push({
+              label: item.label,
               line: imp.line,
-              description: library.description || '',
-              warning: `«import ${imp.specifier.split('.')[0]}» importa este mismo archivo (${basenameOf(activePath)}), no la biblioteca: cámbiale el nombre.`,
+              path: activePath,
+              warning: family === 'c'
+                ? 'Se incluye a sí mismo: borra esta línea.'
+                : family === 'python'
+                  ? 'Se importa a sí mismo: el archivo se ejecuta dos veces. Borra esta línea.'
+                  : 'Se importa a sí mismo: borra esta línea.',
             });
           }
-          continue; // se incluye a si mismo
+          continue;
         }
         // Un mismo archivo escrito de dos formas ("figura.h" y "./figura.h") va una vez.
         const key = item.type === 'local'
@@ -2035,9 +2570,8 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
         if (item.probe && item.type !== 'local') {
           probes.add(item.probe);
         }
-        if (item.type !== 'local') {
-          (item.expected || []).forEach((path) => expected.add(path));
-        }
+        // Tambien de lo encontrado lejos del archivo (C/C++): se comprueba junto a el en el disco.
+        (item.expected || []).forEach((path) => expected.add(path));
         const base: FileDependencyItem = { label: item.label, line: imp.line };
         if (item.type === 'local') {
           const symbols = symbolsUsed(item, item.path ? project.entries.get(item.path) : undefined, identifiers);
@@ -2076,7 +2610,7 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
         : project.paths.filter((path) => path.toLowerCase().endsWith('.cs'));
       for (const path of candidates) {
         const name = stemOf(path);
-        if (path === activePath || name === own || already.has(path) || imported.has(name) || !/^[A-Z]/.test(name) || !identifiers.has(name)) {
+        if (path === activePath || name === own || already.has(path) || imported.has(name) || !/^\p{Lu}/u.test(name) || !identifiers.has(name)) {
           continue;
         }
         result.local.push({ label: name, line: firstUseLine(code, starts, name), path, implicit: true });
@@ -2098,7 +2632,8 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
     const refs = new Set(file.typeRefs || []);
     const options: ResolveOptions = { uses: (name) => refs.has(name), hints: false };
     let line = -1;
-    for (const imp of file.imports || []) {
+    // A lo sumo 300 imports por archivo: 90 archivos con miles de #include tardaban segundos.
+    for (const imp of (file.imports || []).slice(0, 300)) {
       if (resolveImport(imp, path, fileFamily, project, options).some((item) => item.type === 'local' && item.path === activePath)) {
         line = imp.line;
         break;

@@ -144,5 +144,18 @@ describe('scan-privacy: estructura sin claves, rapido (revision independiente, 0
     );
     assert.equal(scrubOutline('6: DOCS = "https://docs.ejemplo.com/v1"', 'cliente.py'), '6: DOCS = "https://docs.ejemplo.com/v1"');
   });
+
+  it('tambien sin usuario (redis://:clave@), con pwd y en cadenas de conexion de C# o JDBC', () => {
+    assert.equal(containsSecret('url = "redis://:MiClave2026@localhost:6379"', 'app.py'), true);
+    assert.equal(scrubOutline('2:   std::string pwd = "MiClave2026";', 'banco.h'), '2:   std::string pwd = "…";');
+    assert.equal(
+      scrubOutline('7: const string conexion = "Server=localhost;Database=tienda;User Id=sa;Password=Secreta123;";', 'Datos.cs'),
+      '7: const string conexion = "Server=localhost;Database=tienda;User Id=sa;Password=…;";',
+    );
+    assert.equal(
+      scrubOutline('8: String url = "jdbc:mysql://localhost:3306/tienda?user=root&password=Secreta123";', 'Conexion.java'),
+      '8: String url = "jdbc:mysql://localhost:3306/tienda?user=root&password=…";',
+    );
+  });
 });
 

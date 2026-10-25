@@ -440,16 +440,19 @@ describe('revision independiente del cuadro (0.0.36)', () => {
     assert.doesNotMatch(prompt, /taller1/, 'el tutor no recibe un archivo que el compilador no ve');
   });
 
-  it('C++: include/ de la carpeta o de una de arriba vale; una carpeta de arriba, con aviso', () => {
+  it('C++: include/ y una carpeta de arriba se encuentran; sin CMake ni Makefile, con el -I que falta', () => {
     const files = [
       indexFile('proyecto/include/lista.h', '', 'cpp'),
       indexFile('proyecto/comun.h', '', 'cpp'),
     ];
-    const deps = resolveFileDependencies({ activePath: 'proyecto/src/main.cpp', language: 'cpp', text: '#include "lista.h"\n#include "comun.h"', files });
+    const text = '#include "lista.h"\n#include "comun.h"';
+    const deps = resolveFileDependencies({ activePath: 'proyecto/src/main.cpp', language: 'cpp', text, files });
     assert.deepEqual(deps.local.map((item) => [item.path, item.warning]), [
-      ['proyecto/include/lista.h', undefined],
+      ['proyecto/include/lista.h', 'Está en «proyecto/include»: compila con -Iinclude o escribe #include "../include/lista.h".'],
       ['proyecto/comun.h', 'Está en una carpeta de arriba: escribe #include "../comun.h" o compila con -I.'],
     ]);
+    const built = resolveFileDependencies({ activePath: 'proyecto/src/main.cpp', language: 'cpp', text, files, buildFiles: ['proyecto/CMakeLists.txt'] });
+    assert.deepEqual(built.local.map((item) => [item.path, item.warning]), [['proyecto/include/lista.h', undefined], ['proyecto/comun.h', undefined]]);
   });
 
   it('Python: un modulo de otra carpeta no se importa; la raiz y src/ si', () => {
@@ -629,9 +632,11 @@ describe('segunda revision independiente del cuadro (0.0.36)', () => {
     assert.deepEqual(header.dependents.map((item) => item.path), ['src/Calculadora.cpp', 'src/main.cpp', 'test/test_calculadora.cpp']);
   });
 
-  it('C++ sin CMake: un .h de otra carpeta queda «sin encontrar» con la ruta que funciona', () => {
+  it('C++ sin CMake: test/ y src/ son del mismo proyecto, pero falta el -I', () => {
     const deps = resolveFileDependencies({ activePath: 'test/test_calculadora.cpp', language: 'cpp', text: '#include "Calculadora.h"', files: pilot });
-    assert.deepEqual(deps.missing.map((item) => item.hint), ['Está en «src/Calculadora.h»: escribe #include "../src/Calculadora.h".']);
+    assert.deepEqual(deps.local.map((item) => [item.path, item.warning]), [
+      ['src/Calculadora.h', 'Está en «src»: compila con -Isrc o escribe #include "../src/Calculadora.h".'],
+    ]);
   });
 
   it('C++: un .h en headers/ del mismo ejercicio pide -Iheaders; con Makefile no se avisa', () => {
@@ -713,5 +718,176 @@ describe('segunda revision independiente del cuadro (0.0.36)', () => {
     assert.deepEqual(imports("const T = () => <p>{hechas}/{total}</p>; import('./x');\n"), [['./x', 1]]);
     const exportList = `export {\n${Array.from({ length: 120 }, (_, i) => `  Componente${i}`).join(',\n')}\n} from './componentes';\n`;
     assert.deepEqual(imports(exportList), [['./componentes', 122]]);
+  });
+});
+
+describe('tercera revision independiente del cuadro (0.0.36)', () => {
+  it('archivos guardados en Windows (\\r\\n): los imports de Python y el #if 0 de C se leen igual', () => {
+    const crlf = (text: string) => text.replace(/\n/g, '\r\n');
+    const python = parseImports(crlf('import math\nfrom modelo.figura import Circulo\nimport utilidades\n'), 'python');
+    assert.deepEqual(python.map((item) => [item.specifier, item.line, item.names]), [['math', 1, []], ['modelo.figura', 2, ['Circulo']], ['utilidades', 3, []]]);
+    const c = parseImports(crlf('#include <iostream>\n#if 0\n#include "viejo.h"\n#endif\n#include "figura.h"\n'), 'c');
+    assert.deepEqual(c.map((item) => [item.specifier, item.line]), [['iostream', 1], ['figura.h', 5]]);
+    const files = [indexFile('tarea/utilidades.py', crlf('def leer():\n    pass\n'), 'python'), indexFile('tarea/main.py', crlf('import utilidades\n'), 'python')];
+    const deps = resolveFileDependencies({ activePath: 'tarea/utilidades.py', language: 'python', text: crlf('def leer():\n    pass\n'), files });
+    assert.deepEqual(deps.dependents.map((item) => item.path), ['tarea/main.py']);
+  });
+
+  it('C++: windows.h y conio.h dentro de #ifdef _WIN32 no llevan el aviso de Linux', () => {
+    const text = '#ifdef _WIN32\n#include <windows.h>\n#include <conio.h>\n#else\n#include <unistd.h>\n#endif\n#include <conio.h>\n';
+    const imports = parseImports(text, 'c');
+    assert.deepEqual(imports.map((item) => [item.specifier, !!item.platformGuarded]), [['windows.h', true], ['conio.h', true], ['unistd.h', true], ['conio.h', false]]);
+    const guarded = resolveFileDependencies({ activePath: 'main.cpp', language: 'cpp', text: text.split('#include <conio.h>\n').slice(0, 2).join('#include <conio.h>\n') + '#else\n#endif\n', files: [] });
+    assert.ok(guarded.libraries.every((item) => !item.warning), JSON.stringify(guarded.libraries));
+    const loose = resolveFileDependencies({ activePath: 'main.cpp', language: 'cpp', text: '#include <conio.h>', files: [] });
+    assert.equal(loose.libraries[0].warning, 'Solo existe en Windows (Dev-C++): en Linux no compila.');
+  });
+
+  it('C++: el ejercicio es la carpeta del archivo, tambien anidada (semana3/taller2 no ve taller1)', () => {
+    const files = [indexFile('semana3/taller1/figura.h', '', 'cpp'), indexFile('semana3/taller1/main.cpp', '#include "figura.h"', 'cpp')];
+    const deps = resolveFileDependencies({ activePath: 'semana3/taller2/main.cpp', language: 'cpp', text: '#include "figura.h"', files });
+    assert.deepEqual(deps.local, []);
+    assert.deepEqual(deps.missing.map((item) => item.hint), ['Está en «semana3/taller1/figura.h»: escribe #include "../taller1/figura.h".']);
+    assert.deepEqual(deps.expectedPaths, ['semana3/taller2/figura.h'], 'antes de darlo por perdido se mira junto al archivo en el disco');
+    const header = resolveFileDependencies({ activePath: 'semana3/taller1/figura.h', language: 'cpp', text: '', files: [...files, indexFile('semana3/taller2/main.cpp', '#include "figura.h"', 'cpp')] });
+    assert.deepEqual(header.dependents.map((item) => item.path), ['semana3/taller1/main.cpp']);
+  });
+
+  it('C++: <Calculadora.h> de tu proyecto con CMake es tuyo (con el aviso de comillas) y cuenta en «La usan»', () => {
+    const files = [indexFile('src/Calculadora.h', '', 'cpp'), indexFile('test/test_calculadora.cpp', '#include <Calculadora.h>', 'cpp')];
+    const deps = resolveFileDependencies({ activePath: 'test/test_calculadora.cpp', language: 'cpp', text: '#include <Calculadora.h>', files, buildFiles: ['CMakeLists.txt'] });
+    assert.deepEqual(deps.local.map((item) => [item.path, item.warning]), [['src/Calculadora.h', 'Es tuyo: inclúyelo con comillas, #include "Calculadora.h".']]);
+    const header = resolveFileDependencies({ activePath: 'src/Calculadora.h', language: 'cpp', text: '', files, buildFiles: ['CMakeLists.txt'] });
+    assert.deepEqual(header.dependents.map((item) => item.path), ['test/test_calculadora.cpp']);
+  });
+
+  it('C++: con dos copias se abre la de src/ (no la de old/ por orden alfabetico)', () => {
+    const files = [indexFile('old/figura.h', '', 'cpp'), indexFile('src/figura.h', '', 'cpp')];
+    const deps = resolveFileDependencies({ activePath: 'test/prueba.cpp', language: 'cpp', text: '#include "figura.h"', files, buildFiles: ['CMakeLists.txt'] });
+    assert.deepEqual(deps.local.map((item) => item.path), ['src/figura.h']);
+  });
+
+  it('C++: textos de los avisos (carpeta con otra mayuscula, misma carpeta, sin sugerirse a si mismo, Visual Studio)', () => {
+    const files = [indexFile('taller/modelo/figura.h', '', 'cpp'), indexFile('taller/figura.h', '', 'cpp'), indexFile('src/Lista.h', '', 'cpp')];
+    const folderCase = resolveFileDependencies({ activePath: 'taller/main.cpp', language: 'cpp', text: '#include "Modelo/figura.h"', files });
+    assert.equal(folderCase.local[0].warning, 'Se escribe «modelo/figura.h»: en Linux las mayúsculas cuentan.');
+    const sameFolder = resolveFileDependencies({ activePath: 'taller/main.cpp', language: 'cpp', text: '#include "../figura.h"', files });
+    assert.deepEqual(sameFolder.missing.map((item) => [item.description, item.hint]), [['Está en esta misma carpeta.', 'Escribe #include "figura.h".']]);
+    const tpp = resolveFileDependencies({ activePath: 'src/Lista.h', language: 'cpp', text: '#include "Lista.tpp"', files });
+    assert.equal(tpp.missing[0].hint, undefined, 'no sugiere src/Lista.h, que es el mismo archivo');
+    const visual = resolveFileDependencies({ activePath: 'src/main.cpp', language: 'cpp', text: '#include "stdafx.h"', files });
+    assert.deepEqual(visual.missing.map((item) => item.hint), ['Con g++ no hace falta: borra esta línea.']);
+  });
+
+  it('un archivo que se incluye o se importa a si mismo lo dice (antes se omitia)', () => {
+    const header = resolveFileDependencies({ activePath: 'taller1/figura.h', language: 'cpp', text: '#include "figura.h"', files: [] });
+    assert.deepEqual(header.local.map((item) => [item.path, item.warning]), [['taller1/figura.h', 'Se incluye a sí mismo: borra esta línea.']]);
+    const python = resolveFileDependencies({ activePath: 'tarea/main.py', language: 'python', text: 'import main', files: [] });
+    assert.equal(python.local[0].warning, 'Se importa a sí mismo: el archivo se ejecuta dos veces. Borra esta línea.');
+  });
+
+  it('Python: from paquete import a, b (con __init__.py) son sus modulos, tambien en «La usan»', () => {
+    const files = [
+      indexFile('tarea/modelo/__init__.py', '', 'python'),
+      indexFile('tarea/modelo/figura.py', 'class Figura: pass', 'python'),
+      indexFile('tarea/modelo/cuadrado.py', 'class Cuadrado: pass', 'python'),
+      indexFile('tarea/main.py', 'from modelo import figura, cuadrado', 'python'),
+    ];
+    const deps = resolveFileDependencies({ activePath: 'tarea/main.py', language: 'python', text: 'from modelo import figura, cuadrado\nfrom .modelo import figura as f', files });
+    assert.deepEqual(deps.local.map((item) => [item.label, item.path]), [
+      ['modelo.figura', 'tarea/modelo/figura.py'],
+      ['modelo.cuadrado', 'tarea/modelo/cuadrado.py'],
+      ['.modelo.figura', 'tarea/modelo/figura.py'],
+    ].filter((row, index, rows) => rows.findIndex((other) => other[1] === row[1]) === index));
+    const figura = resolveFileDependencies({ activePath: 'tarea/modelo/figura.py', language: 'python', text: 'class Figura: pass', files });
+    assert.deepEqual(figura.dependents.map((item) => item.path), ['tarea/main.py']);
+  });
+
+  it('Python: time.py no tapa a time; math.py depende del equipo; random.py si tapa', () => {
+    const files = [indexFile('tarea/time.py', '', 'python'), indexFile('tarea/math.py', '', 'python'), indexFile('tarea/random.py', '', 'python')];
+    const deps = resolveFileDependencies({ activePath: 'tarea/main.py', language: 'python', text: 'import time\nimport math\nimport random', files });
+    assert.deepEqual(deps.libraries.map((item) => [item.label, item.warning]), [
+      ['time', 'Python usa su módulo «time», no tu time.py: cámbiale el nombre a tu archivo.'],
+      ['math', 'Tu math.py se llama como el módulo «math» de Python: en Linux se usa el de Python y en otros equipos el tuyo. Cámbiale el nombre.'],
+    ]);
+    assert.deepEqual(deps.local.map((item) => [item.path, item.warning]), [['tarea/random.py', 'Tapa el módulo «random» de Python: si querías ese, cámbiale el nombre.']]);
+    const timeFile = resolveFileDependencies({ activePath: 'tarea/time.py', language: 'python', text: 'import time', files });
+    assert.equal(timeFile.dependents.length, 0, 'import time de otro archivo no usa tu time.py');
+  });
+
+  it('Python: paquetes de pip conocidos no son errores de tipeo; un nombre casi igual a uno conocido si', () => {
+    const deps = resolveFileDependencies({
+      activePath: 'tarea/main.py', language: 'python', files: [],
+      text: 'import keyboard\nimport psutil\nimport tkcalendar\nimport reqeusts\nimport numpi\nimport pandsa\nimport Tkinter\nimport request\nimport Numpy',
+    });
+    assert.deepEqual(deps.libraries.map((item) => item.label), ['keyboard', 'psutil', 'tkcalendar']);
+    assert.deepEqual(deps.missing.map((item) => [item.label, item.hint]), [
+      ['reqeusts', '¿Quisiste decir «requests»?'],
+      ['numpi', '¿Quisiste decir «numpy»?'],
+      ['pandsa', '¿Quisiste decir «pandas»?'],
+      ['Tkinter', '¿Quisiste decir «tkinter»?'],
+      ['request', '¿Quisiste decir «requests»?'],
+      ['Numpy', '¿Quisiste decir «numpy»?'],
+    ]);
+  });
+
+  it('Python y Java: nombres con tildes (geometría, Canción)', () => {
+    assert.deepEqual(parseImports('import geometría\nfrom lógica import área', 'python').map((item) => [item.specifier, item.names]), [['geometría', []], ['lógica', ['área']]]);
+    assert.deepEqual(parseImports('import modelo.Canción;\nimport modelo.Camión;', 'java').map((item) => item.specifier), ['modelo.Canción', 'modelo.Camión']);
+    const files = [
+      indexFile('src/musica/Canción.java', 'package musica;\npublic class Canción {}', 'java'),
+      indexFile('src/musica/Lista.java', 'package musica;\npublic class Lista { Canción c; }', 'java'),
+    ];
+    const lista = resolveFileDependencies({ activePath: 'src/musica/Lista.java', language: 'java', text: 'package musica;\npublic class Lista { Canción c; }', files });
+    assert.deepEqual(lista.local.map((item) => [item.path, !!item.implicit, item.line]), [['src/musica/Canción.java', true, 2]]);
+    const cancion = resolveFileDependencies({ activePath: 'src/musica/Canción.java', language: 'java', text: 'package musica;\npublic class Canción {}', files });
+    assert.deepEqual(cancion.dependents.map((item) => item.path), ['src/musica/Lista.java']);
+  });
+
+  it('Java: un enum dentro de una clase, pom.xml solo de su carpeta y clases tuyas fuera del indice', () => {
+    const files = [indexFile('src/modelo/Carta.java', 'package modelo;\npublic class Carta { public enum Palo {} }', 'java')];
+    const nested = resolveFileDependencies({ activePath: 'src/juego/Juego.java', language: 'java', text: 'package juego;\nimport modelo.Carta.Palo;', files });
+    assert.deepEqual(nested.local.map((item) => [item.label, item.path]), [['modelo.Carta.Palo', 'src/modelo/Carta.java']]);
+    const elsewhere = resolveFileDependencies({ activePath: 'taller/App.java', language: 'java', text: 'import vista.Menu;', files: [], buildFiles: ['ejemplo-maven/pom.xml'] });
+    assert.deepEqual(elsewhere.missing.map((item) => item.label), ['vista.Menu'], 'el pom.xml de otra carpeta no es de este proyecto');
+    const maven = resolveFileDependencies({
+      activePath: 'src/main/java/com/uni/App.java', language: 'java', files: [], buildFiles: ['pom.xml'],
+      text: 'package com.uni;\nimport com.uni.modelo.Figura;\nimport okhttp3.OkHttpClient;',
+    });
+    assert.deepEqual(maven.libraries.map((item) => item.label), ['com.uni.modelo.Figura', 'okhttp3.OkHttpClient']);
+    assert.deepEqual(maven.probes, ['Figura.java'], 'una clase de un paquete como el tuyo se busca en el disco');
+    assert.deepEqual(maven.expectedPaths, ['src/main/java/com/uni/modelo/Figura.java']);
+  });
+
+  it('JS: ./usuario.routes no tiene extension; components/Boton con baseUrl es tuyo; firebase/app sigue siendo npm', () => {
+    const dotted = resolveFileDependencies({ activePath: 'src/app.ts', language: 'typescript', text: "import router from './routes/usuario.routes'", files: [] });
+    assert.deepEqual(dotted.probes, ['usuario.routes.*']);
+    assert.ok(dotted.expectedPaths.includes('src/routes/usuario.routes.ts'));
+    const files = [indexFile('src/components/Boton.jsx', 'export default 1', 'javascriptreact'), indexFile('src/firebase/app.js', '', 'javascript')];
+    const deps = resolveFileDependencies({ activePath: 'src/App.jsx', language: 'javascriptreact', text: "import Boton from 'components/Boton'\nimport { initializeApp } from 'firebase/app'", files });
+    assert.deepEqual(deps.local.map((item) => [item.label, item.path]), [['components/Boton', 'src/components/Boton.jsx']]);
+    assert.deepEqual(deps.libraries.map((item) => item.label), ['firebase/app']);
+  });
+
+  it('lo de _deps (FetchContent de CMake) no es tuyo; textos de Java, C# y Ruby no traen imports', () => {
+    const files = [indexFile('build2/_deps/googletest-src/googletest/include/gtest/gtest.h', '', 'cpp'), indexFile('src/Calculadora.h', '', 'cpp')];
+    const deps = resolveFileDependencies({ activePath: 'test/t.cpp', language: 'cpp', text: '#include "gtest/gtest.h"\n#include "Calculadora.h"', files, buildFiles: ['CMakeLists.txt'] });
+    assert.deepEqual(deps.local.map((item) => item.path), ['src/Calculadora.h']);
+    assert.deepEqual(deps.libraries.map((item) => item.label), ['gtest/gtest.h']);
+    assert.deepEqual(parseImports('class A {\n  String s = """\n    import x.Y;\n    """;\n}\nimport java.util.List;', 'java').map((item) => item.specifier), ['java.util.List']);
+    assert.deepEqual(parseImports('using System;\nvar s = @"\nusing Fantasma;\n";\nusing X;', 'csharp').map((item) => item.specifier), ['System', 'X']);
+    assert.deepEqual(parseImports("texto = <<~FIN\n  require 'fantasma'\nFIN\nrequire 'json'", 'ruby').map((item) => [item.specifier, item.line]), [['json', 4]]);
+  });
+
+  it('archivos enormes o raros no tardan: from con miles de puntos, el mismo import repetido', () => {
+    const dots = `from ${'.'.repeat(150_000)}\n`;
+    let start = Date.now();
+    parseImports(dots, 'python');
+    assert.ok(Date.now() - start < 300, `from + puntos: ${Date.now() - start} ms`);
+    const repeated = 'import nada\n'.repeat(15_000);
+    start = Date.now();
+    const deps = resolveFileDependencies({ activePath: 'tarea/main.py', language: 'python', text: repeated, files: [indexFile('tarea/otro.py', '', 'python')] });
+    assert.ok(Date.now() - start < 1500, `import repetido: ${Date.now() - start} ms`);
+    assert.equal(deps.libraries.length + deps.missing.length, 1);
   });
 });

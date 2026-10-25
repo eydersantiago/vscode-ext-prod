@@ -174,5 +174,13 @@ describe('cuadro «Dependencias»: revision independiente (0.0.36)', () => {
     }, '/home/estudiante/Descargas/main.cpp', false, { outside: true });
     assert.equal(view?.note, 'Este archivo no está en la carpeta abierta: solo se muestran sus bibliotecas.');
   });
+
+  it('el codigo de un paquete instalado (.venv, node_modules) lo dice con su propia nota', () => {
+    const view = buildDependencyViewState({
+      family: 'python', local: [], libraries: [{ label: 'json', line: 1, description: 'leer y escribir JSON' }],
+      missing: [], dependents: [], probes: [], expectedPaths: [],
+    }, '.venv/lib/python3.12/site-packages/requests/api.py', false, { outside: true, packageCode: true });
+    assert.equal(view?.note, 'Es código de un paquete instalado (no de tu proyecto): solo se muestran sus bibliotecas.');
+  });
 });
 

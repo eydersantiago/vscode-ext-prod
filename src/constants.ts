@@ -1,8 +1,9 @@
 // ADACEEN (VS Code): constantes de configuracion por defecto, limites y tiempos.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 
+// 0.0.36: tambien .cc, .hh, .tpp, .vue... (sin ellos «La usan» no veia esos archivos).
 export const DEFAULT_INCLUDE_GLOB =
-  '**/*.{ts,tsx,js,jsx,mjs,cjs,py,java,cpp,c,h,hpp,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}';
+  '**/*.{ts,tsx,js,jsx,mjs,cjs,vue,svelte,py,java,cpp,cc,cxx,c,h,hh,hpp,hxx,tpp,ipp,inl,cs,go,rs,php,rb,md,json,yml,yaml,html,css,scss,sql,xml}';
 
 export const DEFAULT_DOCUMENT_INCLUDE_GLOB =
   '**/*.{pdf,docx,txt,md,markdown,png,jpg,jpeg,webp,gif,bmp,tiff}';
@@ -10,7 +11,7 @@ export const DEFAULT_DOCUMENT_INCLUDE_GLOB =
 // 0.0.36: tambien los virtualenv de Python (.venv, venv, site-packages): sus paquetes salian
 // como archivos «de tu proyecto» en el cuadro «Dependencias» y en el contexto del tutor.
 export const DEFAULT_EXCLUDE_GLOB =
-  '**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__,.venv,venv,site-packages,.tox,.gradle,.mypy_cache,.pytest_cache}/**';
+  '**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__,.venv,venv,site-packages,_deps,.tox,.gradle,.mypy_cache,.pytest_cache}/**';
 
 export const DEFAULT_MAX_FILES = 200;
 

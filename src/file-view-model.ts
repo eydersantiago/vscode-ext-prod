@@ -136,7 +136,7 @@ export function buildDependencyViewState(
   deps: FileDependencies | null,
   activePath: string,
   loading: boolean,
-  options: { partial?: boolean; outside?: boolean; key?: string } = {},
+  options: { partial?: boolean; outside?: boolean; packageCode?: boolean; key?: string } = {},
 ): FileViewDependencies | null {
   const key = options.key || '';
   if (!deps) {
@@ -203,9 +203,11 @@ export function buildDependencyViewState(
     emptyDependents: !deps.dependents.length && /\.(?:h|hh|hpp|hxx)$/i.test(activePath)
       ? 'Ningún archivo del proyecto lo incluye todavía.'
       : '',
-    note: options.outside
-      ? 'Este archivo no está en la carpeta abierta: solo se muestran sus bibliotecas.'
-      : options.partial ? 'El proyecto tiene muchos archivos: la lista «La usan» puede estar incompleta.' : '',
+    note: options.packageCode
+      ? 'Es código de un paquete instalado (no de tu proyecto): solo se muestran sus bibliotecas.'
+      : options.outside
+        ? 'Este archivo no está en la carpeta abierta: solo se muestran sus bibliotecas.'
+        : options.partial ? 'El proyecto tiene muchos archivos: la lista «La usan» puede estar incompleta.' : '',
     key,
   };
 }

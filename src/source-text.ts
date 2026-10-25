@@ -1,25 +1,31 @@
 // ADACEEN (VS Code): texto de un archivo leido de sus bytes (0.0.36), sin importar vscode.
 
-/** ¿Hay al menos una secuencia UTF-8 valida de varios bytes (una tilde guardada en UTF-8)? */
-function hasUtf8Sequence(bytes: Uint8Array) {
+/**
+ * ¿Parece UTF-8 con algun byte suelto? Mas secuencias UTF-8 validas de varios bytes (tildes
+ * guardadas en UTF-8) que bytes altos sueltos. Un archivo en Windows-1252 casi no tiene pares
+ * validos por casualidad (Í seguida de una comilla curva si lo es: una sola no alcanza).
+ */
+function looksLikeUtf8(bytes: Uint8Array) {
+  let valid = 0;
+  let invalid = 0;
   for (let index = 0; index < bytes.length; index += 1) {
     const lead = bytes[index];
-    const length = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
-    if (!length || index + length > bytes.length) {
+    if (lead < 0x80) {
       continue;
     }
-    let valid = true;
-    for (let offset = 1; offset < length; offset += 1) {
-      if ((bytes[index + offset] & 0xc0) !== 0x80) {
-        valid = false;
-        break;
-      }
+    const length = lead >= 0xc2 && lead <= 0xdf ? 2 : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+    let ok = length > 0 && index + length <= bytes.length;
+    for (let offset = 1; ok && offset < length; offset += 1) {
+      ok = (bytes[index + offset] & 0xc0) === 0x80;
     }
-    if (valid) {
-      return true;
+    if (ok) {
+      valid += 1;
+      index += length - 1;
+    } else {
+      invalid += 1;
     }
   }
-  return false;
+  return valid > invalid;
 }
 
 /**
@@ -32,6 +38,17 @@ export function decodeSourceBytes(bytes: Uint8Array) {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
-    return new TextDecoder(hasUtf8Sequence(bytes) ? 'utf-8' : 'windows-1252').decode(bytes);
+    if (looksLikeUtf8(bytes)) {
+      return new TextDecoder('utf-8').decode(bytes);
+    }
+    // El TextDecoder de Node lee «windows-1252» como latin1: 0x93 queda como un caracter de
+    // control y no como “. Se corrigen esos 27 (el del navegador ya lo hace bien).
+    return new TextDecoder('windows-1252').decode(bytes).replace(/[\u0080-\u009f]/g, (ch) => CP1252_HIGH[ch.charCodeAt(0) - 0x80] || ch);
   }
 }
+
+/** Windows-1252 entre 0x80 y 0x9f (los vacios no tienen caracter y quedan como estaban). */
+const CP1252_HIGH = [
+  '€', '', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '', 'Ž', '',
+  '', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '', 'ž', 'Ÿ',
+];

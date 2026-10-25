@@ -169,6 +169,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // (90 lecturas) se rearmaba sin parar (revisiones del 25/10/2026).
   let dependencyIndex: WorkspaceProjectIndex | null = null;
   let dependencyIndexDirty = 1;
+  let dependencyIndexAt = 0;
   const savedSinceDependencyIndex = new Set<string>();
   const markDependencyIndexDirty = () => {
     dependencyIndexDirty += 1;
@@ -445,6 +446,7 @@ export async function activate(context: vscode.ExtensionContext) {
           ? buildDependencyViewState(deps.result?.deps || null, deps.result?.filePath || '', deps.loading, {
             partial: deps.result?.partial,
             outside: deps.result?.outside,
+            packageCode: deps.result?.packageCode,
             key: deps.result ? `${deps.result.uriString}|${deps.result.version}` : '',
           })
           : null,
@@ -468,7 +470,9 @@ export async function activate(context: vscode.ExtensionContext) {
       refreshFileView();
     }
     try {
-      if ([...savedSinceDependencyIndex].some((saved) => saved !== uriString)) {
+      // Por si se perdio un aviso de cambios (otro editor, una carpeta de red): a los 5 minutos
+      // el indice se vuelve a pedir.
+      if ([...savedSinceDependencyIndex].some((saved) => saved !== uriString) || Date.now() - dependencyIndexAt > 5 * 60_000) {
         markDependencyIndexDirty();
       }
       let index = dependencyIndex;
@@ -479,6 +483,7 @@ export async function activate(context: vscode.ExtensionContext) {
         if (dependencyIndexDirty === dirtyAt) {
           dependencyIndex = index;
           dependencyIndexDirty = 0;
+          dependencyIndexAt = Date.now();
         }
       }
       if (run !== dependencyRun) {
@@ -487,9 +492,12 @@ export async function activate(context: vscode.ExtensionContext) {
       const previous = dependencyState?.result;
       if (previous && previous.uriString === uriString && previous.version === document.version
         && previous.languageId === document.languageId && previous.indexKey === indexKeyOf(index)) {
+        if (dependencyState && !dependencyState.loading && dependencyState.result === previous) {
+          return; // nada cambio: volver a pintar la vista le quitaba el foco al teclado
+        }
         dependencyState = { uriString, loading: false, result: previous };
       } else {
-        const result = await computeActiveFileDependencies(document, index, dependencyProbes, dependencyBuildFiles);
+        const result = await computeActiveFileDependencies(document, index, dependencyProbes, dependencyBuildFiles, () => run === dependencyRun);
         if (run !== dependencyRun) {
           return;
         }
@@ -2203,6 +2211,16 @@ export async function activate(context: vscode.ExtensionContext) {
       // Un #include o import nuevo aparece en el cuadro poco despues de dejar de escribir.
       if (event.contentChanges.length > 0 && fileViewDocument && event.document === fileViewDocument) {
         scheduleDependencyRefresh(1500);
+      } else if (event.contentChanges.length > 0 && vscode.window.activeTextEditor?.document === event.document
+        && event.document !== fileViewDocument && isSupportedActiveDocument(event.document)) {
+        // Un archivo nuevo sin titulo (Ctrl+N) se rechazaba vacio y no se volvia a mirar al escribir.
+        setFileViewDocument(event.document);
+      } else if (event.contentChanges.length > 0 && !event.document.isDirty && event.document !== fileViewDocument
+        && event.document.uri.scheme === 'file') {
+        // Otro archivo abierto que VS Code volvio a leer del disco (git checkout, otro editor):
+        // pudo empezar o dejar de incluir al de la vista.
+        markDependencyIndexDirty();
+        scheduleDependencyRefresh(800);
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
@@ -2244,10 +2262,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // 0.0.36: archivos nuevos, borrados o renombrados (tambien desde la terminal o git). Antes el
     // indice no se enteraba hasta el siguiente guardado, y un .h recien creado seguia sin aparecer.
     (() => {
-      const watcher = vscode.workspace.createFileSystemWatcher('**/*', false, true, false);
+      const watcher = vscode.workspace.createFileSystemWatcher('**/*', false, false, false);
       // Se mira la ruta dentro del proyecto: un proyecto guardado en una carpeta llamada build u
       // out ignoraba todo (revision del 25/10/2026).
-      const ignored = /(?:^|\/)(?:node_modules|\.git|dist|build|out|coverage|\.next|target|bin|obj|vendor|__pycache__|\.vscode-test|\.venv|venv|site-packages|\.tox|\.gradle|\.mypy_cache|\.pytest_cache)\//;
+      const ignored = /(?:^|\/)(?:node_modules|\.git|dist|build|out|coverage|\.next|target|bin|obj|vendor|__pycache__|\.vscode-test|\.venv|venv|site-packages|_deps|\.tox|\.gradle|\.mypy_cache|\.pytest_cache)\//;
       const onFilesChanged = (uri: vscode.Uri) => {
         if (ignored.test(workspaceRelativePath(uri))) {
           return;
@@ -2260,6 +2278,20 @@ export async function activate(context: vscode.ExtensionContext) {
       };
       watcher.onDidCreate(onFilesChanged);
       watcher.onDidDelete(onFilesChanged);
+      // Cambios de codigo hechos fuera de VS Code (git pull, otro editor) en archivos que no estan
+      // abiertos: «La usan» no se enteraba nunca. Los abiertos se ven por sus propios eventos (el
+      // autoguardado del archivo de la vista no rearma el indice). Lo que se encontro en el disco
+      // sigue valiendo: solo cambio el contenido.
+      const sourceFile = /\.(?:c|cc|cpp|cxx|c\+\+|h|hh|hpp|hxx|inl|ipp|tpp|txx|py|java|[cm]?[jt]sx?|vue|svelte|rb|cs)$/i;
+      watcher.onDidChange((uri) => {
+        if (!sourceFile.test(uri.path) || ignored.test(workspaceRelativePath(uri))
+          || vscode.workspace.textDocuments.some((document) => document.uri.toString() === uri.toString())) {
+          return;
+        }
+        clearWorkspaceProjectIndexCache();
+        markDependencyIndexDirty();
+        scheduleDependencyRefresh(800);
+      });
       return watcher;
     })(),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {

@@ -23,3 +23,13 @@ describe('un byte suelto no cambia la codificacion de todo el archivo (0.0.36)',
     assert.equal(decodeSourceBytes(Uint8Array.from([0x2f, 0x2f, 0x20, 0x63, 0x61, 0x66, 0xe9])), '// café');
   });
 });
+
+describe('un par UTF-8 por casualidad no vuelve UTF-8 un archivo de Windows-1252 (0.0.36)', () => {
+  it('«Í» seguida de una comilla curva es un par valido, pero las demas tildes sueltas mandan', () => {
+    const bytes = Uint8Array.from([
+      ...new TextEncoder().encode('// l'), 0xed, ...new TextEncoder().encode('nea\n#include "l'), 0xf3, ...new TextEncoder().encode('gica.h"\ncout << "'),
+      0x93, 0x53, 0xcd, 0x94, ...new TextEncoder().encode('";\n'),
+    ]);
+    assert.equal(decodeSourceBytes(bytes), '// línea\n#include "lógica.h"\ncout << "“SÍ”";\n');
+  });
+});
