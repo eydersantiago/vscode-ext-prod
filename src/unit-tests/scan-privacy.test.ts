@@ -108,3 +108,30 @@ describe('scan-privacy: estructura de los archivos relacionados (0.0.36)', () =>
     assert.equal(scrubOutline('', 'a.h'), '');
   });
 });
+
+describe('scan-privacy: estructura sin claves, rapido (revision independiente, 0.0.36)', () => {
+  it('una linea cortada con muchas barras invertidas no congela la extension', () => {
+    const line = `12:   std::string menuClave = "${'\\n'.repeat(70)}xxxxxxxx`;
+    const started = Date.now();
+    const scrubbed = scrubOutline(line, 'src/menu.h');
+    assert.ok(Date.now() - started < 200, 'antes tardaba minutos');
+    assert.equal(scrubbed, '12:   std::string menuClave = "…"');
+    const rutas = `13:   std::string rutaClaves = "C:${'\\\\d'.repeat(30)}`;
+    const t2 = Date.now();
+    scrubOutline(rutas, 'src/menu.h');
+    assert.ok(Date.now() - t2 < 200);
+  });
+
+  it('enmascara cada nombre de clave, tambien en argumentos por defecto y cadenas cortadas', () => {
+    assert.equal(
+      scrubOutline('4: def conectar(host="localhost", usuario="root", password="MiClave2026"):', 'db.py'),
+      '4: def conectar(host="localhost", usuario="root", password="…"):',
+    );
+    assert.equal(
+      scrubOutline('7:   void entrar(const std::string& usuario = "admin", const std::string& clave = "MiClave2026");', 'login.h'),
+      '7:   void entrar(const std::string& usuario = "admin", const std::string& clave = "…");',
+    );
+    assert.equal(scrubOutline('9:   std::string password_bd = "MiClaveSuperSecreta-1234567890…', 'cfg.h'), '9:   std::string password_bd = "…"');
+  });
+});
+

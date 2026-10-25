@@ -30,7 +30,16 @@ Pedido del 25 de octubre: «refuerza más la extensión de VS Code, para que mue
   - No incluye archivos de claves (`.env`, `credentials.json`, `*.pem`…), igual que el escaneo.
   - La estructura de los archivos relacionados que viaja al tutor no lleva líneas con claves ni el valor de las constantes con nombre de clave (`API_KEY = "…"`, `scrubOutline` en `scan-privacy.ts`).
   - Se rearma al crear o borrar archivos (también desde la terminal o con git) y al cambiar `adaceen.scan.*`; un índice que se armaba mientras se guardaba un archivo ya no queda en la caché un minuto.
-- 29 pruebas unitarias nuevas (280 en total).
+- **Revisión independiente antes de publicar** (otro agente, con el código compilado, un VS Code simulado y casos adversos). Encontró, y quedó corregido con pruebas:
+  - La limpieza de claves de la estructura usaba una expresión regular que, con una línea larga llena de `\` y la cadena cortada, tardaba minutos y congelaba VS Code en cada guardado. Ahora es lineal, enmascara cada `clave = "..."` de la línea (también argumentos por defecto) y las cadenas que el recorte deja abiertas.
+  - Los paquetes de un virtualenv (`.venv/…/site-packages/numpy`) salían como archivos «de tu proyecto» y con el aviso de «tapa el módulo». El índice y el escaneo ya no leen `.venv`, `venv`, `env`, `site-packages`, `.tox`, `.gradle` ni las cachés de Python.
+  - Un `#include` o `import` de un archivo que solo está en otra carpeta salía como encontrado (justo el error que el cuadro debe mostrar). Ahora va a «No encontradas» con «Está en «taller1/figura.h»: escribe #include "../taller1/figura.h"»: el compilador busca junto al archivo y en `include/`; Python, junto al archivo, en la raíz y en `src/`. Un `.h` de una carpeta de arriba se encuentra con aviso, y en Ruby `require` de un archivo de al lado pide `require_relative`.
+  - La búsqueda en el disco mira primero donde debería estar el archivo; antes traía 5 al azar y podía elegir el de otra carpeta.
+  - Con varias carpetas abiertas, cada archivo se compara solo con los de su carpeta (un clic abría el de la otra y «La usan» repetía archivos).
+  - JS: un `import` o `require` dentro de una cadena, una plantilla o una expresión regular ya no cuenta, y una expresión regular con `/` o comillas ya no esconde los imports de abajo. C/C++: `#if 0`, cadenas crudas `R"(…)"`, comentarios que siguen con `\` y separadores de dígitos. Python: un `;` dentro de una cadena no parte la línea. Java y C#: todos los imports de una línea. `./util` sin extensión ya no es `util.css`, y la sugerencia de un `.h` no apunta a un `.cpp`.
+  - Cambiar el lenguaje de un archivo (un `.tpp` marcado como C++) ya no vacía la vista; un clic en un cuadro que cambió mientras tanto no abre otra cosa; un resultado del texto viejo ya no queda guardado con la versión nueva; el autoguardado no rearma el índice a cada segundo (guardar el archivo que se ve no cambia quién lo usa).
+  - Archivos en Windows-1252 (Dev-C++, Bloc de notas) se leen sin «�», en el índice y en el escaneo. Un paquete de Java en otra carpeta de fuentes (`src/test/java`) y los espacios de nombres anidados de C# se reconocen.
+- 55 pruebas unitarias nuevas (306 en total).
 
 ### Compatibilidad
 

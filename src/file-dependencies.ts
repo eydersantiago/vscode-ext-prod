@@ -45,6 +45,8 @@ export type FileDependencyItem = {
   hint?: string;
   /** Sin import: clase del mismo paquete (Java) o del mismo proyecto (C#). */
   implicit?: boolean;
+  /** Biblioteca supuesta (un modulo de Python que no se encontro en el proyecto). */
+  guessed?: boolean;
 };
 
 export type FileDependencies = {
@@ -58,6 +60,8 @@ export type FileDependencies = {
    * tiene a lo sumo 90 archivos y solo algunas extensiones (un .tpp o un .hh no estan).
    */
   probes: string[];
+  /** Rutas exactas donde deberia estar lo no encontrado (se comprueban antes de buscar por nombre). */
+  expectedPaths: string[];
 };
 
 /** Entrada del indice del proyecto que sirve para resolver (workspace-index.ts). */
@@ -70,6 +74,8 @@ export type DependencyIndexFile = {
   typeRefs?: string[];
   /** C#: espacios de nombres que declara (tambien los de archivo, `namespace X;`). */
   namespaces?: string[];
+  /** Java: su linea package (las clases del mismo paquete se usan sin import, en cualquier carpeta). */
+  javaPackage?: string;
 };
 
 export type DependencyInput = {
@@ -87,7 +93,7 @@ const MAX_PARSE_CHARS = 200_000;
 const MAX_ITEMS_PER_GROUP = 40;
 const MAX_PROBES = 8;
 const MAX_SYMBOLS = 4;
-const MAX_TYPE_REFS = 120;
+const MAX_TYPE_REFS = 500;
 
 // ---------------------------------------------------------------------------------------------
 // Bibliotecas conocidas: una linea de para que sirven (lo que un estudiante necesita saber).
@@ -416,10 +422,17 @@ export function dependencyFamily(language: string, filePath = ''): DependencyFam
 // ---------------------------------------------------------------------------------------------
 // Texto sin comentarios (y, si se pide, sin el contenido de las cadenas)
 
+/** Antes de un `/` que abre una expresion regular de JS (no una division). */
+const JS_REGEX_PREVIOUS = /[(,=:[!&|?{};+\-*%<>~^]/;
+const JS_REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'void', 'yield', 'await', 'throw', 'delete', 'new', 'instanceof']);
+const C_RAW_PREFIXES = new Set(['R', 'u8R', 'uR', 'UR', 'LR']);
+
 /**
  * El texto con los comentarios en blanco (mismo largo, mismos saltos de linea: los numeros de
- * linea no cambian). Con `maskStrings`, tambien el contenido de las cadenas. Las cadenas de
- * triple comilla de Python se borran siempre (un docstring no declara imports).
+ * linea no cambian). Con `maskStrings`, tambien el contenido de las cadenas. Siempre se borran
+ * las cadenas de triple comilla de Python (un docstring no declara imports), las cadenas crudas
+ * de C++ (`R"(...)"`) y el contenido de las expresiones regulares de JS (una comilla o un `//`
+ * adentro confundian lo que seguia; revision independiente del 25/10/2026).
  */
 export function maskSource(text: string, family: DependencyFamily, maskStrings: boolean) {
   const source = String(text || '');
@@ -432,6 +445,9 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
   const hashComments = family === 'python' || family === 'ruby';
   let i = 0;
   let lineStart = true;
+  // JS: el ultimo caracter con algo y la ultima palabra, para distinguir /regex/ de una division.
+  let previous = '';
+  let previousWord = '';
   while (i < n) {
     const ch = source[i];
     const next = source[i + 1];
@@ -447,6 +463,11 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
       while (i < n && source[i] !== '\n') {
         out.push(' ');
         i += 1;
+        // En C, una \ al final del comentario lo sigue en la linea de abajo.
+        if (family === 'c' && source[i] === '\n' && (source[i - 1] === '\\' || (source[i - 1] === '\r' && source[i - 2] === '\\'))) {
+          out.push('\n');
+          i += 1;
+        }
       }
       continue;
     }
@@ -472,6 +493,66 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
       }
       continue;
     }
+    if (family === 'c' && ch === '"' && i > 0 && source[i - 1] === 'R') {
+      // Cadena cruda de C++: R"delim( ... )delim" (puede tener saltos de linea y comillas).
+      let wordStart = i - 1;
+      while (wordStart > 0 && /\w/.test(source[wordStart - 1])) {
+        wordStart -= 1;
+      }
+      const open = source.indexOf('(', i + 1);
+      const delimiter = open > i ? source.slice(i + 1, open) : '';
+      if (C_RAW_PREFIXES.has(source.slice(wordStart, i)) && open > i && open - i <= 17 && !/[\s\\)"]/.test(delimiter)) {
+        const end = source.indexOf(`)${delimiter}"`, open + 1);
+        const stop = end < 0 ? n : end + delimiter.length + 2;
+        out.push('"');
+        for (i += 1; i < stop - 1; i += 1) {
+          out.push(blank(source[i]));
+        }
+        if (i < n) {
+          out.push('"');
+          i += 1;
+        }
+        lineStart = false;
+        continue;
+      }
+    }
+    if (family === 'c' && ch === "'" && i > 0 && /[0-9]/.test(source[i - 1]) && /[0-9A-Fa-f]/.test(next || '')) {
+      out.push(ch); // separador de digitos de C++14 (1'000'000), no un caracter
+      i += 1;
+      continue;
+    }
+    if (family === 'js' && ch === '/' && (previous === '' || JS_REGEX_PREVIOUS.test(previous) || JS_REGEX_KEYWORDS.has(previousWord))) {
+      // Expresion regular: su contenido se borra (una comilla o un // adentro no son codigo).
+      out.push('/');
+      i += 1;
+      let inClass = false;
+      while (i < n && source[i] !== '\n') {
+        const current = source[i];
+        if (current === '\\' && i + 1 < n && source[i + 1] !== '\n') {
+          out.push(' ', ' ');
+          i += 2;
+          continue;
+        }
+        if (current === '/' && !inClass) {
+          break;
+        }
+        if (current === '[') {
+          inClass = true;
+        } else if (current === ']') {
+          inClass = false;
+        }
+        out.push(' ');
+        i += 1;
+      }
+      if (i < n && source[i] === '/') {
+        out.push('/');
+        i += 1;
+      }
+      previous = 'a';
+      previousWord = '';
+      lineStart = false;
+      continue;
+    }
     if (ch === '"' || ch === "'" || (ch === '`' && family === 'js')) {
       out.push(ch);
       i += 1;
@@ -491,11 +572,17 @@ export function maskSource(text: string, family: DependencyFamily, maskStrings: 
         out.push(ch);
         i += 1;
       }
+      previous = ch;
+      previousWord = '';
       lineStart = false;
       continue;
     }
     out.push(ch);
     lineStart = ch === '\n';
+    if (!/\s/.test(ch)) {
+      previousWord = /[\w$]/.test(ch) ? (/[\w$]/.test(previous) ? previousWord + ch : ch) : '';
+      previous = ch;
+    }
     i += 1;
   }
   return out.join('');
@@ -531,9 +618,27 @@ function lineOfIndex(starts: number[], index: number) {
 
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 
+/** #include (sin los de un bloque #if 0 ... #endif). */
 function parseC(lines: string[]): ParsedImport[] {
   const out: ParsedImport[] = [];
+  // Por cada #if abierto: ¿esa rama esta apagada? Solo se sabe de #if 0 / #if false.
+  const disabled: boolean[] = [];
   lines.forEach((line, index) => {
+    const directive = /^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$/.exec(line);
+    if (directive) {
+      const kind = directive[1];
+      if (kind === 'if' || kind === 'ifdef' || kind === 'ifndef') {
+        disabled.push(kind === 'if' && /^\s*(?:0|false)\s*$/.test(directive[2]));
+      } else if (kind === 'endif') {
+        disabled.pop();
+      } else if (disabled.length) {
+        disabled[disabled.length - 1] = false; // #else / #elif de un #if 0: esa rama si cuenta
+      }
+      return;
+    }
+    if (disabled.some(Boolean)) {
+      return;
+    }
     const match = /^\s*#\s*include\s*(?:"([^"\n]+)"|<([^>\n]+)>)/.exec(line);
     if (match) {
       const quoted = match[1] !== undefined;
@@ -543,6 +648,7 @@ function parseC(lines: string[]): ParsedImport[] {
   return out;
 }
 
+/** Python, sobre el texto sin cadenas: `print("paso 1; import os")` no es un import. */
 function parsePython(lines: string[]): ParsedImport[] {
   const out: ParsedImport[] = [];
   const joinContinued = (start: number, first: string, untilParen: boolean) => {
@@ -586,15 +692,17 @@ function parsePython(lines: string[]): ParsedImport[] {
   return out;
 }
 
-function parseJava(lines: string[]): ParsedImport[] {
+// Java y C#: todos los de la linea (`import a.B; import c.D;`), sobre el texto sin cadenas.
+const JAVA_IMPORT = /(?<=^|;)[ \t]*import\s+(static\s+)?([A-Za-z_][\w.]*?)(\.\*)?\s*;/gmd;
+const CSHARP_USING = /(?<=^|;)[ \t]*(?:global\s+)?using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)\s*;/gmd;
+
+function parseJava(code: string): ParsedImport[] {
+  const starts = lineStartsOf(code);
   const out: ParsedImport[] = [];
-  lines.forEach((line, index) => {
-    const match = /^\s*import\s+(static\s+)?([A-Za-z_][\w.]*?)(\.\*)?\s*;/.exec(line);
-    if (!match) {
-      return;
-    }
+  for (const match of code.matchAll(JAVA_IMPORT)) {
     let specifier = match[2];
     const wildcard = !!match[3];
+    const line = lineOfIndex(starts, match.indices?.[2]?.[0] ?? match.index ?? 0);
     const names: string[] = [];
     if (match[1]) {
       // import static a.b.Clase.metodo; -> la clase a.b.Clase (con .* tambien es la clase).
@@ -602,23 +710,22 @@ function parseJava(lines: string[]): ParsedImport[] {
         names.push(specifier.slice(specifier.lastIndexOf('.') + 1));
         specifier = specifier.slice(0, specifier.lastIndexOf('.'));
       }
-      out.push({ specifier, line: index + 1, kind: 'module', names });
-      return;
+      out.push({ specifier, line, kind: 'module', names });
+      continue;
     }
-    out.push({ specifier, line: index + 1, kind: wildcard ? 'wildcard' : 'module', names });
-  });
+    out.push({ specifier, line, kind: wildcard ? 'wildcard' : 'module', names });
+  }
   return out;
 }
 
-function parseCSharp(lines: string[]): ParsedImport[] {
-  const out: ParsedImport[] = [];
-  lines.forEach((line, index) => {
-    const match = /^\s*(?:global\s+)?using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)\s*;/.exec(line);
-    if (match) {
-      out.push({ specifier: match[1], line: index + 1, kind: 'module', names: [] });
-    }
-  });
-  return out;
+function parseCSharp(code: string): ParsedImport[] {
+  const starts = lineStartsOf(code);
+  return [...code.matchAll(CSHARP_USING)].map((match) => ({
+    specifier: match[1],
+    line: lineOfIndex(starts, match.indices?.[1]?.[0] ?? match.index ?? 0),
+    kind: 'module' as const,
+    names: [],
+  }));
 }
 
 function parseRuby(lines: string[]): ParsedImport[] {
@@ -632,11 +739,12 @@ function parseRuby(lines: string[]): ParsedImport[] {
   return out;
 }
 
-const JS_CLAUSE = '(?:type\\s+)?(?:[\\w$]+(?:\\s*,\\s*)?)?(?:\\*(?:\\s*as\\s+[\\w$]+)?|\\{[^}]*\\})?';
-const JS_IMPORT_FROM = new RegExp(`(?:^|[;\\n}])[ \\t]*(?:import|export)\\s+(${JS_CLAUSE})\\s*from\\s*(['"])([^'"\\n]+)\\2`, 'g');
-const JS_IMPORT_BARE = /(?:^|[;\n}])[ \t]*import\s*(['"])([^'"\n]+)\1/g;
-const JS_REQUIRE = /(?:(?:const|let|var)\s+(\{[^}]*\}|[\w$]+)\s*=\s*)?(?<![\w$.])require\s*\(\s*(['"])([^'"\n]+)\2\s*\)/g;
-const JS_DYNAMIC = /(?<![\w$.])import\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g;
+// Las llaves con tope de largo: un archivo con miles de `import {` sin cerrar tardaba segundos.
+const JS_CLAUSE = '(?:type\\s+)?(?:[\\w$]+(?:\\s*,\\s*)?)?(?:\\*(?:\\s*as\\s+[\\w$]+)?|\\{[^}]{0,1500}\\})?';
+const JS_IMPORT_FROM = new RegExp(`(?:^|[;\\n}])[ \\t]*(?:import|export)\\s+(${JS_CLAUSE})\\s*from\\s*(['"])([^'"\\n]*)\\2`, 'gd');
+const JS_IMPORT_BARE = /(?:^|[;\n}])[ \t]*import\s*(['"])([^'"\n]*)\1/gd;
+const JS_REQUIRE = /(?:(?:const|let|var)\s+(\{[^}]{0,1500}\}|[\w$]+)\s*=\s*)?(?<![\w$.])require\s*\(\s*(['"])([^'"\n]*)\2\s*\)/gd;
+const JS_DYNAMIC = /(?<![\w$.])import\s*\(\s*(['"])([^'"\n]*)\1\s*\)/gd;
 
 function jsClauseNames(clause: string) {
   const text = clause.trim().replace(/^type\s+/, '');
@@ -657,24 +765,37 @@ function jsClauseNames(clause: string) {
   return names;
 }
 
-function parseJs(clean: string): ParsedImport[] {
-  const starts = lineStartsOf(clean);
+/**
+ * JS/TS: las palabras (import, require, from) se buscan en el texto sin cadenas ni plantillas
+ * (un `require('x')` dentro de un texto no cuenta) y la ruta se lee del original en la misma
+ * posicion.
+ */
+function parseJs(masked: string, original: string): ParsedImport[] {
+  const starts = lineStartsOf(masked);
   const found: Array<ParsedImport & { index: number }> = [];
-  const add = (specifier: string, index: number, names: string[]) => {
-    const kind: ImportKind = /^(?:\.{1,2}(?:\/|$)|\/)/.test(specifier) ? 'relative' : 'module';
-    found.push({ specifier, line: lineOfIndex(starts, index), kind, names, index });
+  const add = (match: RegExpMatchArray, group: number, names: string[]) => {
+    const range = match.indices?.[group];
+    if (!range) {
+      return;
+    }
+    const specifier = original.slice(range[0], range[1]).trim();
+    if (!specifier) {
+      return;
+    }
+    const kind: ImportKind = /^(?:\.{1,2}(?:[/\\]|$)|\/)/.test(specifier) ? 'relative' : 'module';
+    found.push({ specifier, line: lineOfIndex(starts, range[0]), kind, names, index: range[0] });
   };
-  for (const match of clean.matchAll(JS_IMPORT_FROM)) {
-    add(match[3], (match.index || 0) + match[0].lastIndexOf(match[3]), jsClauseNames(match[1]));
+  for (const match of masked.matchAll(JS_IMPORT_FROM)) {
+    add(match, 3, jsClauseNames(match[1]));
   }
-  for (const match of clean.matchAll(JS_IMPORT_BARE)) {
-    add(match[2], (match.index || 0) + match[0].lastIndexOf(match[2]), []);
+  for (const match of masked.matchAll(JS_IMPORT_BARE)) {
+    add(match, 2, []);
   }
-  for (const match of clean.matchAll(JS_REQUIRE)) {
-    add(match[3], (match.index || 0) + match[0].lastIndexOf(match[3]), match[1] ? jsClauseNames(match[1]) : []);
+  for (const match of masked.matchAll(JS_REQUIRE)) {
+    add(match, 3, match[1] ? jsClauseNames(match[1]) : []);
   }
-  for (const match of clean.matchAll(JS_DYNAMIC)) {
-    add(match[2], (match.index || 0) + match[0].lastIndexOf(match[2]), []);
+  for (const match of masked.matchAll(JS_DYNAMIC)) {
+    add(match, 2, []);
   }
   return found.sort((left, right) => left.index - right.index).map(({ index: _index, ...rest }) => rest);
 }
@@ -684,22 +805,20 @@ export function parseImports(text: string, family: DependencyFamily): ParsedImpo
   if (family === 'none') {
     return [];
   }
-  const clean = maskSource(String(text || '').slice(0, MAX_PARSE_CHARS), family, false);
-  if (family === 'js') {
-    return parseJs(clean);
-  }
-  const lines = clean.split('\n');
+  const original = String(text || '').slice(0, MAX_PARSE_CHARS);
   switch (family) {
+    case 'js':
+      return parseJs(maskSource(original, family, true), original);
     case 'c':
-      return parseC(lines);
+      return parseC(maskSource(original, family, false).split('\n'));
     case 'python':
-      return parsePython(lines);
+      return parsePython(maskSource(original, family, true).split('\n'));
     case 'java':
-      return parseJava(lines);
+      return parseJava(maskSource(original, family, true));
     case 'csharp':
-      return parseCSharp(lines);
+      return parseCSharp(maskSource(original, family, true));
     case 'ruby':
-      return parseRuby(lines);
+      return parseRuby(maskSource(original, family, false).split('\n'));
     default:
       return [];
   }
@@ -742,13 +861,49 @@ export function collectTypeReferences(text: string, family: DependencyFamily) {
   return [...names];
 }
 
-/** C#: los espacios de nombres que declara el archivo (`namespace X {` y `namespace X;`). */
+/**
+ * C#: los espacios de nombres que declara el archivo, tambien los anidados
+ * (`namespace A { namespace B {` declara A y A.B) y los de archivo (`namespace X;`).
+ */
 export function collectNamespaces(text: string, family: DependencyFamily) {
   if (family !== 'csharp') {
     return [];
   }
   const code = maskSource(String(text || '').slice(0, MAX_PARSE_CHARS), family, true);
-  return [...new Set([...code.matchAll(/^[ \t]*namespace[ \t]+([A-Za-z_][\w.]*)/gm)].map((match) => match[1]))].slice(0, 20);
+  const names = new Set<string>();
+  const stack: Array<{ name: string; depth: number }> = [];
+  let depth = 0;
+  for (const match of code.matchAll(/\bnamespace\s+([A-Za-z_][\w.]*)\s*([{;])|[{}]/g)) {
+    if (match[1]) {
+      names.add([...stack.map((item) => item.name), match[1]].join('.'));
+      if (match[2] === '{') {
+        depth += 1;
+        stack.push({ name: match[1], depth });
+      } else {
+        stack.push({ name: match[1], depth: -1 }); // de archivo: vale hasta el final
+      }
+    } else if (match[0] === '{') {
+      depth += 1;
+    } else {
+      while (stack.length && stack[stack.length - 1].depth === depth) {
+        stack.pop();
+      }
+      depth = Math.max(0, depth - 1);
+    }
+    if (names.size >= 20) {
+      break;
+    }
+  }
+  return [...names];
+}
+
+/** Java: el paquete del archivo (`package com.uni.modelo;`), o '' en el paquete por defecto. */
+export function collectJavaPackage(text: string, family: DependencyFamily) {
+  if (family !== 'java') {
+    return '';
+  }
+  const match = /^[ \t]*package\s+([A-Za-z_][\w.]*)\s*;/m.exec(maskSource(String(text || '').slice(0, 20_000), family, true));
+  return match ? match[1] : '';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -826,6 +981,30 @@ function editDistance(left: string, right: string, max: number) {
 
 type Found = { path: string; caseMismatch: boolean };
 
+/** Carpetas de paquetes instalados: lo que hay ahi nunca es «de tu proyecto». */
+const THIRD_PARTY_SEGMENT = /(?:^|\/)(?:site-packages|dist-packages|node_modules|__pycache__|\.git|\.venv|venv)\//;
+
+/** Ruta de `fromDir` a `target` ("../include/figura.h"). */
+function relativeFrom(fromDir: string, target: string) {
+  const from = normalizePath(fromDir).split('/').filter(Boolean);
+  const to = normalizePath(target).split('/').filter(Boolean);
+  let common = 0;
+  while (common < from.length && common < to.length - 1 && from[common] === to[common]) {
+    common += 1;
+  }
+  return [...Array.from({ length: from.length - common }, () => '..'), ...to.slice(common)].join('/');
+}
+
+/** Las carpetas de `dir` hacia arriba: "a/b" -> ["a/b", "a", ""]. */
+function ancestorsOf(dir: string) {
+  const parts = normalizePath(dir).split('/').filter(Boolean);
+  const out: string[] = [];
+  for (let length = parts.length; length >= 0; length -= 1) {
+    out.push(parts.slice(0, length).join('/'));
+  }
+  return out;
+}
+
 /** Los archivos del proyecto (indice mas lo que encontro la busqueda en el disco). */
 class ProjectFiles {
   private readonly exact = new Set<string>();
@@ -836,12 +1015,14 @@ class ProjectFiles {
   readonly hasJavaBuild: boolean;
   /** C#: espacio de nombres -> archivos que lo declaran. */
   readonly namespaces = new Map<string, string[]>();
+  /** Java: paquete -> archivos. */
+  readonly javaPackages = new Map<string, string[]>();
 
   constructor(files: DependencyIndexFile[], extraPaths: string[]) {
     const add = (raw: string) => {
       const path = normalizePath(raw);
-      if (!path || this.exact.has(path)) {
-        return;
+      if (!path || this.exact.has(path) || THIRD_PARTY_SEGMENT.test(path)) {
+        return false;
       }
       this.exact.add(path);
       this.paths.push(path);
@@ -852,11 +1033,11 @@ class ProjectFiles {
       const list = this.byBase.get(base) || [];
       list.push(path);
       this.byBase.set(base, list);
+      return true;
     };
     for (const file of files) {
-      add(file.path);
       const path = normalizePath(file.path);
-      if (!this.entries.has(path)) {
+      if (add(file.path) && !this.entries.has(path)) {
         this.entries.set(path, file);
       }
     }
@@ -870,6 +1051,11 @@ class ProjectFiles {
         const list = this.namespaces.get(name) || [];
         list.push(path);
         this.namespaces.set(name, list);
+      }
+      if (file.javaPackage) {
+        const list = this.javaPackages.get(file.javaPackage) || [];
+        list.push(path);
+        this.javaPackages.set(file.javaPackage, list);
       }
     }
   }
@@ -885,30 +1071,60 @@ class ProjectFiles {
     return loose ? { path: loose, caseMismatch: true } : null;
   }
 
-  /** Un archivo cuya ruta termina en `suffix` ("modelo/figura.h"), el mas cercano a `nearDir`. */
+  /** El primero que exista de una lista de rutas (primero igual, despues sin mirar mayusculas). */
+  findFirst(paths: Array<string | null>): Found | null {
+    const clean = paths.filter((path): path is string => !!path);
+    for (const path of clean) {
+      if (this.exact.has(path)) {
+        return { path, caseMismatch: false };
+      }
+    }
+    for (const path of clean) {
+      const found = this.find(path);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  /** Un archivo cuya ruta termina en `suffix` ("modelo/Figura.java"), el mas cercano a `nearDir`. */
   findSuffix(suffix: string, nearDir: string): Found | null {
     const clean = normalizePath(suffix);
     if (!clean) {
       return null;
     }
     const candidates = this.byBase.get(basenameOf(clean).toLowerCase()) || [];
-    const pick = (list: string[]) => [...list].sort((left, right) =>
-      sharedPrefix(dirnameOf(right), nearDir) - sharedPrefix(dirnameOf(left), nearDir)
-      || left.split('/').length - right.split('/').length
-      || left.localeCompare(right))[0];
     const exact = candidates.filter((path) => path === clean || path.endsWith(`/${clean}`));
     if (exact.length) {
-      return { path: pick(exact), caseMismatch: false };
+      return { path: this.nearest(exact, nearDir), caseMismatch: false };
     }
     const lowerSuffix = clean.toLowerCase();
     const loose = candidates.filter((path) => path.toLowerCase() === lowerSuffix || path.toLowerCase().endsWith(`/${lowerSuffix}`));
-    return loose.length ? { path: pick(loose), caseMismatch: true } : null;
+    return loose.length ? { path: this.nearest(loose, nearDir), caseMismatch: true } : null;
+  }
+
+  /** De varias rutas, la mas cercana a `nearDir` (mas carpetas en comun, despues la mas corta). */
+  nearest(list: string[], nearDir: string) {
+    return [...list].sort((left, right) =>
+      sharedPrefix(dirnameOf(right), nearDir) - sharedPrefix(dirnameOf(left), nearDir)
+      || left.split('/').length - right.split('/').length
+      || left.localeCompare(right))[0];
   }
 
   /** Archivos de una carpeta (sin subcarpetas) con una extension. */
   filesInDir(dir: string, extension: string) {
     const clean = normalizePath(dir);
     return this.paths.filter((path) => dirnameOf(path) === clean && path.toLowerCase().endsWith(extension));
+  }
+
+  /** Los .py dentro de una carpeta (un paquete sin __init__.py tambien es un paquete). */
+  pythonFilesUnder(dir: string | null) {
+    if (dir === null) {
+      return [];
+    }
+    const prefix = dir ? `${normalizePath(dir)}/` : '';
+    return prefix ? this.paths.filter((path) => path.startsWith(prefix) && path.endsWith('.py')) : [];
   }
 
   /** Carpetas que terminan en `dirSuffix` ("modelo" o "com/uni/modelo") con archivos .java. */
@@ -918,6 +1134,12 @@ class ProjectFiles {
       const dir = dirnameOf(path);
       return path.endsWith('.java') && (dir === clean || dir.endsWith(`/${clean}`));
     });
+  }
+
+  /** Otro archivo con ese nombre en cualquier carpeta (para «Está en ...»). */
+  elsewhere(name: string, nearDir: string, except: string[] = []) {
+    const list = (this.byBase.get(basenameOf(name).toLowerCase()) || []).filter((path) => !except.includes(path));
+    return list.length ? this.nearest(list, nearDir) : '';
   }
 
   /** «¿Quisiste decir ...?»: el archivo de nombre mas parecido (misma extension o mismo nombre). */
@@ -957,6 +1179,10 @@ type Resolved = {
   hint?: string;
   /** Nombre de archivo para buscar en el disco si el indice no lo tiene. */
   probe?: string;
+  /** Rutas exactas donde deberia estar (se comprueban en el disco antes de buscar por nombre). */
+  expected?: string[];
+  /** Biblioteca supuesta (un modulo de Python que no se encontro): fuera del proyecto no se muestra. */
+  guessed?: boolean;
   names?: string[];
 };
 
@@ -967,14 +1193,39 @@ type ResolveOptions = {
   hints: boolean;
 };
 
+const C_HEADER_FILES = /\.(?:h|hh|hpp|hxx|h\+\+|inl|ipp|tpp|txx)$/i;
+const C_SOURCE_FILES = /\.(?:c|cc|cpp|cxx|c\+\+)$/i;
 const C_FAMILY_FILES = /\.(?:h|hh|hpp|hxx|inl|ipp|tpp|txx|c|cc|cpp|cxx)$/i;
 
 function local(label: string, found: Found, warning?: string): Resolved {
   return { label, type: 'local', path: found.path, warning: found.caseMismatch ? CASE_WARNING(found.path) : warning };
 }
 
+/**
+ * #include "x": donde lo busca el compilador. Junto al archivo; en `include/` o `inc/` de esa
+ * carpeta o de una de arriba (el -Iinclude de casi todo CMake o Makefile); y, con aviso, en
+ * una carpeta de arriba (solo compila con -I). Lo que esta en otra carpeta cualquiera ya no
+ * cuenta como encontrado: es el error que el cuadro tiene que mostrar (revision independiente
+ * del 25/10/2026: `taller2/main.cpp` con `#include "figura.h"` y solo `taller1/figura.h`).
+ */
+function findCInclude(spec: string, fromDir: string, project: ProjectFiles) {
+  const near = project.findFirst([joinPath(fromDir, spec)]);
+  if (near) {
+    return { found: near, ancestor: false };
+  }
+  const ancestors = ancestorsOf(fromDir);
+  const included = project.findFirst(ancestors.flatMap((dir) => [joinPath(dir, `include/${spec}`), joinPath(dir, `inc/${spec}`)]));
+  if (included) {
+    return { found: included, ancestor: false };
+  }
+  const above = project.findFirst(ancestors.slice(1).map((dir) => joinPath(dir, spec)));
+  return above ? { found: above, ancestor: true } : null;
+}
+
 function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
-  const spec = imp.specifier.replace(/\\/g, '/').trim();
+  const written = imp.specifier.trim();
+  const spec = written.replace(/\\/g, '/');
+  const backslashWarning = spec !== written ? `En Linux usa / en la ruta: #include "${spec}".` : undefined;
   const lower = spec.toLowerCase();
   const known = C_HEADERS[lower];
   const warning = C_HEADER_WARNINGS[lower];
@@ -987,31 +1238,49 @@ function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, op
     if (known) {
       return [{ label: spec, type: 'library', description: known, warning: warning || caseWarning }];
     }
-    const found = project.find(relative) || project.findSuffix(spec, fromDir);
-    if (found) {
-      return [local(spec, found, `Es tuyo: inclúyelo con comillas, #include "${spec}".`)];
+    const own = findCInclude(spec, fromDir, project);
+    if (own) {
+      return [local(spec, own.found, `Es tuyo: inclúyelo con comillas, #include "${spec}".`)];
     }
     return [{ label: spec, type: 'library', description: 'biblioteca del sistema o externa' }];
   }
   if (relative === null) {
     return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
   }
-  const found = project.find(relative) || (explicitRelative ? null : project.findSuffix(spec, fromDir));
-  if (found) {
-    const source = /\.(?:c|cc|cpp|cxx)$/i.exec(found.path);
-    return [local(spec, found, source
-      ? `Incluir un ${source[0]} suele dar «multiple definition»: incluye su .h.`
-      : undefined)];
+  const own = explicitRelative
+    ? (() => {
+      const found = project.find(relative);
+      return found ? { found, ancestor: false } : null;
+    })()
+    : findCInclude(spec, fromDir, project);
+  if (own) {
+    const source = C_SOURCE_FILES.exec(own.found.path);
+    return [local(spec, own.found, backslashWarning
+      || (own.ancestor ? `Está en una carpeta de arriba: escribe #include "${relativeFrom(fromDir, own.found.path)}" o compila con -I.` : undefined)
+      || (source ? `Incluir un ${source[0]} suele dar «multiple definition»: incluye su .h.` : undefined))];
   }
   if (known) {
     return [{ label: spec, type: 'library', description: known, warning: warning || caseWarning }];
+  }
+  // En otra carpeta: el compilador no lo encuentra, pero el estudiante si sabe donde esta.
+  const other = project.elsewhere(spec, fromDir);
+  if (other) {
+    return [{
+      label: spec,
+      type: 'missing',
+      description: 'Está en otra carpeta.',
+      hint: `Está en «${other}»: escribe #include "${relativeFrom(fromDir, other)}".`,
+      expected: [relative],
+      probe: basenameOf(spec),
+    }];
   }
   return [{
     label: spec,
     type: 'missing',
     description: 'Revisa el nombre y la carpeta.',
-    hint: options.hints ? project.suggest(spec, C_FAMILY_FILES) : '',
+    hint: options.hints ? project.suggest(spec, C_HEADER_FILES.test(spec) ? C_HEADER_FILES : C_SOURCE_FILES.test(spec) ? C_SOURCE_FILES : C_FAMILY_FILES) : '',
     probe: basenameOf(spec),
+    expected: [relative],
   }];
 }
 
@@ -1024,6 +1293,11 @@ function pythonLibrary(spec: string): Resolved | null {
   return third ? { label: spec, type: 'library', description: third } : null;
 }
 
+/**
+ * Python busca un `import x` junto al archivo que se ejecuta, en la carpeta desde donde se
+ * ejecuta (la raiz del proyecto con `python -m`) y en `src/`. Lo que esta en otra carpeta no
+ * se importa (ModuleNotFoundError): el cuadro lo marca como no encontrado y dice donde esta.
+ */
 function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
   const spec = imp.specifier;
   const fromDir = dirnameOf(fromPath);
@@ -1031,7 +1305,7 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
   const names = imp.names.filter((name) => name !== '*');
   const findModule = (base: string | null) => (base === null
     ? null
-    : project.find(`${base}.py`) || project.find(joinPath(base, '__init__.py')));
+    : project.findFirst([`${base}.py`, joinPath(base, '__init__.py')]));
   if (imp.kind === 'relative') {
     const dots = (/^\.+/.exec(spec) || ['.'])[0].length;
     const rest = spec.slice(dots);
@@ -1057,6 +1331,10 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
     if (init) {
       return [{ ...local(spec, init), names }];
     }
+    const folder = rest ? project.pythonFilesUnder(modulePath) : [];
+    if (folder.length) {
+      return [{ label: spec, type: 'local', path: project.nearest(folder, fromDir), description: 'paquete de tu proyecto (carpeta)', names }];
+    }
     const missingName = rest.split('.').pop() || names[0] || '';
     return [{
       label: spec,
@@ -1064,13 +1342,12 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
       description: 'Revisa el nombre y la carpeta.',
       hint: options.hints && missingName ? project.suggest(`${missingName}.py`, /\.py$/i) : '',
       probe: missingName ? `${missingName}.py` : undefined,
+      expected: modulePath && rest ? [`${modulePath}.py`] : undefined,
     }];
   }
   const asPath = spec.replace(/\./g, '/');
-  const found = findModule(joinPath(fromDir, asPath))
-    || findModule(asPath)
-    || project.findSuffix(`${asPath}.py`, fromDir)
-    || project.findSuffix(`${asPath}/__init__.py`, fromDir);
+  const roots = [...new Set([fromDir, '', 'src'])];
+  const found = project.findFirst(roots.flatMap((root) => [joinPath(root, `${asPath}.py`), joinPath(root, `${asPath}/__init__.py`)]));
   if (found) {
     // random.py, turtle.py o math.py del estudiante tapan el modulo de Python del mismo nombre.
     const top = spec.split('.')[0];
@@ -1082,16 +1359,33 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
   }
   // from paquete import modulo
   const submodules = names
-    .map((name) => ({ name, found: findModule(joinPath(fromDir, `${asPath}/${name}`)) || project.findSuffix(`${asPath}/${name}.py`, fromDir) }))
+    .map((name) => ({ name, found: project.findFirst(roots.map((root) => joinPath(root, `${asPath}/${name}.py`))) }))
     .filter((item): item is { name: string; found: Found } => !!item.found);
   if (submodules.length) {
     return submodules.map((item) => local(`${spec}.${item.name}`, item.found));
+  }
+  // Paquete sin __init__.py (una carpeta con modulos).
+  const folder = roots.map((root) => project.pythonFilesUnder(joinPath(root, asPath))).find((list) => list.length) || [];
+  if (folder.length) {
+    return [{ label: spec, type: 'local', path: project.nearest(folder, fromDir), description: 'paquete de tu proyecto (carpeta)', names }];
   }
   const library = pythonLibrary(spec);
   if (library) {
     return [library];
   }
   const top = spec.split('.')[0];
+  const lastName = `${asPath.split('/').pop()}.py`;
+  const other = project.elsewhere(lastName, fromDir);
+  if (other) {
+    return [{
+      label: spec,
+      type: 'missing',
+      description: 'Está en otra carpeta.',
+      hint: `Está en «${other}»: Python solo lo encuentra junto al archivo que ejecutas.`,
+      probe: lastName,
+      expected: [joinPath(fromDir, `${asPath}.py`) || `${asPath}.py`],
+    }];
+  }
   if (options.hints) {
     // Un nombre casi igual a un modulo tuyo o de Python es casi siempre un error de tipeo.
     const own = project.suggest(`${top}.py`, /\.py$/i);
@@ -1104,10 +1398,18 @@ function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFile
         description: 'No está en tu proyecto ni es un módulo de Python.',
         hint: own || `¿Quisiste decir «${std}»?`,
         probe: `${top}.py`,
+        expected: [joinPath(fromDir, `${asPath}.py`) || `${asPath}.py`],
       }];
     }
   }
-  return [{ label: spec, type: 'library', description: 'paquete externo: si Python no lo encuentra, instálalo con pip', probe: `${top}.py` }];
+  return [{
+    label: spec,
+    type: 'library',
+    description: 'paquete externo: si Python no lo encuentra, instálalo con pip',
+    probe: `${top}.py`,
+    expected: [joinPath(fromDir, `${asPath}.py`) || `${asPath}.py`],
+    guessed: true,
+  }];
 }
 
 function javaLibraryDescription(spec: string) {
@@ -1128,26 +1430,31 @@ function resolveJava(imp: ParsedImport, fromPath: string, project: ProjectFiles,
   const spec = imp.specifier;
   const fromDir = dirnameOf(fromPath);
   if (imp.kind === 'wildcard') {
-    const classes = project.javaFilesUnder(spec.replace(/\./g, '/'));
+    const classes = [...new Set([...(project.javaPackages.get(spec) || []), ...project.javaFilesUnder(spec.replace(/\./g, '/'))])];
     if (classes.length) {
       const used = classes.filter((path) => options.uses(stemOf(path)));
       return used.length
         ? used.map((path) => local(`${spec}.${stemOf(path)}`, { path, caseMismatch: false }))
-        : [{ label: `${spec}.*`, type: 'local', path: classes[0], description: `${classes.length} clase(s) de tu proyecto` }];
+        : [{ label: `${spec}.*`, type: 'local', path: project.nearest(classes, fromDir), description: `${classes.length} clase(s) de tu proyecto` }];
     }
     if (JAVA_STD_PREFIX.test(`${spec}.`) || JAVA_THIRD_PARTY_PREFIX.test(spec) || project.hasJavaBuild) {
       return [{ label: `${spec}.*`, type: 'library', description: javaLibraryDescription(spec) }];
     }
     return [{ label: `${spec}.*`, type: 'missing', description: 'No hay una carpeta con ese paquete en tu proyecto.' }];
   }
-  const found = project.findSuffix(`${spec.replace(/\./g, '/')}.java`, fromDir);
+  const className = spec.slice(spec.lastIndexOf('.') + 1);
+  const packageName = spec.includes('.') ? spec.slice(0, spec.lastIndexOf('.')) : '';
+  // Por su linea package (cualquier carpeta de fuentes: src/main/java, src/test/java) o por la ruta.
+  const byPackage = (project.javaPackages.get(packageName) || []).filter((path) => stemOf(path) === className);
+  const found = byPackage.length
+    ? { path: project.nearest(byPackage, fromDir), caseMismatch: false }
+    : project.findSuffix(`${spec.replace(/\./g, '/')}.java`, fromDir);
   if (found) {
     return [local(spec, found)];
   }
   if (JAVA_STD_PREFIX.test(spec) || JAVA_THIRD_PARTY_PREFIX.test(spec)) {
     return [{ label: spec, type: 'library', description: javaLibraryDescription(spec) }];
   }
-  const className = spec.slice(spec.lastIndexOf('.') + 1);
   const elsewhere = project.findSuffix(`${className}.java`, fromDir);
   if (elsewhere) {
     return [{
@@ -1169,38 +1476,36 @@ function resolveJava(imp: ParsedImport, fromPath: string, project: ProjectFiles,
   }];
 }
 
-const JS_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.json', '.vue', '.svelte', '.css', '.scss', '.sass', '.less'];
+/** Sin extension escrita, solo modulos de codigo (`./util` no es util.css). */
+const JS_SCRIPT_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.json'];
 const JS_FILES = /\.(?:[cm]?[jt]sx?|json|vue|svelte|css|scss|sass|less|html)$/i;
+const JS_SCRIPT_FILES = /\.(?:[cm]?[jt]sx?|json)$/i;
 
 function findJsFile(base: string, project: ProjectFiles): Found | null {
+  const hasExtension = /\.[^/.]+$/.test(base);
   const direct = project.find(base);
-  if (direct && /\.[^/]+$/.test(base)) {
+  if (direct && hasExtension) {
     return direct;
   }
   // TypeScript con ESM escribe './modulo.js' aunque el archivo sea modulo.ts.
-  const swapped = /\.(?:[cm]?js|jsx)$/i.test(base)
-    ? ['.ts', '.tsx', '.mts', '.cts'].map((extension) => project.find(base.replace(/\.(?:[cm]?js|jsx)$/i, extension))).find(Boolean)
-    : null;
-  if (swapped) {
-    return swapped;
-  }
-  for (const extension of JS_EXTENSIONS) {
-    const found = project.find(`${base}${extension}`);
-    if (found) {
-      return found;
+  if (/\.(?:[cm]?js|jsx)$/i.test(base)) {
+    const swapped = project.findFirst(['.ts', '.tsx', '.mts', '.cts'].map((extension) => base.replace(/\.(?:[cm]?js|jsx)$/i, extension)));
+    if (swapped) {
+      return swapped;
     }
   }
-  for (const extension of JS_EXTENSIONS.slice(0, 8)) {
-    const found = project.find(`${base}/index${extension}`);
-    if (found) {
-      return found;
-    }
-  }
-  return direct;
+  return project.findFirst([
+    ...JS_SCRIPT_EXTENSIONS.map((extension) => `${base}${extension}`),
+    ...JS_SCRIPT_EXTENSIONS.slice(0, 8).map((extension) => `${base}/index${extension}`),
+  ]) || direct;
 }
 
 function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
-  const spec = imp.specifier;
+  const written = imp.specifier;
+  // './util\\formato' (barras de Windows) funciona en Windows y no en Linux.
+  const windowsPath = /^\.{1,2}\\/.test(written);
+  const spec = windowsPath ? written.replace(/\\\\/g, '/').replace(/\\/g, '/') : written;
+  const backslashWarning = windowsPath ? `En Linux usa / en la ruta: '${spec}'.` : undefined;
   const fromDir = dirnameOf(fromPath);
   const names = imp.names;
   const isRelative = /^(?:\.{1,2}(?:\/|$)|\/)/.test(spec);
@@ -1213,15 +1518,18 @@ function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, o
     }
     const found = findJsFile(base, project);
     if (found) {
-      return [{ ...local(spec, found), names }];
+      return [{ ...local(spec, found, backslashWarning), names }];
     }
     const name = basenameOf(base);
+    const hasExtension = /\.[^.]+$/.test(name);
     return [{
       label: spec,
       type: 'missing',
       description: spec.startsWith('@/') ? 'El alias @/ suele apuntar a src/ y ahí no está.' : 'Revisa el nombre y la carpeta.',
-      hint: options.hints ? project.suggest(/\.[^.]+$/.test(name) ? name : `${name}.js`, JS_FILES) : '',
-      probe: name && !/[*?[\]{}]/.test(name) ? (/\.[^.]+$/.test(name) ? name : `${name}.*`) : undefined,
+      // Sin extension escrita es un modulo de codigo: no se sugiere util.css para './util'.
+      hint: options.hints ? project.suggest(hasExtension ? name : `${name}.js`, hasExtension ? JS_FILES : JS_SCRIPT_FILES) : '',
+      probe: name && !/[*?[\]{}]/.test(name) ? (hasExtension ? name : `${name}.*`) : undefined,
+      expected: hasExtension ? [base] : ['.ts', '.js', '.tsx', '.jsx'].map((extension) => `${base}${extension}`),
     }];
   }
   const bare = spec.startsWith('node:') ? spec.slice(5) : spec;
@@ -1232,6 +1540,10 @@ function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, o
   return [{ label: spec, type: 'library', description: NPM_KNOWN[pkg] || 'paquete de npm' }];
 }
 
+/**
+ * Ruby: require_relative busca junto al archivo. `require 'x'` busca en las gemas y en el
+ * $LOAD_PATH (lib/ con -Ilib o con bundler), no en la carpeta del archivo.
+ */
 function resolveRuby(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
   const spec = imp.specifier;
   const fromDir = dirnameOf(fromPath);
@@ -1251,11 +1563,16 @@ function resolveRuby(imp: ParsedImport, fromPath: string, project: ProjectFiles,
       description: 'Revisa el nombre y la carpeta.',
       hint: options.hints ? project.suggest(withExtension, /\.rb$/i) : '',
       probe: basenameOf(withExtension),
+      expected: [base],
     }];
   }
-  const found = project.findSuffix(withExtension, fromDir);
-  if (found) {
-    return [local(spec, found)];
+  const inLib = project.findFirst(ancestorsOf(fromDir).map((dir) => joinPath(dir, `lib/${withExtension}`)));
+  if (inLib) {
+    return [local(spec, inLib)];
+  }
+  const sibling = project.find(joinPath(fromDir, withExtension));
+  if (sibling) {
+    return [local(spec, sibling, `require no busca en esta carpeta: usa require_relative '${spec}'.`)];
   }
   return [{ label: spec, type: 'library', description: RUBY_STD[spec] || 'gema de Ruby' }];
 }
@@ -1266,9 +1583,9 @@ function resolveCSharp(imp: ParsedImport, fromPath: string, project: ProjectFile
     return [{ label: spec, type: 'library', description: CS_NAMESPACES[spec] || 'biblioteca de .NET' }];
   }
   // Un espacio de nombres declarado en el proyecto.
-  const declaring = (project.namespaces.get(spec) || []).find((path) => path !== fromPath);
-  if (declaring) {
-    return [{ label: spec, type: 'local', path: declaring, description: 'espacio de nombres de tu proyecto' }];
+  const declaring = (project.namespaces.get(spec) || []).filter((path) => path !== fromPath);
+  if (declaring.length) {
+    return [{ label: spec, type: 'local', path: project.nearest(declaring, dirnameOf(fromPath)), description: 'espacio de nombres de tu proyecto' }];
   }
   return [{ label: spec, type: 'library', description: 'paquete NuGet o biblioteca externa' }];
 }
@@ -1363,9 +1680,11 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
   // El activo cuenta aunque el indice no lo tenga (archivo recien creado, o un proyecto de mas de
   // 90 archivos): si no, «La usan» no encontraba los #include que llegan a el.
   const project = new ProjectFiles(input.files || [], [...(input.extraPaths || []), activePath]);
-  const result: FileDependencies = { family, local: [], libraries: [], missing: [], dependents: [], probes: [] };
+  const result: FileDependencies = { family, local: [], libraries: [], missing: [], dependents: [], probes: [], expectedPaths: [] };
   const probes = new Set<string>();
+  const expected = new Set<string>();
   const text = String(input.text || '');
+  const activePackage = collectJavaPackage(text, family);
 
   if (family !== 'none') {
     const identifiers = collectIdentifiers(text, family);
@@ -1389,13 +1708,17 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
           }
           continue; // se incluye a si mismo
         }
-        const key = item.type === 'local' ? `local:${item.path}:${item.label}` : `${item.type}:${item.label}`;
+        // Un mismo archivo escrito de dos formas ("figura.h" y "./figura.h") va una vez.
+        const key = item.type === 'local' ? `local:${item.path || item.label}` : `${item.type}:${item.label}`;
         if (seen.has(key)) {
           continue;
         }
         seen.add(key);
         if (item.probe && item.type !== 'local') {
           probes.add(item.probe);
+        }
+        if (item.type !== 'local') {
+          (item.expected || []).forEach((path) => expected.add(path));
         }
         const base: FileDependencyItem = { label: item.label, line: imp.line };
         if (item.type === 'local') {
@@ -1408,7 +1731,12 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
             ...(item.warning ? { warning: item.warning } : {}),
           });
         } else if (item.type === 'library') {
-          result.libraries.push({ ...base, description: item.description || '', ...(item.warning ? { warning: item.warning } : {}) });
+          result.libraries.push({
+            ...base,
+            description: item.description || '',
+            ...(item.warning ? { warning: item.warning } : {}),
+            ...(item.guessed ? { guessed: true } : {}),
+          });
         } else {
           result.missing.push({ ...base, description: item.description || '', ...(item.hint ? { hint: item.hint } : {}) });
         }
@@ -1423,8 +1751,10 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
       const own = stemOf(activePath);
       const already = new Set(result.local.map((item) => item.path));
       const imported = new Set(imports.map((imp) => imp.specifier.slice(imp.specifier.lastIndexOf('.') + 1)));
+      // Java: el mismo paquete, en cualquier carpeta de fuentes (src/main/java y src/test/java),
+      // o la misma carpeta si no se sabe el paquete.
       const candidates = family === 'java'
-        ? project.filesInDir(dirnameOf(activePath), '.java')
+        ? [...new Set([...(activePackage ? project.javaPackages.get(activePackage) || [] : []), ...project.filesInDir(dirnameOf(activePath), '.java')])]
         : project.paths.filter((path) => path.toLowerCase().endsWith('.cs'));
       for (const path of candidates) {
         const name = stemOf(path);
@@ -1457,8 +1787,10 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
       }
     }
     const importsOtherWithSameName = (file.imports || []).some((imp) => imp.specifier.slice(imp.specifier.lastIndexOf('.') + 1) === activeClass);
-    if (line < 0 && activeClass && fileFamily === family && refs.has(activeClass) && !importsOtherWithSameName
-      && (family === 'csharp' || dirnameOf(path) === dirnameOf(activePath))) {
+    const samePackage = family === 'csharp'
+      || dirnameOf(path) === dirnameOf(activePath)
+      || (!!activePackage && file.javaPackage === activePackage);
+    if (line < 0 && activeClass && fileFamily === family && refs.has(activeClass) && !importsOtherWithSameName && samePackage) {
       line = 0;
     }
     if (line >= 0) {
@@ -1474,6 +1806,7 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
     .sort((left, right) => (left.path || '').localeCompare(right.path || ''))
     .slice(0, MAX_ITEMS_PER_GROUP);
   result.probes = [...probes].slice(0, MAX_PROBES);
+  result.expectedPaths = [...expected].slice(0, MAX_PROBES * 2);
   return result;
 }
 
@@ -1488,7 +1821,8 @@ export function formatDependenciesForPrompt(deps: FileDependencies | null, maxCh
   }
   const parts: string[] = [];
   if (deps.local.length) {
-    parts.push(`usa del proyecto ${deps.local.slice(0, 8).map((item) => `${item.path || item.label}${item.symbols?.length ? ` (${item.symbols.join(', ')})` : ''}`).join(', ')}`);
+    // Un paquete o un espacio de nombres va por su nombre, no por el primer archivo que tiene.
+    parts.push(`usa del proyecto ${deps.local.slice(0, 8).map((item) => `${item.description || !item.path ? item.label : item.path}${item.symbols?.length ? ` (${item.symbols.join(', ')})` : ''}`).join(', ')}`);
   }
   if (deps.libraries.length) {
     parts.push(`bibliotecas ${deps.libraries.slice(0, 10).map((item) => item.label).join(', ')}`);

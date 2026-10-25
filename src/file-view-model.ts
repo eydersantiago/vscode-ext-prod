@@ -59,8 +59,10 @@ export type FileViewDependencies = {
   /** Sin nada que mostrar en un grupo: por que. */
   emptyUses: string;
   emptyDependents: string;
-  /** El indice no tiene todos los archivos: «La usan» puede quedar corta. */
+  /** El indice no tiene todos los archivos, o el archivo esta fuera de la carpeta abierta. */
   note: string;
+  /** Archivo y version del calculo: un clic de un cuadro viejo no abre otra cosa. */
+  key: string;
 };
 
 export type FileViewState = {
@@ -119,11 +121,12 @@ export function buildDependencyViewState(
   deps: FileDependencies | null,
   activePath: string,
   loading: boolean,
-  partial = false,
+  options: { partial?: boolean; outside?: boolean; key?: string } = {},
 ): FileViewDependencies | null {
+  const key = options.key || '';
   if (!deps) {
     return loading
-      ? { status: 'loading', summary: '', local: [], libraries: [], missing: [], dependents: [], emptyUses: '', emptyDependents: '', note: '' }
+      ? { status: 'loading', summary: '', local: [], libraries: [], missing: [], dependents: [], emptyUses: '', emptyDependents: '', note: '', key }
       : null;
   }
   const uses = deps.local.length + deps.libraries.length + deps.missing.length;
@@ -131,7 +134,8 @@ export function buildDependencyViewState(
     return null;
   }
   const local = deps.local.map((item: FileDependencyItem) => ({
-    label: item.implicit || !item.path ? item.label : baseOf(item.path),
+    // Un paquete (modelo.*) o un espacio de nombres va por su nombre, no por su primer archivo.
+    label: item.implicit || !item.path || item.description ? item.label : baseOf(item.path),
     meta: [
       (item.symbols || []).join(', '),
       item.path ? folderNote(item.path, activePath) : '',
@@ -180,7 +184,10 @@ export function buildDependencyViewState(
     emptyDependents: !deps.dependents.length && /\.(?:h|hh|hpp|hxx)$/i.test(activePath)
       ? 'Ningún archivo del proyecto lo incluye todavía.'
       : '',
-    note: partial ? 'El proyecto tiene muchos archivos: la lista «La usan» puede estar incompleta.' : '',
+    note: options.outside
+      ? 'Este archivo no está en la carpeta abierta: solo se muestran sus bibliotecas.'
+      : options.partial ? 'El proyecto tiene muchos archivos: la lista «La usan» puede estar incompleta.' : '',
+    key,
   };
 }
 

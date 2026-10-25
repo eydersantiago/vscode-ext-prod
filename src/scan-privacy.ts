@@ -124,19 +124,38 @@ export function containsSecret(text: string, relativePath: string) {
 const SECRET_NAME = /(?:pass(?:word|wd)?|secret|token|api_?key|apikey|clave|contrase|credential|private_?key)/i;
 
 /**
+ * Una cadena entre comillas, cerrada o cortada al final de la linea (la estructura recorta las
+ * lineas a 160 caracteres). Sin ambiguedad con la barra invertida: una version anterior
+ * (`(?:\\.|(?!\1).)*`) tardaba minutos en una linea con muchas `\` y la cadena sin cerrar
+ * (revision independiente del 25/10/2026).
+ */
+const STRING_LITERAL = /(["'`])(?:\\[\s\S]|(?!\1)[^\\\n])*(?:\1|$)/g;
+/** nombre = "valor" o nombre: "valor" (tambien argumentos por defecto: clave = "..."). */
+const NAMED_STRING = /([A-Za-z_][\w]*)(\s*(?:=|:)\s*)(["'`])((?:\\[\s\S]|(?!\3)[^\\\n])*)(\3|$)/g;
+
+/**
  * La estructura de un archivo del indice (workspace-index.ts) que viaja al tutor en
  * «Declaraciones de archivos relacionados» (0.0.36): sin las lineas que parecen traer una clave
- * (los patrones de containsSecret) y sin el valor de las constantes con nombre de clave
- * (`const std::string API_KEY = "...";` queda `= "…";`). En un encabezado la estructura lleva
- * los atributos con su valor inicial, y el estudiante no abrio ese archivo para mandarlo.
+ * (los patrones de containsSecret) y sin el valor de las cadenas con nombre de clave:
+ * `const std::string API_KEY = "...";`, `password="..."` como argumento por defecto o una
+ * cadena cortada al final. En un encabezado la estructura lleva los atributos con su valor
+ * inicial, y el estudiante no abrio ese archivo para mandarlo.
  */
 export function scrubOutline(outline: string, relativePath: string) {
   return String(outline || '')
     .split('\n')
     .filter((line) => !containsSecret(line, relativePath))
-    .map((line) => (line.includes('=') && SECRET_NAME.test(line.slice(0, line.indexOf('=')))
-      ? line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '$1…$1')
-      : line))
+    .map((line) => {
+      // La declaracion entera tiene nombre de clave (`const char* CLAVES[] = {"a", "b"};`).
+      const equals = line.indexOf('=');
+      if (equals > 0 && SECRET_NAME.test(line.slice(0, equals))) {
+        return line.replace(STRING_LITERAL, (_match, quote: string) => `${quote}…${quote}`);
+      }
+      // Cada nombre = "valor" de la linea (argumentos por defecto, varias asignaciones).
+      return line.replace(NAMED_STRING, (match, name: string, separator: string, quote: string) => (
+        SECRET_NAME.test(name) ? `${name}${separator}${quote}…${quote}` : match
+      ));
+    })
     .join('\n');
 }
 

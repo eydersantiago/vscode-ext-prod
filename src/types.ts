@@ -295,6 +295,8 @@ export type WorkspaceProjectIndexEntry = {
   typeRefs?: string[];
   /** C#: espacios de nombres que declara. */
   namespaces?: string[];
+  /** Java: su linea package. */
+  javaPackage?: string;
 };
 
 export type WorkspaceProjectIndex = {
@@ -303,6 +305,8 @@ export type WorkspaceProjectIndex = {
   totalFiles: number;
   files: WorkspaceProjectIndexEntry[];
   folders: string[];
+  /** La busqueda llego al tope de archivos (0.0.36): hay archivos del proyecto que no estan. */
+  capped?: boolean;
 };
 
 export type BackendSuggestionSections = {

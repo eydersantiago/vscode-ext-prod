@@ -401,10 +401,10 @@ describe('estructura y resumen para el tutor (0.0.36)', () => {
       libraries: [{ label: 'iostream', line: 1 }, { label: 'vector', line: 3 }],
       missing: [{ label: 'lista.tpp', line: 4 }],
       dependents: [{ label: 'main.cpp', line: 1, path: 'src/main.cpp' }],
-      probes: [],
+      probes: [], expectedPaths: [],
     });
     assert.equal(line, 'Dependencias del archivo: usa del proyecto src/figura.h (Figura, area()); bibliotecas iostream, vector; lo usan src/main.cpp.');
-    assert.equal(formatDependenciesForPrompt({ family: 'c', local: [], libraries: [], missing: [{ label: 'x.h', line: 1 }], dependents: [], probes: [] }), '');
+    assert.equal(formatDependenciesForPrompt({ family: 'c', local: [], libraries: [], missing: [{ label: 'x.h', line: 1 }], dependents: [], probes: [], expectedPaths: [] }), '');
     assert.equal(formatDependenciesForPrompt(null), '');
   });
 
@@ -417,3 +417,180 @@ describe('estructura y resumen para el tutor (0.0.36)', () => {
     assert.equal(dependencyFamily('json', 'datos.json'), 'none');
   });
 });
+
+describe('revision independiente del cuadro (0.0.36)', () => {
+  it('un paquete instalado en un virtualenv no es «de tu proyecto» ni «tapa» nada', () => {
+    const files = [
+      indexFile('.venv/lib/python3.11/site-packages/numpy/__init__.py', '', 'python'),
+      indexFile('venv/Lib/site-packages/six.py', '', 'python'),
+      indexFile('main.py', 'import numpy', 'python'),
+    ];
+    const deps = resolveFileDependencies({ activePath: 'main.py', language: 'python', text: 'import numpy\nimport six', files });
+    assert.deepEqual(deps.local, []);
+    assert.deepEqual(deps.libraries.map((item) => [item.label, item.warning]), [['numpy', undefined], ['six', undefined]]);
+  });
+
+  it('C++: un .h que solo esta en otra carpeta no se encuentra (y dice donde esta)', () => {
+    const files = [indexFile('taller1/figura.h', 'class Figura {};', 'cpp', '1: class Figura {')];
+    const deps = resolveFileDependencies({ activePath: 'taller2/main.cpp', language: 'cpp', text: '#include "figura.h"', files });
+    assert.deepEqual(deps.local, []);
+    assert.equal(deps.missing[0].hint, 'Está en «taller1/figura.h»: escribe #include "../taller1/figura.h".');
+    assert.deepEqual(deps.expectedPaths, ['taller2/figura.h'], 'primero se mira junto al archivo en el disco');
+    const prompt = formatDependenciesForPrompt(deps);
+    assert.doesNotMatch(prompt, /taller1/, 'el tutor no recibe un archivo que el compilador no ve');
+  });
+
+  it('C++: include/ de la carpeta o de una de arriba vale; una carpeta de arriba, con aviso', () => {
+    const files = [
+      indexFile('proyecto/include/lista.h', '', 'cpp'),
+      indexFile('proyecto/comun.h', '', 'cpp'),
+    ];
+    const deps = resolveFileDependencies({ activePath: 'proyecto/src/main.cpp', language: 'cpp', text: '#include "lista.h"\n#include "comun.h"', files });
+    assert.deepEqual(deps.local.map((item) => [item.path, item.warning]), [
+      ['proyecto/include/lista.h', undefined],
+      ['proyecto/comun.h', 'Está en una carpeta de arriba: escribe #include "../comun.h" o compila con -I.'],
+    ]);
+  });
+
+  it('Python: un modulo de otra carpeta no se importa; la raiz y src/ si', () => {
+    const files = [
+      indexFile('tarea1/utilidades.py', 'def leer(): pass', 'python', '1: def leer():'),
+      indexFile('comun.py', '', 'python'),
+      indexFile('src/datos.py', '', 'python'),
+    ];
+    const deps = resolveFileDependencies({ activePath: 'tarea2/main.py', language: 'python', text: 'import utilidades\nimport comun\nimport datos', files });
+    assert.deepEqual(deps.local.map((item) => item.path), ['comun.py', 'src/datos.py']);
+    assert.deepEqual(deps.missing.map((item) => [item.label, item.hint]), [['utilidades', 'Está en «tarea1/utilidades.py»: Python solo lo encuentra junto al archivo que ejecutas.']]);
+  });
+
+  it('Python: un paquete sin __init__.py (una carpeta) es del proyecto', () => {
+    const files = [indexFile('tarea/modelo/figura.py', '', 'python')];
+    const deps = resolveFileDependencies({ activePath: 'tarea/main.py', language: 'python', text: 'import modelo', files });
+    assert.deepEqual(deps.local.map((item) => [item.label, item.path, item.description]), [['modelo', 'tarea/modelo/figura.py', 'paquete de tu proyecto (carpeta)']]);
+  });
+
+  it('Ruby: require de un archivo de la misma carpeta pide require_relative; lib/ vale', () => {
+    const files = [indexFile('figura.rb', '', 'ruby'), indexFile('lib/util.rb', '', 'ruby'), indexFile('otra/cosa.rb', '', 'ruby')];
+    const deps = resolveFileDependencies({ activePath: 'main.rb', language: 'ruby', text: "require 'figura'\nrequire 'util'\nrequire 'cosa'", files });
+    assert.deepEqual(deps.local.map((item) => [item.path, item.warning]), [
+      ['figura.rb', "require no busca en esta carpeta: usa require_relative 'figura'."],
+      ['lib/util.rb', undefined],
+    ]);
+    assert.deepEqual(deps.libraries.map((item) => item.label), ['cosa'], 'en otra carpeta: una gema, no un archivo tuyo');
+  });
+
+  it('JS: nada dentro de cadenas, plantillas o expresiones regulares cuenta como import', () => {
+    const text = [
+      "const plantilla = `",
+      "import x from './no-existe';",
+      "const y = require('lodash');",
+      "`;",
+      'console.log("usa require(\'fs\') o import(\'./plugin\')");',
+      "const limpio = s.replace(/^\\/*/, '');",
+      "const otro = /['\"]/.test(s);",
+      "import fs from 'fs';",
+      "import { util } from './util';",
+    ].join('\n');
+    const imports = parseImports(text, 'js');
+    assert.deepEqual(imports.map((item) => [item.specifier, item.line]), [['fs', 8], ['./util', 9]]);
+  });
+
+  it('JS: sin extension escrita solo valen modulos de codigo; una hoja de estilos se importa con su extension', () => {
+    const files = [indexFile('src/util.css', '', 'css'), indexFile('src/estilos.css', '', 'css')];
+    const deps = resolveFileDependencies({ activePath: 'src/app.js', language: 'javascript', text: "import { f } from './util';\nimport './estilos.css';", files });
+    assert.deepEqual(deps.local.map((item) => item.path), ['src/estilos.css']);
+    assert.deepEqual(deps.missing.map((item) => item.label), ['./util']);
+  });
+
+  it('barras de Windows en una ruta: se encuentra, pero avisa que en Linux no funciona', () => {
+    const files = [indexFile('src/modelo/figura.h', '', 'cpp'), indexFile('src/util/formato.js', '', 'javascript')];
+    const cpp = resolveFileDependencies({ activePath: 'src/main.cpp', language: 'cpp', text: '#include "modelo\\figura.h"', files });
+    assert.equal(cpp.local[0].warning, 'En Linux usa / en la ruta: #include "modelo/figura.h".');
+    const js = resolveFileDependencies({ activePath: 'src/app.js', language: 'javascript', text: "import f from '.\\\\util\\\\formato';", files });
+    assert.equal(js.local[0].path, 'src/util/formato.js');
+    assert.equal(js.local[0].warning, "En Linux usa / en la ruta: './util/formato'.");
+  });
+
+  it('el «¿Quisiste decir?» de un .h no apunta a un .cpp', () => {
+    const files = [indexFile('src/lista.cpp', '', 'cpp'), indexFile('src/listas.h', '', 'cpp')];
+    const deps = resolveFileDependencies({ activePath: 'src/main.cpp', language: 'cpp', text: '#include "lista.h"', files });
+    assert.equal(deps.missing[0].hint, '¿Quisiste decir «src/listas.h»?');
+  });
+
+  it('C/C++: comentario que sigue con \\, #if 0, cadenas crudas y separadores de digitos', () => {
+    const text = [
+      '// comentario que sigue \\',
+      '#include "fantasma1.h"',
+      '#if 0',
+      '#include "fantasma2.h"',
+      '#else',
+      '#include "real1.h"',
+      '#endif',
+      'const char* s = R"(',
+      '#include "fantasma3.h"',
+      ')";',
+      'int millon = 1\'000\'000; /* comentario',
+      '#include "fantasma4.h" */',
+      '#include "real2.h"',
+    ].join('\n');
+    assert.deepEqual(parseImports(text, 'c').map((item) => [item.specifier, item.line]), [['real1.h', 6], ['real2.h', 13]]);
+  });
+
+  it('Python: un ";" dentro de una cadena no parte la linea; Java lee todos los imports de una linea', () => {
+    assert.deepEqual(parseImports('print("paso 1; import os, sys")\nx = 1; import json', 'python').map((item) => item.specifier), ['json']);
+    assert.deepEqual(parseImports('import java.util.Scanner; import java.util.ArrayList;\nclass A {}', 'java').map((item) => [item.specifier, item.line]), [
+      ['java.util.Scanner', 1],
+      ['java.util.ArrayList', 1],
+    ]);
+  });
+
+  it('el mismo archivo escrito de dos formas va una vez', () => {
+    const files = [indexFile('src/figura.h', '', 'cpp')];
+    const deps = resolveFileDependencies({ activePath: 'src/main.cpp', language: 'cpp', text: '#include "figura.h"\n#include "./figura.h"\n#include "../src/figura.h"', files });
+    assert.deepEqual(deps.local.map((item) => [item.label, item.line]), [['figura.h', 1]]);
+  });
+
+  it('C#: espacios de nombres anidados; Java: el mismo paquete en otra carpeta de fuentes', () => {
+    assert.deepEqual(collectNamespaces('namespace Taller {\n  namespace Modelo {\n    class Figura {}\n  }\n}\nnamespace Otro.Cosa { }', 'csharp'), ['Taller', 'Taller.Modelo', 'Otro.Cosa']);
+    const javaFiles = [
+      { ...indexFile('src/main/java/com/uni/Figura.java', 'package com.uni;\npublic class Figura {}', 'java'), javaPackage: 'com.uni' },
+      { ...indexFile('src/test/java/com/uni/FiguraTest.java', 'package com.uni;\nclass FiguraTest { Figura f; }', 'java'), javaPackage: 'com.uni' },
+    ];
+    const test = resolveFileDependencies({ activePath: 'src/test/java/com/uni/FiguraTest.java', language: 'java', text: 'package com.uni;\nclass FiguraTest { Figura f; }', files: javaFiles });
+    assert.deepEqual(test.local.map((item) => [item.path, !!item.implicit]), [['src/main/java/com/uni/Figura.java', true]]);
+    const figura = resolveFileDependencies({ activePath: 'src/main/java/com/uni/Figura.java', language: 'java', text: 'package com.uni;\npublic class Figura {}', files: javaFiles });
+    assert.deepEqual(figura.dependents.map((item) => item.path), ['src/test/java/com/uni/FiguraTest.java']);
+  });
+
+  it('un modulo de Python que no se encontro queda marcado como supuesto', () => {
+    const deps = resolveFileDependencies({ activePath: 'main.py', language: 'python', text: 'import paquete_raro\nimport math', files: [] });
+    assert.deepEqual(deps.libraries.map((item) => [item.label, !!item.guessed]), [['paquete_raro', true], ['math', false]]);
+  });
+});
+
+describe('resumen para el tutor: paquetes por su nombre (0.0.36)', () => {
+  it('«usa del proyecto modelo.*», no el primer archivo del paquete', () => {
+    const line = formatDependenciesForPrompt({
+      family: 'java',
+      local: [{ label: 'modelo.*', line: 2, path: 'src/modelo/Figura.java', description: '2 clase(s) de tu proyecto' }],
+      libraries: [{ label: 'java.util.Scanner', line: 1 }],
+      missing: [],
+      dependents: [],
+      probes: [],
+      expectedPaths: [],
+    });
+    assert.equal(line, 'Dependencias del archivo: usa del proyecto modelo.*; bibliotecas java.util.Scanner.');
+  });
+});
+
+describe('JS: una division no se confunde con una expresion regular (0.0.36)', () => {
+  it('a / b y una ruta con / en una cadena no tapan los imports de abajo', () => {
+    const text = [
+      "const mitad = total / 2 / 3; const ruta = 'a/b/c';",
+      "const k = (x) / y; return /'/.test(z);",
+      "import { f } from './f';",
+    ].join('\n');
+    assert.deepEqual(parseImports(text, 'js').map((item) => [item.specifier, item.line]), [['./f', 3]]);
+  });
+});
+

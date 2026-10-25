@@ -28,7 +28,8 @@ type FileViewHandlers = {
   loadMaterial: () => void;
   refreshSummary: () => void;
   openQuiz: () => void;
-  openDependency: (group: FileViewDependencyGroup, index: number) => void;
+  /** key y label: de que cuadro y que elemento era el clic (el cuadro pudo cambiar despues). */
+  openDependency: (group: FileViewDependencyGroup, index: number, key: string, label: string) => void;
 };
 
 function randomId(length: number) {
@@ -148,7 +149,12 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         return;
       case 'openDependency':
         if (typeof data.group === 'string' && (DEPENDENCY_GROUPS as readonly string[]).includes(data.group) && Number.isInteger(data.index) && Number(data.index) >= 0) {
-          this.handlers.openDependency(data.group as FileViewDependencyGroup, Number(data.index));
+          this.handlers.openDependency(
+            data.group as FileViewDependencyGroup,
+            Number(data.index),
+            typeof data.key === 'string' ? data.key : '',
+            typeof data.label === 'string' ? data.label.slice(0, 400) : '',
+          );
         }
         return;
       default:
@@ -317,9 +323,9 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         { key: 'dependents', label: 'La usan', listClass: 'deps-list' },
       ];
 
-      function depItem(item, group, index) {
+      function depItem(item, group, index, key) {
         return el('li', {}, [
-          el('button', { title: item.title || '', onclick: function () { send({ type: 'openDependency', group: group, index: index }); } }, [
+          el('button', { title: item.title || '', onclick: function () { send({ type: 'openDependency', group: group, index: index, key: key, label: item.label }); } }, [
             el('span', { class: 'dep-name', text: item.label }),
             item.meta ? el('span', { class: 'dep-meta', text: item.meta }) : null,
             item.warning ? el('span', { class: 'dep-warn', text: item.warning }) : null,
@@ -337,7 +343,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         var body = emptyText
           ? [el('p', { class: 'muted', text: emptyText })]
           : [
-            el('ul', { class: group.listClass }, shown.map(function (item, index) { return depItem(item, group.key, index); })),
+            el('ul', { class: group.listClass }, shown.map(function (item, index) { return depItem(item, group.key, index, deps.key || ''); })),
             hidden > 0 || more && items.length > DEP_VISIBLE
               ? el('button', { class: 'dep-more', text: hidden > 0 ? 'Ver ' + hidden + ' más' : 'Ver menos', onclick: function () {
                 expanded[group.key] = !more; render(lastState);

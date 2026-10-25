@@ -53,7 +53,7 @@ const DEPS: FileDependencies = {
   libraries: [{ label: 'iostream', line: 1, description: 'entrada y salida por consola (cin, cout)' }],
   missing: [{ label: 'lista.tpp', line: 6, description: 'Revisa el nombre y la carpeta.', hint: '¿Quisiste decir «src/lista.hpp»?' }],
   dependents: [],
-  probes: [],
+  probes: [], expectedPaths: [],
 };
 
 describe('vista «Este archivo» con el editor activo (0.0.36)', () => {
@@ -108,8 +108,8 @@ describe('cuadro «Dependencias» (0.0.36)', () => {
       libraries: [],
       missing: [],
       dependents: [{ label: 'App.java', line: 0, path: 'src/App.java', implicit: true }],
-      probes: [],
-    }, 'src/Figura.java', false, true);
+      probes: [], expectedPaths: [],
+    }, 'src/Figura.java', false, { partial: true });
     assert.equal(java?.local[0].meta, 'sin import: es del mismo paquete');
     assert.equal(java?.dependents[0].title, 'Abrir src/App.java');
     assert.match(java?.note || '', /puede estar incompleta/);
@@ -118,8 +118,8 @@ describe('cuadro «Dependencias» (0.0.36)', () => {
   it('mientras busca muestra «cargando»; un archivo sin dependencias que nadie usa no lleva cuadro', () => {
     assert.equal(buildDependencyViewState(null, 'src/main.cpp', true)?.status, 'loading');
     assert.equal(buildDependencyViewState(null, 'src/main.cpp', false), null);
-    assert.equal(buildDependencyViewState({ family: 'none', local: [], libraries: [], missing: [], dependents: [], probes: [] }, 'README.md', false), null);
-    const css = buildDependencyViewState({ family: 'none', local: [], libraries: [], missing: [], dependents: [{ label: 'app.js', line: 2, path: 'src/app.js' }], probes: [] }, 'src/estilos.css', false);
+    assert.equal(buildDependencyViewState({ family: 'none', local: [], libraries: [], missing: [], dependents: [], probes: [], expectedPaths: [] }, 'README.md', false), null);
+    const css = buildDependencyViewState({ family: 'none', local: [], libraries: [], missing: [], dependents: [{ label: 'app.js', line: 2, path: 'src/app.js' }], probes: [], expectedPaths: [] }, 'src/estilos.css', false);
     assert.equal(css?.dependents[0].meta, 'línea 2');
     assert.equal(css?.emptyUses, '');
   });
@@ -134,3 +134,34 @@ describe('cuadro «Dependencias» (0.0.36)', () => {
     assert.equal(state.hasFile, true, 'sin sugerencia todavia, la vista igual muestra el archivo');
   });
 });
+
+describe('cuadro «Dependencias»: revision independiente (0.0.36)', () => {
+  it('un paquete o un espacio de nombres va por su nombre, no por su primer archivo', () => {
+    const view = buildDependencyViewState({
+      family: 'java',
+      local: [
+        { label: 'modelo.*', line: 2, path: 'src/modelo/Figura.java', description: '2 clase(s) de tu proyecto' },
+        { label: 'modelo.Circulo', line: 3, path: 'src/modelo/Circulo.java' },
+      ],
+      libraries: [],
+      missing: [],
+      dependents: [],
+      probes: [],
+      expectedPaths: [],
+    }, 'src/App.java', false, { key: 'file:///repo/src/App.java|7' });
+    assert.deepEqual(view?.local.map((item) => [item.label, item.meta]), [
+      ['modelo.*', 'en src/modelo/ · 2 clase(s) de tu proyecto · línea 2'],
+      ['Circulo.java', 'en src/modelo/ · línea 3'],
+    ]);
+    assert.equal(view?.key, 'file:///repo/src/App.java|7', 'el clic dice de que cuadro era');
+  });
+
+  it('un archivo fuera de la carpeta abierta lo dice', () => {
+    const view = buildDependencyViewState({
+      family: 'c', local: [], libraries: [{ label: 'iostream', line: 1, description: 'entrada y salida por consola (cin, cout)' }],
+      missing: [], dependents: [], probes: [], expectedPaths: [],
+    }, '/home/estudiante/Descargas/main.cpp', false, { outside: true });
+    assert.equal(view?.note, 'Este archivo no está en la carpeta abierta: solo se muestran sus bibliotecas.');
+  });
+});
+

@@ -158,6 +158,14 @@ export async function activate(context: vscode.ExtensionContext) {
   let dependencyTimer: ReturnType<typeof setTimeout> | null = null;
   let dependencyRun = 0;
   const dependencyProbes = new DependencyProbeCache();
+  // El indice que usa el cuadro. Solo se pide uno nuevo si cambio otro archivo (o se creo o
+  // borro uno): guardar el archivo que se esta viendo no cambia quien lo usa, y con autoguardado
+  // cada segundo el indice (90 lecturas) se rearmaba sin parar (revision del 25/10/2026).
+  let dependencyIndex: WorkspaceProjectIndex | null = null;
+  let dependencyIndexDirty = 1;
+  const markDependencyIndexDirty = () => {
+    dependencyIndexDirty += 1;
+  };
   // «Ver cambios»: la propuesta del tutor aplicada, en un documento de solo lectura.
   const proposals = new ProposalContentProvider();
   context.subscriptions.push(
@@ -427,7 +435,11 @@ export async function activate(context: vscode.ExtensionContext) {
       {
         activeFile,
         dependencies: deps
-          ? buildDependencyViewState(deps.result?.deps || null, deps.result?.filePath || '', deps.loading, deps.result?.partial || false)
+          ? buildDependencyViewState(deps.result?.deps || null, deps.result?.filePath || '', deps.loading, {
+            partial: deps.result?.partial,
+            outside: deps.result?.outside,
+            key: deps.result ? `${deps.result.uriString}|${deps.result.version}` : '',
+          })
           : null,
       },
     ));
@@ -449,7 +461,15 @@ export async function activate(context: vscode.ExtensionContext) {
       refreshFileView();
     }
     try {
-      const index = await getWorkspaceProjectIndex({ allowStale: true });
+      let index = dependencyIndex;
+      if (dependencyIndexDirty || !index) {
+        const dirtyAt = dependencyIndexDirty;
+        index = await getWorkspaceProjectIndex({ allowStale: true });
+        if (dependencyIndexDirty === dirtyAt) {
+          dependencyIndex = index;
+          dependencyIndexDirty = 0;
+        }
+      }
       if (run !== dependencyRun) {
         return;
       }
@@ -490,7 +510,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   /** El archivo de la vista cambio (otra pestaña, o se cerro el que se mostraba). */
   const setFileViewDocument = (document: vscode.TextDocument | null) => {
-    const changed = (fileViewDocument?.uri.toString() || '') !== (document?.uri.toString() || '');
+    // Otro archivo, o el mismo con otro lenguaje (un .tpp que se marca como C++).
+    const identity = (item: vscode.TextDocument | null) => (item ? `${item.uri.toString()}|${item.languageId}` : '');
+    const changed = identity(fileViewDocument) !== identity(document);
     fileViewDocument = document;
     if (changed) {
       refreshFileView();
@@ -505,11 +527,21 @@ export async function activate(context: vscode.ExtensionContext) {
     editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
   };
 
-  /** Clic en el cuadro «Dependencias»: abre el archivo del proyecto o va a la linea del import. */
-  const openDependency = async (group: FileViewDependencyGroup, index: number) => {
+  /**
+   * Clic en el cuadro «Dependencias»: abre el archivo del proyecto o va a la linea del import.
+   * El clic trae el archivo y la version del cuadro que se vio: si el cuadro ya cambio, se busca
+   * el mismo elemento por su nombre (o no se hace nada) en vez de abrir otro.
+   */
+  const openDependency = async (group: FileViewDependencyGroup, index: number, key: string, label: string) => {
     const result = dependencyState?.result;
-    const item = result?.deps[group][index];
-    if (!result || !item) {
+    if (!result || (key && key !== `${result.uriString}|${result.version}`)) {
+      return;
+    }
+    const list = result.deps[group];
+    const item = list[index] && (!label || list[index].label === label)
+      ? list[index]
+      : list.find((entry) => entry.label === label);
+    if (!item) {
       return;
     }
     try {
@@ -1657,8 +1689,8 @@ export async function activate(context: vscode.ExtensionContext) {
       void requestFileSummary(false);
       scheduleDependencyRefresh(0);
     },
-    openDependency: (group, index) => {
-      void openDependency(group, index);
+    openDependency: (group, index, key, label) => {
+      void openDependency(group, index, key, label);
     },
     openSource: (index) => {
       const source = activeSuggestionModel?.ragSources[index];
@@ -2161,8 +2193,21 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
       if (fileViewDocument && document === fileViewDocument) {
-        const active = vscode.window.activeTextEditor?.document;
-        setFileViewDocument(active && active !== document && isSupportedActiveDocument(active) ? active : null);
+        // Cambiar el lenguaje (un .tpp marcado como C++) tambien cierra y abre el documento: se
+        // decide despues, con el editor que quede activo, en vez de vaciar la vista.
+        setTimeout(() => {
+          if (fileViewDocument !== document) {
+            return;
+          }
+          const active = vscode.window.activeTextEditor?.document;
+          setFileViewDocument(active && !active.isClosed && isSupportedActiveDocument(active) ? active : null);
+        }, 0);
+      }
+    }),
+    vscode.workspace.onDidOpenTextDocument((document) => {
+      // El mismo archivo con otro lenguaje: el cuadro se calcula otra vez con ese lenguaje.
+      if (vscode.window.activeTextEditor?.document === document && isSupportedActiveDocument(document)) {
+        setFileViewDocument(document);
       }
     }),
     vscode.languages.onDidChangeDiagnostics((event) => {
@@ -2171,21 +2216,28 @@ export async function activate(context: vscode.ExtensionContext) {
         evaluateErrorSignals();
       }
     }),
-    vscode.workspace.onDidSaveTextDocument(() => {
+    vscode.workspace.onDidSaveTextDocument((document) => {
       clearWorkspaceProjectIndexCache();
-      // Otro archivo pudo empezar (o dejar) de incluir al de la vista: «La usan» cambia.
-      scheduleDependencyRefresh(600);
+      // Otro archivo pudo empezar (o dejar) de incluir al de la vista: «La usan» cambia. Guardar
+      // el mismo archivo de la vista no cambia quien lo usa (y lo suyo se lee del editor).
+      if (document !== fileViewDocument) {
+        markDependencyIndexDirty();
+        scheduleDependencyRefresh(600);
+      }
     }),
     // 0.0.36: archivos nuevos, borrados o renombrados (tambien desde la terminal o git). Antes el
     // indice no se enteraba hasta el siguiente guardado, y un .h recien creado seguia sin aparecer.
     (() => {
       const watcher = vscode.workspace.createFileSystemWatcher('**/*', false, true, false);
-      const ignored = /\/(?:node_modules|\.git|dist|build|out|coverage|\.next|target|bin|obj|vendor|__pycache__|\.vscode-test)\//;
+      // Se mira la ruta dentro del proyecto: un proyecto guardado en una carpeta llamada build u
+      // out ignoraba todo (revision del 25/10/2026).
+      const ignored = /(?:^|\/)(?:node_modules|\.git|dist|build|out|coverage|\.next|target|bin|obj|vendor|__pycache__|\.vscode-test|\.venv|venv|env|site-packages|\.tox|\.gradle|\.mypy_cache|\.pytest_cache)\//;
       const onFilesChanged = (uri: vscode.Uri) => {
-        if (ignored.test(uri.path)) {
+        if (ignored.test(workspaceRelativePath(uri))) {
           return;
         }
         clearWorkspaceProjectIndexCache();
+        markDependencyIndexDirty();
         dependencyProbes.clear();
         scheduleDependencyRefresh(800);
       };
@@ -2196,6 +2248,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       clearWorkspaceProjectIndexCache();
       clearBackendSuggestionCaches();
+      markDependencyIndexDirty();
       dependencyProbes.clear();
       scheduleCursorIdleSuggestionRefresh();
       scheduleDependencyRefresh(500);
@@ -2212,6 +2265,7 @@ export async function activate(context: vscode.ExtensionContext) {
       if (event.affectsConfiguration('adaceen.scan')) {
         // El indice usa los filtros del escaneo (includeGlob, excludeGlob, mode).
         clearWorkspaceProjectIndexCache();
+        markDependencyIndexDirty();
         dependencyProbes.clear();
         scheduleDependencyRefresh(500);
       }

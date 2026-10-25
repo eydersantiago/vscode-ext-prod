@@ -7,8 +7,10 @@ export const DEFAULT_INCLUDE_GLOB =
 export const DEFAULT_DOCUMENT_INCLUDE_GLOB =
   '**/*.{pdf,docx,txt,md,markdown,png,jpg,jpeg,webp,gif,bmp,tiff}';
 
+// 0.0.36: tambien los virtualenv de Python (.venv, venv, env, site-packages): sus paquetes salian
+// como archivos «de tu proyecto» en el cuadro «Dependencias» y en el contexto del tutor.
 export const DEFAULT_EXCLUDE_GLOB =
-  '**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__}/**';
+  '**/{node_modules,.git,dist,build,out,coverage,.next,target,bin,obj,vendor,__pycache__,.venv,venv,env,site-packages,.tox,.gradle,.mypy_cache,.pytest_cache}/**';
 
 export const DEFAULT_MAX_FILES = 200;
 

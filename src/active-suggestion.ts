@@ -1,8 +1,10 @@
 // ADACEEN (VS Code): construir la sugerencia activa (local, del backend o bloqueada) y sus textos.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
+import * as vscode from 'vscode';
 import { buildSessionHeaders, fetchJsonWithTimeout } from './backend-http';
 import { ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS, ACTIVE_SUGGESTION_PROMPT_RELATED_CHARS, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS, ACTIVE_SUGGESTION_PROMPT_TOTAL_CHARS, ACTIVE_SUGGESTION_PROMPT_WINDOW_CHARS, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import type { SuggestDiagnostic } from './error-signals';
+import { indexFilesInFolderOf } from './dependency-scan';
 import { formatDependenciesForPrompt, resolveFileDependencies } from './file-dependencies';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
 import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionReadyForMode } from './suggestion-code';
@@ -253,13 +255,16 @@ export function buildBackendSuggestionContent(
   // Lista corta (ruta, lenguaje, lineas): las vistas previas del mapa de antes casi no decian nada.
   const others = formatOtherFilesLine(ranked, snapshot.filePath, isFileSummary ? 20 : 8);
   // 0.0.36: en el resumen, lo que usa del proyecto, sus bibliotecas y quien lo usa (el mismo
-  // calculo del cuadro «Dependencias», sin lo no encontrado: el indice no tiene todo).
-  const dependencies = isFileSummary && projectIndex
+  // calculo del cuadro «Dependencias», sin lo no encontrado: el indice no tiene todo). Solo para
+  // un archivo de la carpeta abierta, comparado con los de su misma carpeta del proyecto.
+  const documentUri = snapshot.uriString ? vscode.Uri.parse(snapshot.uriString) : null;
+  const inWorkspace = !!documentUri && documentUri.scheme !== 'untitled' && !!vscode.workspace.getWorkspaceFolder(documentUri);
+  const dependencies = isFileSummary && projectIndex && documentUri && inWorkspace
     ? formatDependenciesForPrompt(resolveFileDependencies({
       activePath: snapshot.filePath,
       language: snapshot.language,
       text: snapshot.content,
-      files: projectIndex.files,
+      files: indexFilesInFolderOf(projectIndex, documentUri),
     }))
     : '';
   const fixedChars = meta.length + diagnostics.length + selectionBlock.length + related.length + others.length + dependencies.length

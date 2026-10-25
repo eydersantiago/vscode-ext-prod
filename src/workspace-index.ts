@@ -2,8 +2,9 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_INDEX_MAX_FILES, ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB, ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS, ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES, ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS } from './constants';
-import { collectNamespaces, collectTypeReferences, dependencyFamily, parseImports } from './file-dependencies';
+import { collectJavaPackage, collectNamespaces, collectTypeReferences, dependencyFamily, parseImports } from './file-dependencies';
 import { buildCodeOutline } from './prompt-context';
+import { decodeSourceBytes } from './source-text';
 import { isSecretPath, scrubOutline } from './scan-privacy';
 import { resolveScanOptions } from './settings';
 import { inferActiveLanguage, pathExtension, truncateInline } from './suggestion-results';
@@ -72,7 +73,6 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
   // del disco. Antes cada archivo se abria con openTextDocument: las extensiones de lenguaje
   // (C/C++, Python) recibian hasta 90 archivos "abiertos" y los analizaban.
   const openDocuments = new Map(vscode.workspace.textDocuments.map((document) => [document.uri.toString(), document]));
-  const decoder = new TextDecoder('utf-8');
 
   for (const uri of files) {
     try {
@@ -87,7 +87,7 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
       }
 
       const open = openDocuments.get(uri.toString());
-      const text = open ? open.getText() : decoder.decode(await vscode.workspace.fs.readFile(uri));
+      const text = open ? open.getText() : decodeSourceBytes(await vscode.workspace.fs.readFile(uri));
       const language = inferActiveLanguage(relativePath, open?.languageId || '');
       const family = dependencyFamily(language, relativePath);
       entries.push({
@@ -107,6 +107,7 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
         ...(family !== 'none' ? { imports: parseImports(text, family) } : {}),
         ...(family === 'java' || family === 'csharp' ? { typeRefs: collectTypeReferences(text, family) } : {}),
         ...(family === 'csharp' ? { namespaces: collectNamespaces(text, family) } : {}),
+        ...(family === 'java' && collectJavaPackage(text, family) ? { javaPackage: collectJavaPackage(text, family) } : {}),
       });
     } catch (error) {
       output.appendLine(`[Suggestions] No se pudo indexar ${vscode.workspace.asRelativePath(uri, false)}: ${String(error)}`);
@@ -123,6 +124,7 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
     totalFiles: entries.length,
     files: entries,
     folders: selection.folders.map((folder) => `${folder.name} [${folder.uri.scheme}]`),
+    capped: files.length >= options.maxFiles,
   };
 }
 
