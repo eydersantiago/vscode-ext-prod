@@ -130,6 +130,7 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       model.codeRequestNote || '',
       model.requestedAction || '',
       model.proposalWarning || '',
+      model.unavailable ? 'unavailable' : '',
     ].join('\u0000');
     if (key === this.currentKey && this.thread) {
       return;

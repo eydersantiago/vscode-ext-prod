@@ -611,6 +611,9 @@ export function buildBackendActiveSuggestionModel(
       ...prepared.notes,
     ].filter(Boolean).join(' '),
     ...(prepared.unusable ? { codeRequestNote: prepared.unusableReason } : {}),
+    // Respuesta sin modelo para el foco: antes la ventana decia ademas «El tutor respondio sin
+    // codigo para esto», como si hubiera respondido (piloto del 25/10/2026).
+    ...(primaryResult === focusResult && focusResult.degraded ? { unavailable: true } : {}),
   };
 }
 

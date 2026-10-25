@@ -4,6 +4,18 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.37] - 2026-10-25
+
+Pedidos del 25 de octubre: «mira por qué sucede esto» (la ventana flotante decía a la vez «El tutor no esta disponible…» y «El tutor respondió sin código para esto») y «que se compruebe que la extensión de VS Code sí se haya instalado en el túnel en la última versión». Va con el backend y la extensión de navegador 0.8.4 del mismo día; con un backend anterior funciona igual (la cabecera nueva se ignora).
+
+### Corregido
+
+- **El tutor sin modelo ya no se contradice.** Con la GPU apagada (el 25/10 la V100 quedó detenida al pasarla a modo clase), la ventana de la selección mostraba el mensaje del backend «El tutor no esta disponible en este momento…» y debajo «El tutor respondió sin código para esto. Prueba «Otra sugerencia»…», como si el tutor hubiera contestado. Ahora una sugerencia degradada del foco (`degraded` del backend) se marca `unavailable` (`active-suggestion.ts`) y la ventana dice «El tutor no está disponible ahora: el servidor del modelo no respondió.» con qué hacer mientras («revisa el primer error que muestra el compilador y la línea que indica») y deja «Otra sugerencia» y «Resumen y material» (`selection-widget-text.ts`). No ofrece aplicar ni pedir código, no agrega la nota «respondió sin código» (`extension.ts`) y no entra al historial de sugerencias (`suggestion-history.ts`).
+
+### Agregado
+
+- **Cabecera `x-adaceen-vscode-version`** en las llamadas al backend (`client-identity.ts`, `setExtensionVersion` con la versión del `package.json` al activar): el backend sabe qué versión de la extensión hay en cada editor (túnel, VS Code instalado o Codespaces) y el aviso del paso 4 de la extensión de navegador dice si es la última. Solo viaja una versión `x.y.z`.
+
 ## [0.0.36] - 2026-10-25
 
 Pedido del 25 de octubre: «refuerza más la extensión de VS Code, para que muestre un cuadro con las dependencias del archivo». Va con el backend del mismo día.

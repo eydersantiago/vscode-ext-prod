@@ -2,6 +2,8 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
   buildIdentityHeaders,
+  EXTENSION_VERSION_HEADER,
+  setExtensionVersion,
   CLIENT_ID_HEADER,
   CLIENT_ID_PATTERN,
   CLIENT_ID_STORAGE_KEY,
@@ -68,6 +70,17 @@ describe('client-identity', () => {
       [SESSION_ID_HEADER]: 'sesion-1',
     });
     assert.deepEqual(buildIdentityHeaders('sesion-1', 'mal id'), { [SESSION_ID_HEADER]: 'sesion-1' });
+  });
+
+  it('0.0.37: con la version fijada, cada llamada dice que version de ADACEEN tiene este VS Code', () => {
+    setExtensionVersion('0.0.37');
+    try {
+      assert.deepEqual(buildIdentityHeaders('', 'vscabcdefgh123'), { [CLIENT_ID_HEADER]: 'vscabcdefgh123', [EXTENSION_VERSION_HEADER]: '0.0.37' });
+      setExtensionVersion('no es version');
+      assert.deepEqual(buildIdentityHeaders('', 'vscabcdefgh123'), { [CLIENT_ID_HEADER]: 'vscabcdefgh123' });
+    } finally {
+      setExtensionVersion('');
+    }
   });
 
   it('rejectedSessionId: la sesion enviada solo si la respuesta dice invalid', () => {

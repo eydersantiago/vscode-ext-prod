@@ -267,6 +267,11 @@ export type ActiveSuggestionModel = {
   fileOverviewFromTutor?: boolean;
   /** Aviso sobre el codigo propuesto (p. ej. una version mejorada que quita casi todo el bloque). */
   proposalWarning?: string;
+  /**
+   * El backend respondio sin modelo (GPU apagada o sin worker: «El tutor no esta disponible»).
+   * La ventana lo dice asi y no ofrece pedir codigo, que tambien fallaria.
+   */
+  unavailable?: boolean;
 };
 
 export type VscodeReplacementOption = {

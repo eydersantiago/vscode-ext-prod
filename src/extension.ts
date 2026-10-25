@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import { buildBackendActiveSuggestionModel, buildLocalActiveSuggestion, fetchBackendSuggestionText, isSuggestionApplyOffered, primarySuggestionText } from './active-suggestion';
 import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, fetchJsonWithTimeout, sendScanFailure, sendScanResult } from './backend-http';
 import { describeBackendUrlSource, detectEditorHost } from './backend-url';
-import { currentClientId, initClientIdentity } from './client-identity';
+import { currentClientId, initClientIdentity, setExtensionVersion } from './client-identity';
 import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './code-actions';
 import { guardCodeApplication, isExplicitClickOrigin } from './code-application-guard';
 import { setEditorConnection } from './connection-state';
@@ -64,6 +64,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Identidad unica para TODAS las llamadas al backend (x-adaceen-client-id);
   // es el mismo id persistente que usaba la vista de quiz.
   initClientIdentity(context.globalState);
+  setExtensionVersion(context.extension?.packageJSON?.version);
   // Donde corre el editor (VS Code instalado, tunel, Codespaces), en cada evento.
   const editorMetadata = {
     editorHost: detectEditorHost({ remoteName: vscode.env.remoteName, codespace: isCodespaceRuntime() }),
@@ -1270,7 +1271,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   /** Nota bajo el codigo pedido cuando no es para la accion que se pidio (o no hay codigo). */
   const codeRequestNoteFor = (next: ActiveSuggestionModel, mode: EditorCodeAction) => {
-    if (suggestionReadyForMode(next, mode)) {
+    // Sin modelo la ventana ya explica que el tutor no esta disponible.
+    if (suggestionReadyForMode(next, mode) || next.unavailable) {
       return '';
     }
     // 0.0.35: el motivo concreto si el codigo no se puede aplicar tal cual (resumen «...» o

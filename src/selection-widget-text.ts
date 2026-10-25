@@ -55,6 +55,8 @@ export type SelectionWidgetModel = {
   requestedAction?: SelectionWidgetMode | '';
   /** Aviso sobre el codigo (una version mejorada que quita casi todo el bloque). */
   proposalWarning?: string;
+  /** El backend respondio sin modelo: solo «Otra sugerencia» (y el resumen), sin pedir codigo. */
+  unavailable?: boolean;
 };
 
 /** Comandos que puede abrir un enlace de la ventana (y ninguno mas). */
@@ -82,6 +84,10 @@ const PROPOSE_LABEL: Record<'insert' | 'replace', string> = {
 
 const SLOW_NOTE = 'El tutor está tardando más de lo normal (la GPU puede estar lenta o encendiéndose). La respuesta aparece aquí sola.';
 
+/** Sin modelo (GPU apagada o sin worker): lo que dice la ventana en vez del texto del backend. */
+export const UNAVAILABLE_TEXT = 'El tutor no está disponible ahora: el servidor del modelo no respondió.';
+const UNAVAILABLE_NOTE = 'Mientras vuelve, revisa el primer error que muestra el compilador y la línea que indica. «Otra sugerencia» le pregunta otra vez al tutor.';
+
 export function commandUri(command: string, args: unknown[] = []) {
   return `command:${command}?${encodeURIComponent(JSON.stringify(args))}`;
 }
@@ -104,7 +110,7 @@ export function sanitizeTutorMarkdown(text: string) {
 
 /** La ventana ofrece acciones de aplicar para este modelo. */
 export function selectionWidgetOffersApply(model: SelectionWidgetModel) {
-  return !model.blocked && model.applyAllowed !== false && model.source !== 'local-fallback';
+  return !model.blocked && !model.unavailable && model.applyAllowed !== false && model.source !== 'local-fallback';
 }
 
 /** Los botones del titulo (Insertar / Modificar / Eliminar) solo cuando hay algo que aplicar. */
@@ -127,6 +133,9 @@ export function selectionRangeLabel(model: Pick<SelectionWidgetModel, 'startLine
 function sourceLabel(model: SelectionWidgetModel) {
   if (model.loading || model.pendingMode) {
     return '$(sync~spin) consultando al tutor';
+  }
+  if (model.unavailable) {
+    return 'tutor no disponible';
   }
   if (model.source === 'backend') {
     return model.ragCourseCode ? `tutor · material ${escapeMarkdown(model.ragCourseCode)}` : 'tutor';
@@ -189,7 +198,7 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
   lines.push(`**${selectionWidgetTitle(model)}** (${range}) · ${sourceLabel(model)}`);
   lines.push('');
 
-  if (model.headline && !model.blocked) {
+  if (model.headline && !model.blocked && !model.unavailable) {
     lines.push(escapeMarkdown(model.headline));
     lines.push('');
   }
@@ -225,6 +234,16 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
 
   if (model.source === 'local-fallback') {
     lines.push('_El tutor no respondió a tiempo: esta es una pista local, sin código. Pide otra sugerencia en un momento._');
+    lines.push('');
+    lines.push(secondary);
+    return lines.join('\n');
+  }
+
+  if (model.unavailable) {
+    // Una sola explicacion, sin «respondio sin codigo» y sin pedir codigo (tambien fallaria).
+    lines.push(UNAVAILABLE_TEXT);
+    lines.push('');
+    lines.push(`_${UNAVAILABLE_NOTE}_`);
     lines.push('');
     lines.push(secondary);
     return lines.join('\n');

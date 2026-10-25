@@ -25,6 +25,18 @@ export const SESSION_ID_HEADER = 'x-session-id';
 export const SESSION_STATUS_HEADER = 'x-adaceen-session';
 /** Mismo patron que valida el backend. */
 export const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,80}$/;
+/**
+ * Version de esta extension (0.0.37): el backend sabe que version tiene el VS Code de cada
+ * estudiante y la guia del navegador comprueba que en el tunel este la ultima.
+ */
+export const EXTENSION_VERSION_HEADER = 'x-adaceen-vscode-version';
+const EXTENSION_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
+let activeExtensionVersion = '';
+
+/** La fija activate() con la version del package.json. */
+export function setExtensionVersion(version: unknown) {
+  activeExtensionVersion = typeof version === 'string' && EXTENSION_VERSION_PATTERN.test(version.trim()) ? version.trim() : '';
+}
 
 const TOKEN_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
@@ -89,6 +101,9 @@ export function buildIdentityHeaders(sessionId = '', clientId: string = activeCl
   const headers: Record<string, string> = {};
   if (isValidClientId(clientId)) {
     headers[CLIENT_ID_HEADER] = clientId;
+  }
+  if (activeExtensionVersion) {
+    headers[EXTENSION_VERSION_HEADER] = activeExtensionVersion;
   }
   const cleanSession = sessionId.trim();
   if (cleanSession) {

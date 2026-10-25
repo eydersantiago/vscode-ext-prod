@@ -100,6 +100,24 @@ describe('ventana flotante (0.0.34)', () => {
     assert.equal(selectionWidgetShowsTitleActions(fallback), false);
   });
 
+  it('sin modelo (GPU apagada): dice que el tutor no esta disponible y nada mas (piloto del 25/10)', () => {
+    const offline = model({
+      unavailable: true,
+      headline: 'El tutor no esta disponible en este momento: el servidor del modelo no respondio.',
+      completionText: '',
+      completionMode: '',
+      codeRequestNote: 'El tutor respondió sin código para esto. Prueba «Otra sugerencia» o escríbelo con la pista.',
+      applicationNote: 'Te quedan 3 aplicaciones en este archivo.',
+    });
+    const text = decoded(buildSelectionWidgetText(offline));
+    assert.match(text, /· tutor no disponible/);
+    assert.match(text, /El tutor no está disponible ahora: el servidor del modelo no respondió\./);
+    assert.match(text, /Otra sugerencia/);
+    assert.doesNotMatch(text, /respondió sin código/, 'no dice que respondio');
+    assert.doesNotMatch(text, /Proponer una mejora|Proponer código para continuar|Eliminar selección|Te quedan/);
+    assert.equal(selectionWidgetShowsTitleActions(offline), false);
+  });
+
   it('bloqueada por la politica o sin permiso de aplicar: solo guia', () => {
     const blocked = decoded(buildSelectionWidgetText(model({ blocked: true, tutorMessage: 'Tu docente pide intentarlo primero. [x](command:adaceen.applySuggestionCompletion)' })));
     assert.match(blocked, /\*\*Mensaje del tutor\*\*/);
