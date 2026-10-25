@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { FileViewState } from './file-view-model';
+import type { FileViewDependencyGroup, FileViewState } from './file-view-model';
 
 /**
  * Vista «Este archivo» (0.0.34), en el Explorador debajo del arbol de archivos
@@ -12,7 +12,13 @@ import type { FileViewState } from './file-view-model';
  *
  * El HTML se pinta una sola vez; los datos llegan por postMessage
  * (file-view-model.ts arma el estado) y el script redibuja.
+ *
+ * 0.0.36: cuadro «Dependencias» (pedido del 25/10/2026) debajo de «De qué trata»: lo que usa
+ * el archivo de tu proyecto (se abre con un clic), las bibliotecas, lo que no se encontro y
+ * quien lo usa. El clic manda (grupo, posicion); extension.ts busca el elemento.
  */
+
+const DEPENDENCY_GROUPS: readonly FileViewDependencyGroup[] = ['local', 'libraries', 'missing', 'dependents'];
 
 type FileViewHandlers = {
   /** La vista se mostro u oculto (para pedir el resumen o el material si faltan). */
@@ -22,6 +28,7 @@ type FileViewHandlers = {
   loadMaterial: () => void;
   refreshSummary: () => void;
   openQuiz: () => void;
+  openDependency: (group: FileViewDependencyGroup, index: number) => void;
 };
 
 function randomId(length: number) {
@@ -40,6 +47,9 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
   private readonly nonce = randomId(32);
   private readonly disposables: vscode.Disposable[] = [];
   private state: FileViewState | null = null;
+  /** El script del webview ya avisó que escucha (antes de eso un postMessage se pierde). */
+  private ready = false;
+  private focusPending = false;
 
   constructor(private readonly handlers: FileViewHandlers) {}
 
@@ -66,8 +76,21 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     }
   }
 
+  /**
+   * Lleva la vista al cuadro «Dependencias» (comando ADACEEN: Ver dependencias del archivo). Si la
+   * vista se acaba de crear, el aviso espera a que su script este listo.
+   */
+  focusDependencies() {
+    if (this.view && this.ready) {
+      void this.view.webview.postMessage({ type: 'focus', section: 'dependencies' });
+      return;
+    }
+    this.focusPending = true;
+  }
+
   resolveWebviewView(webviewView: vscode.WebviewView) {
     this.view = webviewView;
+    this.ready = false;
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this.renderShell();
     this.disposables.push(
@@ -78,7 +101,10 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         }
       }),
       webviewView.onDidDispose(() => {
-        this.view = null;
+        if (this.view === webviewView) {
+          this.view = null;
+          this.ready = false;
+        }
       }),
     );
     this.handlers.onVisible();
@@ -92,8 +118,13 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     const data = message && typeof message === 'object' ? message as Record<string, unknown> : {};
     switch (data.type) {
       case 'ready':
+        this.ready = true;
         if (this.state && this.view) {
           void this.view.webview.postMessage({ type: 'state', state: this.state });
+        }
+        if (this.focusPending && this.view) {
+          this.focusPending = false;
+          void this.view.webview.postMessage({ type: 'focus', section: 'dependencies' });
         }
         return;
       case 'openSource':
@@ -114,6 +145,11 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         return;
       case 'openQuiz':
         this.handlers.openQuiz();
+        return;
+      case 'openDependency':
+        if (typeof data.group === 'string' && (DEPENDENCY_GROUPS as readonly string[]).includes(data.group) && Number.isInteger(data.index) && Number(data.index) >= 0) {
+          this.handlers.openDependency(data.group as FileViewDependencyGroup, Number(data.index));
+        }
         return;
       default:
         return;
@@ -140,7 +176,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     .file-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .file-meta { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     section { margin: 0 0 var(--gap); }
-    h2 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 6px; font-size: 11px; font-weight: 600;
+    h2 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; margin: 0 0 6px; font-size: 11px; font-weight: 600;
       letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
     h2 .count { font-weight: 500; letter-spacing: 0; text-transform: none; }
     .overview { margin: 0; padding: 8px 10px; border-left: 3px solid var(--vscode-textLink-foreground);
@@ -176,7 +212,43 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     .spinner { display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px; border-radius: 50%;
       border: 2px solid var(--muted); border-top-color: transparent; animation: spin .9s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+    /* Cuadro «Dependencias» (0.0.36): acordeones plegados, «Ver dependencias» los abre. */
+    details.deps { border: 1px solid var(--line); border-radius: 6px; scroll-margin-top: 8px; }
+    details.deps.flash { animation: flash 1.4s ease-out; }
+    @keyframes flash { from { box-shadow: 0 0 0 2px var(--vscode-focusBorder); } to { box-shadow: 0 0 0 2px transparent; } }
+    details.deps summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; user-select: none; }
+    details.deps summary::-webkit-details-marker { display: none; }
+    details.deps summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+    details.deps > summary { padding: 6px 8px; border-radius: 6px; color: var(--vscode-textLink-foreground); }
+    details.deps > summary:hover, details.dep-group > summary:hover { background: var(--vscode-list-hoverBackground); }
+    .chev { flex: none; width: 0; height: 0; margin: 0 2px; border-left: 4px solid currentColor; border-top: 4px solid transparent;
+      border-bottom: 4px solid transparent; transition: transform .12s ease; }
+    details[open] > summary > .chev { transform: rotate(90deg); }
+    .deps-flag { margin-left: auto; font-size: 11px; color: var(--vscode-editorWarning-foreground, #cca700); }
+    .deps-body { padding: 0 8px 6px; }
+    details.dep-group { border-top: 1px solid var(--line); }
+    details.dep-group > summary { margin: 0 -8px; padding: 5px 8px; font-size: 12px; }
+    details.dep-group.missing > summary { color: var(--vscode-editorWarning-foreground, #cca700); }
+    .dep-count { margin-left: auto; min-width: 16px; padding: 0 5px; border-radius: 8px; font-size: 10px; line-height: 16px; text-align: center;
+      color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); }
+    details.dep-group > .dep-items { padding: 0 0 6px; }
+    ul.deps-list { list-style: none; margin: 0 -6px; padding: 0; display: grid; gap: 1px; }
+    ul.deps-list button { display: block; width: 100%; text-align: left; padding: 3px 6px; border-radius: 4px;
+      color: var(--vscode-foreground); background: transparent; border: 1px solid transparent; }
+    ul.deps-list button:hover, ul.deps-list button:focus-visible { background: var(--vscode-list-hoverBackground); outline: none; }
+    ul.deps-list button:focus-visible { border-color: var(--vscode-focusBorder); }
+    .dep-name { font-family: var(--vscode-editor-font-family); font-size: 12px; font-weight: 600; color: var(--vscode-textLink-foreground); overflow-wrap: anywhere; }
+    .dep-meta { display: block; font-size: 11px; color: var(--muted); }
+    .dep-warn { display: block; font-size: 11px; color: var(--vscode-editorWarning-foreground, #cca700); }
+    ul.libs .dep-name { color: var(--vscode-foreground); font-weight: 500; margin-right: 6px; }
+    ul.libs .dep-meta { display: inline; }
+    details.dep-group.missing ul.deps-list button { border-left: 2px solid var(--vscode-editorWarning-foreground, #cca700); border-radius: 0 4px 4px 0; }
+    details.dep-group.missing .dep-name { color: var(--vscode-foreground); }
+    .dep-more { margin: 2px 0 0; padding: 0; border: 0; background: none; color: var(--vscode-textLink-foreground); font-size: 11px; }
+    .dep-more:hover { text-decoration: underline; }
+    .deps-body > .muted { margin: 2px 0 6px; }
+    .deps-note { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
+    @media (prefers-reduced-motion: reduce) { .spinner, details.deps.flash { animation: none; } .chev { transition: none; } }
   </style>
 </head>
 <body>
@@ -193,6 +265,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
           if (key === 'text') { node.textContent = attrs[key]; }
           else if (key === 'onclick') { node.addEventListener('click', attrs[key]); }
           else if (key === 'oninput') { node.addEventListener('input', attrs[key]); }
+          else if (key === 'ontoggle') { node.addEventListener('toggle', attrs[key]); }
           else if (attrs[key] !== false && attrs[key] !== undefined && attrs[key] !== null) { node.setAttribute(key, attrs[key] === true ? '' : attrs[key]); }
         });
         (children || []).forEach(function (child) { if (child) node.appendChild(child); });
@@ -227,6 +300,109 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
           state.summaryLoading ? null : el('button', { class: 'link', text: state.overviewFrom === 'tutor' ? 'Actualizar resumen' : 'Pedir resumen al tutor', onclick: function () { send({ type: 'refreshSummary' }); } }),
         ]));
         return el('section', {}, children);
+      }
+
+      // Cuadro «Dependencias» (0.0.36), en acordeones para no llenar la vista (pedido del 25/10):
+      // plegado, «Ver dependencias» lo abre; adentro, cada grupo tambien se abre con un clic. Lo
+      // abierto se recuerda (tambien al cambiar de archivo) y cada grupo muestra 6 antes de «Ver N más».
+      var DEP_VISIBLE = 6;
+      var ui = { depsOpen: false, groups: {} };
+      var expanded = {};
+      var expandedFile = '';
+      var pendingFocus = false;
+      var DEP_GROUPS = [
+        { key: 'local', label: 'Usa de tu proyecto', listClass: 'deps-list' },
+        { key: 'libraries', label: 'Bibliotecas', listClass: 'deps-list libs' },
+        { key: 'missing', label: 'No encontradas', listClass: 'deps-list' },
+        { key: 'dependents', label: 'La usan', listClass: 'deps-list' },
+      ];
+
+      function depItem(item, group, index) {
+        return el('li', {}, [
+          el('button', { title: item.title || '', onclick: function () { send({ type: 'openDependency', group: group, index: index }); } }, [
+            el('span', { class: 'dep-name', text: item.label }),
+            item.meta ? el('span', { class: 'dep-meta', text: item.meta }) : null,
+            item.warning ? el('span', { class: 'dep-warn', text: item.warning }) : null,
+          ]),
+        ]);
+      }
+
+      function depGroup(deps, group) {
+        var items = deps[group.key] || [];
+        var emptyText = !items.length && group.key === 'dependents' ? deps.emptyDependents : '';
+        if (!items.length && !emptyText) return null;
+        var more = !!expanded[group.key];
+        var shown = more ? items : items.slice(0, DEP_VISIBLE);
+        var hidden = items.length - shown.length;
+        var body = emptyText
+          ? [el('p', { class: 'muted', text: emptyText })]
+          : [
+            el('ul', { class: group.listClass }, shown.map(function (item, index) { return depItem(item, group.key, index); })),
+            hidden > 0 || more && items.length > DEP_VISIBLE
+              ? el('button', { class: 'dep-more', text: hidden > 0 ? 'Ver ' + hidden + ' más' : 'Ver menos', onclick: function () {
+                expanded[group.key] = !more; render(lastState);
+              } })
+              : null,
+          ];
+        return el('details', { class: 'dep-group ' + group.key, open: !!ui.groups[group.key], ontoggle: function (event) {
+          ui.groups[group.key] = event.target.open; saveView();
+        } }, [
+          el('summary', {}, [
+            el('span', { class: 'chev', 'aria-hidden': 'true' }),
+            document.createTextNode(group.label),
+            el('span', { class: 'dep-count', text: String(items.length) }),
+          ]),
+          el('div', { class: 'dep-items' }, body),
+        ]);
+      }
+
+      function dependenciesSection(state) {
+        var deps = state.dependencies;
+        if (!deps) return null;
+        if (expandedFile !== state.fileName) { expanded = {}; expandedFile = state.fileName; }
+        var empty = !deps.local.length && !deps.libraries.length && !deps.missing.length && !deps.dependents.length;
+        var loading = deps.status === 'loading' && empty;
+        var flag = loading
+          ? el('span', { class: 'deps-flag' }, [el('span', { class: 'spinner', 'aria-hidden': 'true' })])
+          : deps.missing.length ? el('span', { class: 'deps-flag', text: deps.missing.length + ' sin encontrar' }) : null;
+        var title = el('span', { class: 'deps-title', text: ui.depsOpen ? 'Ocultar dependencias' : 'Ver dependencias' });
+        var body = [];
+        if (loading) {
+          body.push(spinnerText('Buscando las dependencias en el proyecto…'));
+        } else {
+          if (deps.emptyUses) body.push(el('p', { class: 'muted', text: deps.emptyUses }));
+          DEP_GROUPS.forEach(function (group) { body.push(depGroup(deps, group)); });
+          if (deps.note) body.push(el('p', { class: 'deps-note', text: deps.note }));
+        }
+        return el('section', { 'aria-label': 'Dependencias del archivo' }, [
+          el('details', { class: 'deps', id: 'deps', open: ui.depsOpen, ontoggle: function (event) {
+            ui.depsOpen = event.target.open;
+            title.textContent = ui.depsOpen ? 'Ocultar dependencias' : 'Ver dependencias';
+            saveView();
+          } }, [
+            el('summary', { title: deps.summary || '' }, [el('span', { class: 'chev', 'aria-hidden': 'true' }), title, flag]),
+            el('div', { class: 'deps-body' }, body),
+          ]),
+        ]);
+      }
+
+      // Comando «ADACEEN: Ver dependencias del archivo»: abre el acordeon y lo trae a la vista.
+      function focusDependencies() {
+        var box = document.getElementById('deps');
+        if (!box) { pendingFocus = true; return; }
+        pendingFocus = false;
+        if (!ui.depsOpen) {
+          ui.depsOpen = true;
+          render(lastState);
+          box = document.getElementById('deps');
+          if (!box) return;
+        }
+        box.scrollIntoView({ block: 'start' });
+        box.classList.remove('flash');
+        void box.offsetWidth;
+        box.classList.add('flash');
+        var summary = box.querySelector('summary');
+        if (summary) summary.focus();
       }
 
       function tipsSection(state) {
@@ -316,12 +492,12 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         var focused = document.activeElement && document.activeElement.type === 'search';
         if (!state || !state.hasFile) {
           root.replaceChildren(
-            el('p', { class: 'muted', text: 'Abre un archivo de tu proyecto: aquí verás de qué trata y el material del curso que usa el tutor.' }),
+            el('p', { class: 'muted', text: 'Abre un archivo de tu proyecto: aquí verás de qué trata, qué usa y el material del curso que usa el tutor.' }),
             el('div', { class: 'divider' }),
             state ? materialSection(state) : null
           );
         } else {
-          var parts = [header(state), overviewSection(state), tipsSection(state), nowSection(state), materialSection(state),
+          var parts = [header(state), overviewSection(state), dependenciesSection(state), tipsSection(state), nowSection(state), materialSection(state),
             el('div', { class: 'row' }, [el('button', { class: 'link', text: 'Quiz e historial', onclick: function () { send({ type: 'openQuiz' }); } })])];
           root.replaceChildren.apply(root, parts.filter(Boolean));
         }
@@ -329,15 +505,33 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
           var input = document.querySelector('input[type=search]');
           if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
         }
-        vscode.setState(state);
+        if (pendingFocus) {
+          if (state && state.dependencies && state.dependencies.status === 'ready') focusDependencies();
+          else if (!state || !state.dependencies) pendingFocus = false;
+        }
+        saveView();
+      }
+
+      // Lo que se recuerda si VS Code recarga la vista: el ultimo estado y lo abierto.
+      function saveView() {
+        vscode.setState({ v: 2, state: lastState, ui: ui });
       }
 
       window.addEventListener('message', function (event) {
         var data = event.data || {};
         if (data.type === 'state' && data.state) render(data.state);
+        if (data.type === 'focus' && data.section === 'dependencies') focusDependencies();
       });
       var saved = vscode.getState();
-      if (saved) render(saved);
+      if (saved && saved.v === 2) {
+        if (saved.ui && typeof saved.ui === 'object') {
+          ui.depsOpen = !!saved.ui.depsOpen;
+          ui.groups = saved.ui.groups && typeof saved.ui.groups === 'object' ? saved.ui.groups : {};
+        }
+        if (saved.state) render(saved.state);
+      } else if (saved && typeof saved === 'object' && 'hasFile' in saved) {
+        render(saved); // estado guardado por la 0.0.35
+      }
       send({ type: 'ready' });
     })();
   </script>

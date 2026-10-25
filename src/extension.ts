@@ -15,9 +15,11 @@ import { EditorConnection } from './editor-connect';
 import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnchor, hasActiveSelection, isCursorIdleAnchorStillActive, isSnapshotStillActive, isSuggestionModelDocumentVisible, isSupportedActiveDocument } from './editor-snapshot';
 import { ERROR_TEXT_MAX_CHARS, ErrorSignalTracker } from './error-signals';
 import type { BlockingSignal, ErrorSignal } from './error-signals';
+import { computeActiveFileDependencies, DependencyProbeCache, indexKeyOf, workspaceRelativePath } from './dependency-scan';
+import type { ActiveFileDependencies } from './dependency-scan';
 import { AdaceenFileViewProvider } from './file-view';
-import { buildFileViewState, EMPTY_MATERIAL_STATE } from './file-view-model';
-import type { FileSummaryEntry, FileViewMaterialState } from './file-view-model';
+import { buildDependencyViewState, buildFileViewState, EMPTY_MATERIAL_STATE } from './file-view-model';
+import type { FileSummaryEntry, FileViewActiveFile, FileViewDependencyGroup, FileViewMaterialState } from './file-view-model';
 import { detectBranchName, detectRepoFullName, parseRepoFromGitConfig, readGitConfigText } from './git-repo';
 import { applyEditToText, PROPOSAL_SCHEME, ProposalContentProvider } from './proposal-diff';
 import { AdaceenQuizViewProvider } from './quiz-view';
@@ -33,7 +35,7 @@ import { formatSuggestionHistoryMarkdown, readSuggestionHistory, rememberSuggest
 import { editorPageContext, publishActiveEditorRack, recordVscodeSuggestionMetric, toQuizHistoryItems } from './suggestion-metrics';
 import type { SuggestionMetricFields } from './suggestion-metrics';
 import { AdaceenSuggestionCodeActionProvider, AdaceenSuggestionCodeLensProvider, AdaceenSuggestionInlayHintProvider, isSuggestionCodeActionRequestFocused } from './suggestion-providers';
-import { createEmptyBackendSuggestionResult, delay, formatBackendSuggestionError, inferActiveLanguage, normalizeCourseCode, normalizeRagSources, settleBackendSuggestionResult, truncateInline, withActiveSuggestionDeadline } from './suggestion-results';
+import { createEmptyBackendSuggestionResult, delay, formatBackendSuggestionError, inferActiveLanguage, normalizeCourseCode, normalizeRagSources, pathBaseName, settleBackendSuggestionResult, truncateInline, withActiveSuggestionDeadline } from './suggestion-results';
 import { inlineSurfaceModel, selectionWidgetPresence as selectionWidgetPresenceFor } from './suggestion-surfaces';
 import type { SelectionWidgetPresence } from './suggestion-surfaces';
 import { SuggestionExposureTracker, TelemetryClient } from './telemetry';
@@ -146,6 +148,16 @@ export async function activate(context: vscode.ExtensionContext) {
   let materialState: FileViewMaterialState = { ...EMPTY_MATERIAL_STATE };
   let materialLoadedAt = 0;
   let materialInFlight: Promise<FileViewMaterialState> | null = null;
+  // 0.0.36: el archivo que muestra la vista es el del editor activo (antes, el de la ultima
+  // sugerencia, que tras cambiar de pestaña seguia siendo el anterior), y su cuadro «Dependencias».
+  const initialEditor = vscode.window.activeTextEditor;
+  let fileViewDocument: vscode.TextDocument | null = initialEditor && isSupportedActiveDocument(initialEditor.document)
+    ? initialEditor.document
+    : null;
+  let dependencyState: { uriString: string; loading: boolean; result: ActiveFileDependencies | null } | null = null;
+  let dependencyTimer: ReturnType<typeof setTimeout> | null = null;
+  let dependencyRun = 0;
+  const dependencyProbes = new DependencyProbeCache();
   // «Ver cambios»: la propuesta del tutor aplicada, en un documento de solo lectura.
   const proposals = new ProposalContentProvider();
   context.subscriptions.push(
@@ -274,6 +286,8 @@ export async function activate(context: vscode.ExtensionContext) {
     value: WorkspaceProjectIndex | null;
   } | null = null;
   let workspaceProjectIndexInFlight: Promise<WorkspaceProjectIndex | null> | null = null;
+  // Sube con cada guardado o archivo nuevo: un indice armado antes no entra a la cache (0.0.36).
+  let workspaceProjectIndexGeneration = 0;
   // Cuanto estuvo a la vista cada sugerencia, para vscode_suggestion_ignored.
   const suggestionExposure = new SuggestionExposureTracker<ActiveSuggestionModel>();
   // Origen real de las peticiones (trigger): archivo recien abierto y bloqueo pendiente.
@@ -384,18 +398,148 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  const fileViewActiveFile = (): FileViewActiveFile | null => {
+    const document = fileViewDocument;
+    if (!document || document.isClosed) {
+      return null;
+    }
+    const relativePath = workspaceRelativePath(document.uri);
+    return {
+      uriString: document.uri.toString(),
+      fileName: pathBaseName(relativePath),
+      language: inferActiveLanguage(relativePath, document.languageId),
+    };
+  };
+
   const refreshFileView = () => {
     if (!fileView) {
       return;
     }
     const model = activeSuggestionModel;
-    const uri = model?.uriString || '';
+    const activeFile = fileViewActiveFile();
+    const uri = activeFile?.uriString || '';
+    const deps = dependencyState && dependencyState.uriString === uri ? dependencyState : null;
     fileView.update(buildFileViewState(
       model,
       uri ? fileSummaries.get(uri) || null : null,
       !!uri && fileSummaryInFlight.has(uri),
       materialState,
+      {
+        activeFile,
+        dependencies: deps
+          ? buildDependencyViewState(deps.result?.deps || null, deps.result?.filePath || '', deps.loading, deps.result?.partial || false)
+          : null,
+      },
     ));
+  };
+
+  /** Recalcula el cuadro «Dependencias» del archivo de la vista (solo si la vista se ve). */
+  const refreshDependencies = async () => {
+    const document = fileViewDocument;
+    if (!document || document.isClosed) {
+      dependencyState = null;
+      refreshFileView();
+      return;
+    }
+    const uriString = document.uri.toString();
+    const run = ++dependencyRun;
+    if (!dependencyState || dependencyState.uriString !== uriString) {
+      // Otro archivo: «Buscando...» en vez de las dependencias del anterior.
+      dependencyState = { uriString, loading: true, result: null };
+      refreshFileView();
+    }
+    try {
+      const index = await getWorkspaceProjectIndex({ allowStale: true });
+      if (run !== dependencyRun) {
+        return;
+      }
+      const previous = dependencyState?.result;
+      if (previous && previous.uriString === uriString && previous.version === document.version && previous.indexKey === indexKeyOf(index)) {
+        dependencyState = { uriString, loading: false, result: previous };
+      } else {
+        const result = await computeActiveFileDependencies(document, index, dependencyProbes);
+        if (run !== dependencyRun) {
+          return;
+        }
+        dependencyState = { uriString, loading: false, result };
+      }
+    } catch (error) {
+      output.appendLine(`[Dependencias] No se pudieron leer las dependencias de ${workspaceRelativePath(document.uri)}: ${String(error)}`);
+      if (run !== dependencyRun) {
+        return;
+      }
+      dependencyState = { uriString, loading: false, result: null };
+    }
+    refreshFileView();
+  };
+
+  const scheduleDependencyRefresh = (delayMs: number) => {
+    if (dependencyTimer) {
+      clearTimeout(dependencyTimer);
+      dependencyTimer = null;
+    }
+    // Con la vista oculta no se calcula nada: se calcula al mostrarla (onVisible).
+    if (!fileView?.visible) {
+      return;
+    }
+    dependencyTimer = setTimeout(() => {
+      dependencyTimer = null;
+      void refreshDependencies();
+    }, delayMs);
+  };
+
+  /** El archivo de la vista cambio (otra pestaña, o se cerro el que se mostraba). */
+  const setFileViewDocument = (document: vscode.TextDocument | null) => {
+    const changed = (fileViewDocument?.uri.toString() || '') !== (document?.uri.toString() || '');
+    fileViewDocument = document;
+    if (changed) {
+      refreshFileView();
+      scheduleDependencyRefresh(120);
+    }
+  };
+
+  const revealEditorLine = (editor: vscode.TextEditor, line: number) => {
+    const target = Math.max(0, Math.min(editor.document.lineCount - 1, line - 1));
+    const position = new vscode.Position(target, editor.document.lineAt(target).firstNonWhitespaceCharacterIndex);
+    editor.selection = new vscode.Selection(position, position);
+    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  };
+
+  /** Clic en el cuadro «Dependencias»: abre el archivo del proyecto o va a la linea del import. */
+  const openDependency = async (group: FileViewDependencyGroup, index: number) => {
+    const result = dependencyState?.result;
+    const item = result?.deps[group][index];
+    if (!result || !item) {
+      return;
+    }
+    try {
+      if ((group === 'local' || group === 'dependents') && item.path) {
+        const known = result.uris.get(item.path);
+        const uri = known ? vscode.Uri.parse(known) : await resolveWorkspaceFileUri(item.path);
+        if (!uri) {
+          void vscode.window.showInformationMessage(`ADACEEN: no se encontró ${item.path} en el proyecto.`);
+          return;
+        }
+        const editor = await vscode.window.showTextDocument(uri, { preview: true });
+        if (group === 'dependents' && item.line > 0) {
+          revealEditorLine(editor, item.line);
+        }
+      } else if (item.line > 0) {
+        const editor = await vscode.window.showTextDocument(vscode.Uri.parse(result.uriString), { preview: false });
+        revealEditorLine(editor, item.line);
+      }
+      telemetry.track({
+        source: 'vscode_extension',
+        category: 'navigation',
+        eventType: 'vscode_dependency_opened',
+        pageContext: editorPageContext(),
+        value: group,
+        language: inferActiveLanguage(result.filePath, ''),
+        metadata: { family: result.deps.family, implicit: !!item.implicit, warning: !!item.warning },
+      });
+    } catch (error) {
+      output.appendLine(`[Dependencias] No se pudo abrir ${item.path || item.label}: ${String(error)}`);
+    }
   };
 
   // Aviso de espera larga (0.0.34): a los 20 s sin respuesta la ventana y la barra lo dicen.
@@ -487,6 +631,7 @@ export async function activate(context: vscode.ExtensionContext) {
   };
 
   const clearWorkspaceProjectIndexCache = () => {
+    workspaceProjectIndexGeneration += 1;
     workspaceProjectIndexCache = null;
     workspaceProjectIndexInFlight = null;
   };
@@ -557,7 +702,12 @@ export async function activate(context: vscode.ExtensionContext) {
     return result;
   };
 
-  const getWorkspaceProjectIndex = async () => {
+  /**
+   * Indice del proyecto (cache de ACTIVE_SUGGESTION_INDEX_TTL_MS; se borra al guardar o al crear,
+   * borrar o renombrar archivos). allowStale: sirve el de la cache aunque haya vencido (el cuadro
+   * «Dependencias» al cambiar de pestaña no rearma el indice cada minuto).
+   */
+  const getWorkspaceProjectIndex = async (options: { allowStale?: boolean } = {}) => {
     const identity = getWorkspaceProjectIndexIdentity();
     if (!identity) {
       return null;
@@ -567,30 +717,38 @@ export async function activate(context: vscode.ExtensionContext) {
     if (
       workspaceProjectIndexCache &&
       workspaceProjectIndexCache.identity === identity &&
-      workspaceProjectIndexCache.expiresAt > now
+      (options.allowStale || workspaceProjectIndexCache.expiresAt > now)
     ) {
       return workspaceProjectIndexCache.value;
     }
 
     if (!workspaceProjectIndexInFlight) {
-      workspaceProjectIndexInFlight = buildWorkspaceProjectIndexForSuggestions(output)
+      // 0.0.36: antes cada llamada que esperaba guardaba el resultado aunque un archivo se hubiera
+      // guardado mientras se armaba (y la cache quedaba con un indice viejo por un minuto).
+      const generation = workspaceProjectIndexGeneration;
+      const request: Promise<WorkspaceProjectIndex | null> = buildWorkspaceProjectIndexForSuggestions(output)
         .catch((error) => {
           output.appendLine(`[Suggestions] No se pudo construir el mapa local del proyecto: ${String(error)}`);
           return null;
+        })
+        .then((value) => {
+          if (generation === workspaceProjectIndexGeneration) {
+            workspaceProjectIndexCache = {
+              identity,
+              expiresAt: Date.now() + ACTIVE_SUGGESTION_INDEX_TTL_MS,
+              value,
+            };
+          }
+          return value;
+        })
+        .finally(() => {
+          if (workspaceProjectIndexInFlight === request) {
+            workspaceProjectIndexInFlight = null;
+          }
         });
+      workspaceProjectIndexInFlight = request;
     }
-
-    try {
-      const value = await workspaceProjectIndexInFlight;
-      workspaceProjectIndexCache = {
-        identity,
-        expiresAt: Date.now() + ACTIVE_SUGGESTION_INDEX_TTL_MS,
-        value,
-      };
-      return value;
-    } finally {
-      workspaceProjectIndexInFlight = null;
-    }
+    return workspaceProjectIndexInFlight;
   };
 
   const resolveBackendScopeForSnapshot = (
@@ -1497,6 +1655,10 @@ export async function activate(context: vscode.ExtensionContext) {
     onVisible: () => {
       refreshFileView();
       void requestFileSummary(false);
+      scheduleDependencyRefresh(0);
+    },
+    openDependency: (group, index) => {
+      void openDependency(group, index);
     },
     openSource: (index) => {
       const source = activeSuggestionModel?.ragSources[index];
@@ -1528,6 +1690,16 @@ export async function activate(context: vscode.ExtensionContext) {
       if (model && !model.loading) {
         recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', 'file_view');
       }
+    }),
+    // 0.0.36: «ADACEEN: Ver dependencias del archivo» (paleta de comandos): abre el cuadro.
+    vscode.commands.registerCommand('adaceen.showDependencies', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && isSupportedActiveDocument(editor.document)) {
+        setFileViewDocument(editor.document);
+      }
+      await fileView?.reveal(false);
+      scheduleDependencyRefresh(0);
+      fileView?.focusDependencies();
     }),
     vscode.commands.registerCommand('adaceen.openCourseMaterial', async () => {
       const state = await loadCourseMaterial(false);
@@ -1936,8 +2108,15 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (!editor) {
         // El foco se fue al panel de ADACEEN, a la terminal o a la salida:
-        // el archivo sigue abierto, asi que no se toca nada.
+        // el archivo sigue abierto, asi que no se toca nada. Si ya no queda ningun
+        // archivo a la vista (se cerro el ultimo), la vista «Este archivo» se vacia.
+        if (!vscode.window.visibleTextEditors.some((visible) => isSupportedActiveDocument(visible.document))) {
+          setFileViewDocument(null);
+        }
         return;
+      }
+      if (isSupportedActiveDocument(editor.document)) {
+        setFileViewDocument(editor.document);
       }
       if (editor.document.uri.toString() !== selectionWidget.uriString) {
         selectionWidget.hide();
@@ -1975,6 +2154,16 @@ export async function activate(context: vscode.ExtensionContext) {
         refreshInlineSuggestionSurfaces();
         scheduleCursorIdleSuggestionRefresh();
       }
+      // Un #include o import nuevo aparece en el cuadro poco despues de dejar de escribir.
+      if (event.contentChanges.length > 0 && fileViewDocument && event.document === fileViewDocument) {
+        scheduleDependencyRefresh(1500);
+      }
+    }),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      if (fileViewDocument && document === fileViewDocument) {
+        const active = vscode.window.activeTextEditor?.document;
+        setFileViewDocument(active && active !== document && isSupportedActiveDocument(active) ? active : null);
+      }
     }),
     vscode.languages.onDidChangeDiagnostics((event) => {
       const activeUri = vscode.window.activeTextEditor?.document.uri.toString();
@@ -1984,11 +2173,32 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidSaveTextDocument(() => {
       clearWorkspaceProjectIndexCache();
+      // Otro archivo pudo empezar (o dejar) de incluir al de la vista: «La usan» cambia.
+      scheduleDependencyRefresh(600);
     }),
+    // 0.0.36: archivos nuevos, borrados o renombrados (tambien desde la terminal o git). Antes el
+    // indice no se enteraba hasta el siguiente guardado, y un .h recien creado seguia sin aparecer.
+    (() => {
+      const watcher = vscode.workspace.createFileSystemWatcher('**/*', false, true, false);
+      const ignored = /\/(?:node_modules|\.git|dist|build|out|coverage|\.next|target|bin|obj|vendor|__pycache__|\.vscode-test)\//;
+      const onFilesChanged = (uri: vscode.Uri) => {
+        if (ignored.test(uri.path)) {
+          return;
+        }
+        clearWorkspaceProjectIndexCache();
+        dependencyProbes.clear();
+        scheduleDependencyRefresh(800);
+      };
+      watcher.onDidCreate(onFilesChanged);
+      watcher.onDidDelete(onFilesChanged);
+      return watcher;
+    })(),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       clearWorkspaceProjectIndexCache();
       clearBackendSuggestionCaches();
+      dependencyProbes.clear();
       scheduleCursorIdleSuggestionRefresh();
+      scheduleDependencyRefresh(500);
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (
@@ -1998,6 +2208,12 @@ export async function activate(context: vscode.ExtensionContext) {
         clearBackendSuggestionCaches();
         clearWorkspaceProjectIndexCache();
         scheduleCursorIdleSuggestionRefresh();
+      }
+      if (event.affectsConfiguration('adaceen.scan')) {
+        // El indice usa los filtros del escaneo (includeGlob, excludeGlob, mode).
+        clearWorkspaceProjectIndexCache();
+        dependencyProbes.clear();
+        scheduleDependencyRefresh(500);
       }
       if (event.affectsConfiguration('adaceen.triggers')) {
         errorSignalTracker.updateSettings(errorSignalSettingsFromConfig());
@@ -2020,6 +2236,10 @@ export async function activate(context: vscode.ExtensionContext) {
         if (selectionInlinePanelTimer) {
           clearTimeout(selectionInlinePanelTimer);
           selectionInlinePanelTimer = null;
+        }
+        if (dependencyTimer) {
+          clearTimeout(dependencyTimer);
+          dependencyTimer = null;
         }
         clearSuggestionDecorations(suggestionDecorationType);
       },

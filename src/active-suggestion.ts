@@ -3,6 +3,7 @@
 import { buildSessionHeaders, fetchJsonWithTimeout } from './backend-http';
 import { ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS, ACTIVE_SUGGESTION_PROMPT_RELATED_CHARS, ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS, ACTIVE_SUGGESTION_PROMPT_TOTAL_CHARS, ACTIVE_SUGGESTION_PROMPT_WINDOW_CHARS, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import type { SuggestDiagnostic } from './error-signals';
+import { formatDependenciesForPrompt, resolveFileDependencies } from './file-dependencies';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
 import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionReadyForMode } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
@@ -251,7 +252,17 @@ export function buildBackendSuggestionContent(
   );
   // Lista corta (ruta, lenguaje, lineas): las vistas previas del mapa de antes casi no decian nada.
   const others = formatOtherFilesLine(ranked, snapshot.filePath, isFileSummary ? 20 : 8);
-  const fixedChars = meta.length + diagnostics.length + selectionBlock.length + related.length + others.length
+  // 0.0.36: en el resumen, lo que usa del proyecto, sus bibliotecas y quien lo usa (el mismo
+  // calculo del cuadro «Dependencias», sin lo no encontrado: el indice no tiene todo).
+  const dependencies = isFileSummary && projectIndex
+    ? formatDependenciesForPrompt(resolveFileDependencies({
+      activePath: snapshot.filePath,
+      language: snapshot.language,
+      text: snapshot.content,
+      files: projectIndex.files,
+    }))
+    : '';
+  const fixedChars = meta.length + diagnostics.length + selectionBlock.length + related.length + others.length + dependencies.length
     + ACTIVE_SUGGESTION_PROMPT_OUTLINE_CHARS + 200;
   const windowChars = Math.max(1500, Math.min(ACTIVE_SUGGESTION_PROMPT_WINDOW_CHARS, ACTIVE_SUGGESTION_PROMPT_TOTAL_CHARS - fixedChars));
   const focusStart = isFileSummary ? 0 : hasSelection ? snapshot.selectionStartLine : snapshot.line;
@@ -283,6 +294,7 @@ export function buildBackendSuggestionContent(
     !isFileSummary && !hasSelection && snapshot.currentLineText.trim() ? `Linea actual:\n${snapshot.currentLineText}` : '',
     windowBlock,
     outline ? `Estructura del resto del archivo (numero de linea: declaracion):\n${outline}` : '',
+    dependencies,
     related,
     others,
   ].filter(Boolean).join('\n\n');

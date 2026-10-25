@@ -1,0 +1,1504 @@
+// ADACEEN (VS Code): dependencias del archivo activo (0.0.36), sin importar vscode.
+//
+// Pedido del 25/10/2026: «que muestre un cuadro con las dependencias del archivo». La vista
+// «Este archivo» muestra lo que usa el archivo activo (#include, import, require, using),
+// separado en:
+//   - lo que es del proyecto (se abre con un clic), con las clases y funciones que usa de ahi;
+//   - las bibliotecas, con una linea de para que sirven;
+//   - lo que no se encontro (el error mas comun: el nombre o la carpeta no coinciden), con el
+//     archivo de nombre parecido si lo hay;
+//   - los archivos del proyecto que lo usan a el.
+// No compila nada: lee el texto (sin comentarios) y resuelve las rutas contra el indice del
+// proyecto que ya arma la extension (workspace-index.ts). Se prueba con node:test.
+
+export type DependencyFamily = 'c' | 'python' | 'java' | 'js' | 'ruby' | 'csharp' | 'none';
+
+/**
+ * quoted / angle: #include "x" y #include <x>. module: import a.b, using X, require 'x'.
+ * relative: from .x import y, './x', require_relative. wildcard: import a.b.*; (Java).
+ */
+export type ImportKind = 'quoted' | 'angle' | 'module' | 'relative' | 'wildcard';
+
+export type ParsedImport = {
+  /** Como esta escrito: "figura.h", "iostream", "modelo.Figura", "./util/formato", "..utils". */
+  specifier: string;
+  /** Linea del archivo (1-based). */
+  line: number;
+  kind: ImportKind;
+  /** Nombres que trae: from x import a, b / import { a } from './x' / import static ...C.m. */
+  names: string[];
+};
+
+export type FileDependencyItem = {
+  /** Lo que se muestra: el import tal cual (o el nombre del archivo en «La usan»). */
+  label: string;
+  /** Linea del import en el archivo (0: sin import, por ejemplo una clase del mismo paquete). */
+  line: number;
+  /** Ruta relativa del archivo del proyecto (en «Usa de tu proyecto» y «La usan»). */
+  path?: string;
+  description?: string;
+  /** Clases y funciones de ese archivo que usa el activo. */
+  symbols?: string[];
+  /** Algo que conviene revisar aunque se haya encontrado (mayusculas, conio.h en Linux...). */
+  warning?: string;
+  /** «¿Quisiste decir ...?» en lo que no se encontro. */
+  hint?: string;
+  /** Sin import: clase del mismo paquete (Java) o del mismo proyecto (C#). */
+  implicit?: boolean;
+};
+
+export type FileDependencies = {
+  family: DependencyFamily;
+  local: FileDependencyItem[];
+  libraries: FileDependencyItem[];
+  missing: FileDependencyItem[];
+  dependents: FileDependencyItem[];
+  /**
+   * Nombres de archivo a buscar en el disco antes de dar algo por no encontrado: el indice
+   * tiene a lo sumo 90 archivos y solo algunas extensiones (un .tpp o un .hh no estan).
+   */
+  probes: string[];
+};
+
+/** Entrada del indice del proyecto que sirve para resolver (workspace-index.ts). */
+export type DependencyIndexFile = {
+  path: string;
+  language?: string;
+  outline?: string;
+  imports?: ParsedImport[];
+  /** Nombres con mayuscula que usa el archivo (Java y C#: clases del mismo paquete sin import). */
+  typeRefs?: string[];
+  /** C#: espacios de nombres que declara (tambien los de archivo, `namespace X;`). */
+  namespaces?: string[];
+};
+
+export type DependencyInput = {
+  /** Ruta relativa del archivo activo, con "/". */
+  activePath: string;
+  language: string;
+  text: string;
+  files: DependencyIndexFile[];
+  /** Rutas que existen aunque no esten en el indice (lo que encontro la busqueda en el disco). */
+  extraPaths?: string[];
+};
+
+/** Lo que se lee de un archivo largo: los imports van arriba. */
+const MAX_PARSE_CHARS = 200_000;
+const MAX_ITEMS_PER_GROUP = 40;
+const MAX_PROBES = 8;
+const MAX_SYMBOLS = 4;
+const MAX_TYPE_REFS = 120;
+
+// ---------------------------------------------------------------------------------------------
+// Bibliotecas conocidas: una linea de para que sirven (lo que un estudiante necesita saber).
+
+const C_HEADERS: Record<string, string> = {
+  iostream: 'entrada y salida por consola (cin, cout)',
+  fstream: 'leer y escribir archivos',
+  sstream: 'convertir texto con flujos (stringstream)',
+  iomanip: 'formato de la salida (setw, setprecision)',
+  istream: 'flujos de entrada',
+  ostream: 'flujos de salida',
+  string: 'cadenas de texto (std::string)',
+  string_view: 'vistas de cadenas sin copiarlas',
+  vector: 'arreglos que crecen (std::vector)',
+  array: 'arreglos de tamaño fijo (std::array)',
+  list: 'listas enlazadas (std::list)',
+  forward_list: 'listas enlazadas simples',
+  deque: 'colas dobles (std::deque)',
+  map: 'diccionarios clave-valor ordenados (std::map)',
+  unordered_map: 'diccionarios clave-valor con tabla hash',
+  set: 'conjuntos ordenados (std::set)',
+  unordered_set: 'conjuntos con tabla hash',
+  stack: 'pilas (std::stack)',
+  queue: 'colas y colas de prioridad',
+  algorithm: 'ordenar, buscar y recorrer (sort, find, max)',
+  numeric: 'sumas y acumulados (accumulate)',
+  cmath: 'funciones matemáticas (sqrt, pow, sin)',
+  'math.h': 'funciones matemáticas (sqrt, pow, sin)',
+  cstdlib: 'utilidades generales (rand, exit, abs)',
+  'stdlib.h': 'utilidades generales (rand, exit, malloc)',
+  cstdio: 'entrada y salida al estilo C (printf, scanf)',
+  'stdio.h': 'entrada y salida al estilo C (printf, scanf)',
+  cstring: 'cadenas al estilo C (strlen, strcpy)',
+  'string.h': 'cadenas al estilo C (strlen, strcpy)',
+  ctime: 'fecha y hora (time)',
+  'time.h': 'fecha y hora (time)',
+  chrono: 'medir el tiempo',
+  random: 'números aleatorios',
+  memory: 'punteros inteligentes (unique_ptr, shared_ptr)',
+  utility: 'pares e intercambios (pair, swap, move)',
+  functional: 'funciones como valores (std::function)',
+  iterator: 'iteradores',
+  limits: 'límites de los tipos numéricos',
+  climits: 'límites de los enteros (INT_MAX)',
+  'limits.h': 'límites de los enteros (INT_MAX)',
+  cfloat: 'límites de los decimales',
+  exception: 'excepciones',
+  stdexcept: 'excepciones estándar (runtime_error)',
+  cassert: 'comprobaciones con assert',
+  'assert.h': 'comprobaciones con assert',
+  cctype: 'clasificar caracteres (isdigit, toupper)',
+  'ctype.h': 'clasificar caracteres (isdigit, toupper)',
+  cstdint: 'enteros de tamaño fijo (int32_t)',
+  'stdint.h': 'enteros de tamaño fijo (int32_t)',
+  'stdbool.h': 'el tipo bool en C',
+  cstddef: 'tipos básicos (size_t, nullptr_t)',
+  'stddef.h': 'tipos básicos (size_t)',
+  tuple: 'tuplas',
+  optional: 'valores que pueden faltar (std::optional)',
+  variant: 'uniones seguras (std::variant)',
+  thread: 'hilos de ejecución',
+  mutex: 'exclusión mutua entre hilos',
+  atomic: 'variables atómicas',
+  bitset: 'conjuntos de bits',
+  complex: 'números complejos',
+  locale: 'configuración regional',
+  clocale: 'configuración regional (setlocale)',
+  'locale.h': 'configuración regional (setlocale)',
+  typeinfo: 'información de tipos (typeid)',
+  initializer_list: 'listas de inicialización',
+  filesystem: 'carpetas y rutas de archivos',
+  regex: 'expresiones regulares',
+  'bits/stdc++.h': 'todas las bibliotecas estándar (solo GCC)',
+  'unistd.h': 'llamadas del sistema POSIX (sleep, fork)',
+  'pthread.h': 'hilos POSIX',
+  'conio.h': 'consola de Windows (getch, clrscr)',
+  'windows.h': 'funciones de Windows (Sleep, system)',
+  'iostream.h': 'versión antigua de iostream',
+};
+
+const C_HEADER_WARNINGS: Record<string, string> = {
+  'conio.h': 'Solo existe en Windows (Dev-C++): en Linux no compila.',
+  'windows.h': 'Solo existe en Windows: en Linux no compila.',
+  'iostream.h': 'Ya no existe: usa #include <iostream>.',
+};
+
+/** Modulos de la biblioteca estandar de Python (nombre de primer nivel). */
+const PY_STDLIB = new Set([
+  '__future__', 'abc', 'argparse', 'array', 'ast', 'asyncio', 'base64', 'bisect', 'builtins', 'calendar',
+  'cmath', 'codecs', 'collections', 'colorsys', 'concurrent', 'configparser', 'contextlib', 'copy', 'cProfile',
+  'csv', 'ctypes', 'curses', 'dataclasses', 'datetime', 'decimal', 'difflib', 'dis', 'doctest', 'email', 'enum',
+  'errno', 'fileinput', 'fnmatch', 'fractions', 'functools', 'gc', 'getpass', 'gettext', 'glob', 'graphlib',
+  'gzip', 'hashlib', 'heapq', 'hmac', 'html', 'http', 'importlib', 'inspect', 'io', 'ipaddress', 'itertools',
+  'json', 'keyword', 'linecache', 'locale', 'logging', 'lzma', 'math', 'mimetypes', 'msvcrt', 'multiprocessing',
+  'numbers', 'operator', 'os', 'pathlib', 'pdb', 'pickle', 'platform', 'pprint', 'profile', 'queue', 'random',
+  're', 'sched', 'secrets', 'select', 'shelve', 'shlex', 'shutil', 'signal', 'smtplib', 'socket',
+  'socketserver', 'sqlite3', 'ssl', 'stat', 'statistics', 'string', 'struct', 'subprocess', 'sys', 'tempfile',
+  'textwrap', 'threading', 'time', 'timeit', 'tkinter', 'token', 'tokenize', 'tomllib', 'trace', 'traceback',
+  'turtle', 'types', 'typing', 'unicodedata', 'unittest', 'urllib', 'uuid', 'venv', 'warnings', 'wave',
+  'weakref', 'webbrowser', 'winsound', 'xml', 'zipfile', 'zlib', 'zoneinfo',
+]);
+
+const PY_DESCRIPTIONS: Record<string, string> = {
+  math: 'funciones matemáticas (sqrt, pi, floor)',
+  random: 'números aleatorios',
+  os: 'archivos, carpetas y variables del sistema',
+  'os.path': 'rutas de archivos',
+  sys: 'datos del intérprete (argv, exit)',
+  time: 'pausas y medición del tiempo',
+  datetime: 'fechas y horas',
+  json: 'leer y escribir JSON',
+  re: 'expresiones regulares',
+  collections: 'estructuras extra (deque, Counter, defaultdict)',
+  itertools: 'combinaciones y recorridos de iterables',
+  functools: 'herramientas para funciones (reduce, lru_cache)',
+  typing: 'anotaciones de tipos',
+  dataclasses: 'clases de datos con @dataclass',
+  abc: 'clases abstractas (ABC, abstractmethod)',
+  enum: 'enumeraciones',
+  csv: 'leer y escribir archivos CSV',
+  pathlib: 'rutas de archivos',
+  statistics: 'promedio, mediana y desviación',
+  string: 'constantes y utilidades de texto',
+  copy: 'copias de objetos (copy, deepcopy)',
+  unittest: 'pruebas unitarias',
+  turtle: 'dibujos con la tortuga',
+  tkinter: 'ventanas, botones y formularios',
+  sqlite3: 'base de datos SQLite',
+  socket: 'conexiones de red',
+  threading: 'hilos de ejecución',
+  subprocess: 'ejecutar otros programas',
+  argparse: 'argumentos de la línea de comandos',
+  logging: 'mensajes de registro (logs)',
+  pickle: 'guardar objetos en archivos',
+  heapq: 'colas de prioridad (montículos)',
+  bisect: 'búsqueda binaria en listas ordenadas',
+  decimal: 'decimales exactos',
+  fractions: 'fracciones',
+  uuid: 'identificadores únicos',
+  hashlib: 'hashes (sha256, md5)',
+  urllib: 'direcciones web y descargas',
+  io: 'flujos de entrada y salida',
+  shutil: 'copiar y mover archivos',
+  glob: 'buscar archivos por patrón',
+  timeit: 'medir cuánto tarda un código',
+  operator: 'operadores como funciones',
+  queue: 'colas seguras entre hilos',
+  asyncio: 'programación asíncrona',
+  secrets: 'valores aleatorios seguros',
+  __future__: 'funciones de versiones nuevas de Python',
+  msvcrt: 'consola de Windows (getch)',
+  winsound: 'sonidos de Windows',
+};
+
+const PY_WARNINGS: Record<string, string> = {
+  msvcrt: 'Solo existe en Windows: en Linux falla.',
+  winsound: 'Solo existe en Windows: en Linux falla.',
+};
+
+const PY_THIRD_PARTY: Record<string, string> = {
+  numpy: 'cálculo con arreglos (paquete externo)',
+  pandas: 'tablas de datos (paquete externo)',
+  matplotlib: 'gráficas (paquete externo)',
+  seaborn: 'gráficas estadísticas (paquete externo)',
+  scipy: 'cálculo científico (paquete externo)',
+  sklearn: 'aprendizaje automático (scikit-learn)',
+  requests: 'peticiones HTTP (paquete externo)',
+  flask: 'aplicaciones web (paquete externo)',
+  django: 'aplicaciones web (paquete externo)',
+  fastapi: 'APIs web (paquete externo)',
+  pygame: 'juegos 2D (paquete externo)',
+  PIL: 'imágenes (Pillow)',
+  cv2: 'visión por computador (OpenCV)',
+  pytest: 'pruebas (paquete externo)',
+  tensorflow: 'redes neuronales (paquete externo)',
+  torch: 'redes neuronales (PyTorch)',
+  bs4: 'leer HTML (BeautifulSoup)',
+  sympy: 'matemática simbólica (paquete externo)',
+  openpyxl: 'archivos de Excel (paquete externo)',
+};
+
+const JAVA_CLASSES: Record<string, string> = {
+  'java.util.Scanner': 'leer datos del teclado',
+  'java.util.ArrayList': 'lista que crece',
+  'java.util.List': 'listas (interfaz)',
+  'java.util.LinkedList': 'listas enlazadas',
+  'java.util.HashMap': 'diccionario clave-valor',
+  'java.util.Map': 'diccionarios (interfaz)',
+  'java.util.TreeMap': 'diccionario ordenado',
+  'java.util.HashSet': 'conjunto sin repetidos',
+  'java.util.Set': 'conjuntos (interfaz)',
+  'java.util.Random': 'números aleatorios',
+  'java.util.Arrays': 'utilidades para arreglos (sort, toString)',
+  'java.util.Collections': 'utilidades para colecciones (sort, max)',
+  'java.util.Iterator': 'recorrer colecciones',
+  'java.util.Stack': 'pilas',
+  'java.util.Queue': 'colas (interfaz)',
+  'java.util.Optional': 'valores que pueden faltar',
+  'java.io.File': 'archivos y carpetas',
+  'java.io.BufferedReader': 'leer texto línea por línea',
+  'java.io.FileReader': 'leer archivos de texto',
+  'java.io.FileWriter': 'escribir archivos de texto',
+  'java.io.PrintWriter': 'escribir texto con formato',
+  'java.io.IOException': 'errores de entrada y salida',
+  'java.io.Serializable': 'guardar objetos (serialización)',
+  'java.lang.Math': 'funciones matemáticas',
+  'java.time.LocalDate': 'fechas',
+  'java.time.LocalDateTime': 'fechas con hora',
+  'java.text.DecimalFormat': 'formato de números',
+  'javax.swing.JOptionPane': 'cuadros de diálogo',
+  'javax.swing.JFrame': 'ventanas (Swing)',
+};
+
+const JAVA_PACKAGES: Record<string, string> = {
+  'java.util': 'colecciones, Scanner y utilidades',
+  'java.util.function': 'interfaces funcionales (lambdas)',
+  'java.util.stream': 'procesar colecciones con flujos',
+  'java.io': 'archivos y flujos de datos',
+  'java.nio.file': 'rutas y archivos',
+  'java.time': 'fechas y horas',
+  'java.text': 'formato de números y fechas',
+  'java.math': 'números grandes (BigInteger, BigDecimal)',
+  'java.net': 'conexiones de red',
+  'java.sql': 'bases de datos (JDBC)',
+  'java.awt': 'gráficos y ventanas (AWT)',
+  'java.awt.event': 'eventos de ventanas (AWT)',
+  'javax.swing': 'ventanas y botones (Swing)',
+  'java.lang': 'clases básicas de Java',
+  javafx: 'ventanas (JavaFX)',
+  'org.junit': 'pruebas (JUnit)',
+};
+
+const JAVA_STD_PREFIX = /^(?:java|javax|jdk|sun|org\.w3c|org\.xml|org\.ietf)\./;
+const JAVA_THIRD_PARTY_PREFIX = /^(?:javafx|org\.junit|junit|org\.springframework|org\.apache|com\.google|org\.mockito|org\.hamcrest|org\.slf4j|lombok|com\.fasterxml|kotlin|org\.jetbrains|io\.reactivex|org\.json)(?:\.|$)/;
+
+const NODE_BUILTINS: Record<string, string> = {
+  fs: 'archivos', 'fs/promises': 'archivos (con promesas)', path: 'rutas de archivos', http: 'servidor y peticiones HTTP',
+  https: 'peticiones HTTPS', os: 'datos del sistema operativo', events: 'eventos (EventEmitter)', util: 'utilidades de Node.js',
+  crypto: 'cifrado y hashes', readline: 'leer líneas de la consola', 'readline/promises': 'leer líneas de la consola',
+  child_process: 'ejecutar otros programas', url: 'direcciones web', assert: 'comprobaciones', stream: 'flujos de datos',
+  buffer: 'datos binarios', process: 'el proceso actual', net: 'conexiones de red', zlib: 'compresión', timers: 'temporizadores',
+  worker_threads: 'hilos', test: 'pruebas (node:test)', querystring: 'parámetros de una dirección web', dns: 'nombres de dominio',
+  cluster: 'varios procesos', vm: 'ejecutar código aparte', perf_hooks: 'medir el rendimiento', string_decoder: 'decodificar texto',
+  module: 'módulos de Node.js', tty: 'la terminal', dgram: 'mensajes UDP', async_hooks: 'seguimiento de tareas asíncronas',
+  console: 'la consola',
+};
+
+const NPM_KNOWN: Record<string, string> = {
+  react: 'interfaces con componentes (paquete de npm)',
+  'react-dom': 'React en el navegador (paquete de npm)',
+  vue: 'interfaces con componentes (paquete de npm)',
+  express: 'servidor web (paquete de npm)',
+  axios: 'peticiones HTTP (paquete de npm)',
+  lodash: 'utilidades para datos (paquete de npm)',
+  jest: 'pruebas (paquete de npm)',
+  vitest: 'pruebas (paquete de npm)',
+  mocha: 'pruebas (paquete de npm)',
+  chai: 'comprobaciones para pruebas (paquete de npm)',
+  dotenv: 'variables de entorno desde .env (paquete de npm)',
+  mongoose: 'base de datos MongoDB (paquete de npm)',
+  vscode: 'API de extensiones de VS Code',
+  'prompt-sync': 'leer datos de la consola (paquete de npm)',
+  chalk: 'colores en la consola (paquete de npm)',
+  jquery: 'manipular la página (paquete de npm)',
+  typescript: 'compilador de TypeScript (paquete de npm)',
+};
+
+const RUBY_STD: Record<string, string> = {
+  json: 'leer y escribir JSON', date: 'fechas', time: 'horas y fechas', set: 'conjuntos', csv: 'archivos CSV',
+  securerandom: 'valores aleatorios seguros', 'net/http': 'peticiones HTTP', fileutils: 'copiar y mover archivos',
+  'minitest/autorun': 'pruebas (Minitest)', minitest: 'pruebas (Minitest)', rspec: 'pruebas (RSpec)', yaml: 'leer y escribir YAML',
+  digest: 'hashes', benchmark: 'medir tiempos', pp: 'imprimir objetos legibles', 'open-uri': 'abrir direcciones web',
+};
+
+const CS_NAMESPACES: Record<string, string> = {
+  System: 'consola, Math y tipos básicos',
+  'System.Collections.Generic': 'listas y diccionarios (List, Dictionary)',
+  'System.Collections': 'colecciones',
+  'System.Linq': 'consultas sobre colecciones (LINQ)',
+  'System.IO': 'archivos y carpetas',
+  'System.Text': 'StringBuilder y codificación de texto',
+  'System.Text.RegularExpressions': 'expresiones regulares',
+  'System.Threading': 'hilos',
+  'System.Threading.Tasks': 'tareas asíncronas (Task)',
+  'System.Net.Http': 'peticiones HTTP',
+  'System.Windows.Forms': 'ventanas (Windows Forms)',
+  'System.Drawing': 'gráficos y colores',
+  'System.Diagnostics': 'depuración y procesos',
+  'System.Globalization': 'formato regional',
+  'System.Data': 'datos y bases de datos',
+};
+
+// ---------------------------------------------------------------------------------------------
+// Lenguaje
+
+const C_EXTENSIONS = /\.(?:c|cc|cpp|cxx|c\+\+|h|hh|hpp|hxx|h\+\+|inl|ipp|tpp|txx|ino)$/i;
+
+/** Familia del archivo por el lenguaje de VS Code o, si no se sabe, por la extension. */
+export function dependencyFamily(language: string, filePath = ''): DependencyFamily {
+  const clean = String(language || '').toLowerCase();
+  const path = String(filePath || '').toLowerCase();
+  if (/^(?:c|cpp|cuda-cpp|objective-c|objective-cpp|arduino)$/.test(clean) || (!clean && C_EXTENSIONS.test(path))) {
+    return 'c';
+  }
+  if (clean === 'python' || clean === 'py' || /\.pyw?$/.test(path)) {
+    return 'python';
+  }
+  if (clean === 'java' || /\.java$/.test(path)) {
+    return 'java';
+  }
+  if (/^(?:javascript|typescript|javascriptreact|typescriptreact|js|ts|jsx|tsx|vue|svelte)$/.test(clean) || /\.(?:[cm]?[jt]sx?|vue|svelte)$/.test(path)) {
+    return 'js';
+  }
+  if (clean === 'ruby' || clean === 'rb' || /\.rb$/.test(path)) {
+    return 'ruby';
+  }
+  if (clean === 'csharp' || clean === 'cs' || /\.cs$/.test(path)) {
+    return 'csharp';
+  }
+  if (C_EXTENSIONS.test(path)) {
+    return 'c';
+  }
+  return 'none';
+}
+
+// ---------------------------------------------------------------------------------------------
+// Texto sin comentarios (y, si se pide, sin el contenido de las cadenas)
+
+/**
+ * El texto con los comentarios en blanco (mismo largo, mismos saltos de linea: los numeros de
+ * linea no cambian). Con `maskStrings`, tambien el contenido de las cadenas. Las cadenas de
+ * triple comilla de Python se borran siempre (un docstring no declara imports).
+ */
+export function maskSource(text: string, family: DependencyFamily, maskStrings: boolean) {
+  const source = String(text || '');
+  if (family === 'none') {
+    return source;
+  }
+  const out: string[] = [];
+  const blank = (ch: string) => (ch === '\n' ? '\n' : ' ');
+  const n = source.length;
+  const hashComments = family === 'python' || family === 'ruby';
+  let i = 0;
+  let lineStart = true;
+  while (i < n) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (family === 'ruby' && lineStart && source.startsWith('=begin', i)) {
+      const end = source.indexOf('\n=end', i);
+      const stop = end < 0 ? n : end + 5;
+      for (; i < stop; i += 1) {
+        out.push(blank(source[i]));
+      }
+      continue;
+    }
+    if (hashComments ? ch === '#' : ch === '/' && next === '/') {
+      while (i < n && source[i] !== '\n') {
+        out.push(' ');
+        i += 1;
+      }
+      continue;
+    }
+    if (!hashComments && ch === '/' && next === '*') {
+      out.push(' ', ' ');
+      i += 2;
+      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) {
+        out.push(blank(source[i]));
+        i += 1;
+      }
+      if (i < n) {
+        out.push(' ', ' ');
+        i += 2;
+      }
+      continue;
+    }
+    if (family === 'python' && (source.startsWith('"""', i) || source.startsWith("'''", i))) {
+      const quote = source.slice(i, i + 3);
+      const end = source.indexOf(quote, i + 3);
+      const stop = end < 0 ? n : end + 3;
+      for (; i < stop; i += 1) {
+        out.push(blank(source[i]));
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || (ch === '`' && family === 'js')) {
+      out.push(ch);
+      i += 1;
+      while (i < n && source[i] !== ch) {
+        if (source[i] === '\n' && ch !== '`') {
+          break; // cadena sin cerrar: termina en el salto de linea
+        }
+        if (source[i] === '\\' && i + 1 < n && source[i + 1] !== '\n') {
+          out.push(maskStrings ? ' ' : source[i], maskStrings ? ' ' : source[i + 1]);
+          i += 2;
+          continue;
+        }
+        out.push(maskStrings ? blank(source[i]) : source[i]);
+        i += 1;
+      }
+      if (i < n && source[i] === ch) {
+        out.push(ch);
+        i += 1;
+      }
+      lineStart = false;
+      continue;
+    }
+    out.push(ch);
+    lineStart = ch === '\n';
+    i += 1;
+  }
+  return out.join('');
+}
+
+function lineStartsOf(text: string) {
+  const starts = [0];
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === '\n') {
+      starts.push(index + 1);
+    }
+  }
+  return starts;
+}
+
+/** Linea (1-based) de una posicion del texto. */
+function lineOfIndex(starts: number[], index: number) {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if (starts[mid] <= index) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return low + 1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lectura de los imports
+
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+function parseC(lines: string[]): ParsedImport[] {
+  const out: ParsedImport[] = [];
+  lines.forEach((line, index) => {
+    const match = /^\s*#\s*include\s*(?:"([^"\n]+)"|<([^>\n]+)>)/.exec(line);
+    if (match) {
+      const quoted = match[1] !== undefined;
+      out.push({ specifier: (quoted ? match[1] : match[2]).trim(), line: index + 1, kind: quoted ? 'quoted' : 'angle', names: [] });
+    }
+  });
+  return out;
+}
+
+function parsePython(lines: string[]): ParsedImport[] {
+  const out: ParsedImport[] = [];
+  const joinContinued = (start: number, first: string, untilParen: boolean) => {
+    let text = first;
+    let index = start;
+    while (index + 1 < lines.length && index - start < 50) {
+      if (untilParen ? !text.includes(')') : /\\\s*$/.test(text)) {
+        text = `${text.replace(/\\\s*$/, ' ')} ${lines[index + 1]}`;
+        index += 1;
+      } else {
+        break;
+      }
+    }
+    return text;
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    for (const statement of lines[index].split(';')) {
+      const plain = /^\s*import\s+(.+)$/.exec(statement);
+      if (plain) {
+        const rest = joinContinued(index, plain[1], false);
+        for (const part of rest.split(',')) {
+          const name = /^\s*([A-Za-z_][\w.]*)(?:\s+as\s+[A-Za-z_]\w*)?\s*$/.exec(part);
+          if (name) {
+            out.push({ specifier: name[1].replace(/\.+$/, ''), line: index + 1, kind: 'module', names: [] });
+          }
+        }
+        continue;
+      }
+      const from = /^\s*from\s+(\.+[\w.]*|[A-Za-z_][\w.]*)\s+import\s+(.*)$/.exec(statement);
+      if (from) {
+        const rest = joinContinued(index, from[2], from[2].trim().startsWith('('));
+        const names = rest
+          .replace(/[()\\]/g, ' ')
+          .split(',')
+          .map((part) => part.trim().split(/\s+as\s+/)[0].trim())
+          .filter((name) => name === '*' || IDENTIFIER.test(name));
+        out.push({ specifier: from[1], line: index + 1, kind: from[1].startsWith('.') ? 'relative' : 'module', names });
+      }
+    }
+  }
+  return out;
+}
+
+function parseJava(lines: string[]): ParsedImport[] {
+  const out: ParsedImport[] = [];
+  lines.forEach((line, index) => {
+    const match = /^\s*import\s+(static\s+)?([A-Za-z_][\w.]*?)(\.\*)?\s*;/.exec(line);
+    if (!match) {
+      return;
+    }
+    let specifier = match[2];
+    const wildcard = !!match[3];
+    const names: string[] = [];
+    if (match[1]) {
+      // import static a.b.Clase.metodo; -> la clase a.b.Clase (con .* tambien es la clase).
+      if (!wildcard && specifier.includes('.')) {
+        names.push(specifier.slice(specifier.lastIndexOf('.') + 1));
+        specifier = specifier.slice(0, specifier.lastIndexOf('.'));
+      }
+      out.push({ specifier, line: index + 1, kind: 'module', names });
+      return;
+    }
+    out.push({ specifier, line: index + 1, kind: wildcard ? 'wildcard' : 'module', names });
+  });
+  return out;
+}
+
+function parseCSharp(lines: string[]): ParsedImport[] {
+  const out: ParsedImport[] = [];
+  lines.forEach((line, index) => {
+    const match = /^\s*(?:global\s+)?using\s+(?:static\s+)?(?:[A-Za-z_]\w*\s*=\s*)?([A-Za-z_][\w.]*)\s*;/.exec(line);
+    if (match) {
+      out.push({ specifier: match[1], line: index + 1, kind: 'module', names: [] });
+    }
+  });
+  return out;
+}
+
+function parseRuby(lines: string[]): ParsedImport[] {
+  const out: ParsedImport[] = [];
+  lines.forEach((line, index) => {
+    const match = /^\s*(require_relative|require|load)\s*\(?\s*(['"])([^'"\n]+)\2/.exec(line);
+    if (match) {
+      out.push({ specifier: match[3], line: index + 1, kind: match[1] === 'require' ? 'module' : 'relative', names: [] });
+    }
+  });
+  return out;
+}
+
+const JS_CLAUSE = '(?:type\\s+)?(?:[\\w$]+(?:\\s*,\\s*)?)?(?:\\*(?:\\s*as\\s+[\\w$]+)?|\\{[^}]*\\})?';
+const JS_IMPORT_FROM = new RegExp(`(?:^|[;\\n}])[ \\t]*(?:import|export)\\s+(${JS_CLAUSE})\\s*from\\s*(['"])([^'"\\n]+)\\2`, 'g');
+const JS_IMPORT_BARE = /(?:^|[;\n}])[ \t]*import\s*(['"])([^'"\n]+)\1/g;
+const JS_REQUIRE = /(?:(?:const|let|var)\s+(\{[^}]*\}|[\w$]+)\s*=\s*)?(?<![\w$.])require\s*\(\s*(['"])([^'"\n]+)\2\s*\)/g;
+const JS_DYNAMIC = /(?<![\w$.])import\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g;
+
+function jsClauseNames(clause: string) {
+  const text = clause.trim().replace(/^type\s+/, '');
+  const names: string[] = [];
+  const first = /^([\w$]+)/.exec(text);
+  if (first) {
+    names.push(first[1]); // import Figura from './figura'
+  }
+  const named = /\{([^}]*)\}/.exec(text);
+  if (named) {
+    for (const part of named[1].split(',')) {
+      const name = part.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim();
+      if (IDENTIFIER.test(name) && name !== 'default') {
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+function parseJs(clean: string): ParsedImport[] {
+  const starts = lineStartsOf(clean);
+  const found: Array<ParsedImport & { index: number }> = [];
+  const add = (specifier: string, index: number, names: string[]) => {
+    const kind: ImportKind = /^(?:\.{1,2}(?:\/|$)|\/)/.test(specifier) ? 'relative' : 'module';
+    found.push({ specifier, line: lineOfIndex(starts, index), kind, names, index });
+  };
+  for (const match of clean.matchAll(JS_IMPORT_FROM)) {
+    add(match[3], (match.index || 0) + match[0].lastIndexOf(match[3]), jsClauseNames(match[1]));
+  }
+  for (const match of clean.matchAll(JS_IMPORT_BARE)) {
+    add(match[2], (match.index || 0) + match[0].lastIndexOf(match[2]), []);
+  }
+  for (const match of clean.matchAll(JS_REQUIRE)) {
+    add(match[3], (match.index || 0) + match[0].lastIndexOf(match[3]), match[1] ? jsClauseNames(match[1]) : []);
+  }
+  for (const match of clean.matchAll(JS_DYNAMIC)) {
+    add(match[2], (match.index || 0) + match[0].lastIndexOf(match[2]), []);
+  }
+  return found.sort((left, right) => left.index - right.index).map(({ index: _index, ...rest }) => rest);
+}
+
+/** Los imports del archivo, en orden, con su linea. */
+export function parseImports(text: string, family: DependencyFamily): ParsedImport[] {
+  if (family === 'none') {
+    return [];
+  }
+  const clean = maskSource(String(text || '').slice(0, MAX_PARSE_CHARS), family, false);
+  if (family === 'js') {
+    return parseJs(clean);
+  }
+  const lines = clean.split('\n');
+  switch (family) {
+    case 'c':
+      return parseC(lines);
+    case 'python':
+      return parsePython(lines);
+    case 'java':
+      return parseJava(lines);
+    case 'csharp':
+      return parseCSharp(lines);
+    case 'ruby':
+      return parseRuby(lines);
+    default:
+      return [];
+  }
+}
+
+/** Lineas que declaran imports, paquete o espacio de nombres: nombrar algo ahi no es usarlo. */
+const DECLARATION_LINES: Partial<Record<DependencyFamily, RegExp>> = {
+  java: /^[ \t]*(?:import|package)\b[^\n]*/gm,
+  csharp: /^[ \t]*(?:(?:global[ \t]+)?using\b[^;\n(]*;|namespace\b[^\n{;]*)/gm,
+  python: /^[ \t]*(?:import|from)\b[^\n]*/gm,
+  ruby: /^[ \t]*(?:require|require_relative|load)\b[^\n]*/gm,
+  c: /^[ \t]*#[ \t]*include\b[^\n]*/gm,
+};
+
+/** El codigo sin comentarios, sin el contenido de las cadenas y sin las lineas de import. */
+export function codeOnly(text: string, family: DependencyFamily) {
+  const masked = maskSource(String(text || '').slice(0, MAX_PARSE_CHARS), family, true);
+  const declarations = DECLARATION_LINES[family];
+  return declarations ? masked.replace(declarations, (line) => ' '.repeat(line.length)) : masked;
+}
+
+/** Identificadores del codigo (sin comentarios ni cadenas), para ver que clases y funciones usa. */
+export function collectIdentifiers(text: string, family: DependencyFamily) {
+  return new Set(codeOnly(text, family).match(/[A-Za-z_$][\w$]*/g) || []);
+}
+
+/** Nombres con mayuscula (Java y C#): las clases que usa un archivo sin importarlas. */
+export function collectTypeReferences(text: string, family: DependencyFamily) {
+  if (family !== 'java' && family !== 'csharp') {
+    return [];
+  }
+  const code = codeOnly(text, family);
+  const names = new Set<string>();
+  for (const match of code.matchAll(/\b[A-Z][A-Za-z0-9_]*\b/g)) {
+    names.add(match[0]);
+    if (names.size >= MAX_TYPE_REFS) {
+      break;
+    }
+  }
+  return [...names];
+}
+
+/** C#: los espacios de nombres que declara el archivo (`namespace X {` y `namespace X;`). */
+export function collectNamespaces(text: string, family: DependencyFamily) {
+  if (family !== 'csharp') {
+    return [];
+  }
+  const code = maskSource(String(text || '').slice(0, MAX_PARSE_CHARS), family, true);
+  return [...new Set([...code.matchAll(/^[ \t]*namespace[ \t]+([A-Za-z_][\w.]*)/gm)].map((match) => match[1]))].slice(0, 20);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rutas
+
+function normalizePath(path: string) {
+  return String(path || '').replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/^\/+/, '');
+}
+
+function dirnameOf(path: string) {
+  const clean = normalizePath(path);
+  const index = clean.lastIndexOf('/');
+  return index >= 0 ? clean.slice(0, index) : '';
+}
+
+function basenameOf(path: string) {
+  const clean = normalizePath(path);
+  return clean.slice(clean.lastIndexOf('/') + 1);
+}
+
+function stemOf(path: string) {
+  return basenameOf(path).replace(/\.[^.]+$/, '');
+}
+
+/** dir + rel con "." y ".."; null si sale de la carpeta abierta. */
+function joinPath(dir: string, rel: string): string | null {
+  const parts = normalizePath(dir).split('/').filter(Boolean);
+  for (const segment of String(rel || '').replace(/\\/g, '/').split('/')) {
+    if (!segment || segment === '.') {
+      continue;
+    }
+    if (segment === '..') {
+      if (!parts.length) {
+        return null;
+      }
+      parts.pop();
+      continue;
+    }
+    parts.push(segment);
+  }
+  return parts.join('/');
+}
+
+function sharedPrefix(left: string, right: string) {
+  const a = left.split('/').filter(Boolean);
+  const b = right.split('/').filter(Boolean);
+  let count = 0;
+  while (count < a.length && count < b.length && a[count] === b[count]) {
+    count += 1;
+  }
+  return count;
+}
+
+/** Distancia de edicion (Levenshtein) con tope: mas alla de `max` devuelve max + 1. */
+function editDistance(left: string, right: string, max: number) {
+  if (Math.abs(left.length - right.length) > max) {
+    return max + 1;
+  }
+  let previous = Array.from({ length: right.length + 1 }, (_value, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i];
+    let best = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+      best = Math.min(best, current[j]);
+    }
+    if (best > max) {
+      return max + 1;
+    }
+    previous = current;
+  }
+  return previous[right.length];
+}
+
+type Found = { path: string; caseMismatch: boolean };
+
+/** Los archivos del proyecto (indice mas lo que encontro la busqueda en el disco). */
+class ProjectFiles {
+  private readonly exact = new Set<string>();
+  private readonly lower = new Map<string, string>();
+  private readonly byBase = new Map<string, string[]>();
+  readonly entries = new Map<string, DependencyIndexFile>();
+  readonly paths: string[] = [];
+  readonly hasJavaBuild: boolean;
+  /** C#: espacio de nombres -> archivos que lo declaran. */
+  readonly namespaces = new Map<string, string[]>();
+
+  constructor(files: DependencyIndexFile[], extraPaths: string[]) {
+    const add = (raw: string) => {
+      const path = normalizePath(raw);
+      if (!path || this.exact.has(path)) {
+        return;
+      }
+      this.exact.add(path);
+      this.paths.push(path);
+      if (!this.lower.has(path.toLowerCase())) {
+        this.lower.set(path.toLowerCase(), path);
+      }
+      const base = basenameOf(path).toLowerCase();
+      const list = this.byBase.get(base) || [];
+      list.push(path);
+      this.byBase.set(base, list);
+    };
+    for (const file of files) {
+      add(file.path);
+      const path = normalizePath(file.path);
+      if (!this.entries.has(path)) {
+        this.entries.set(path, file);
+      }
+    }
+    extraPaths.forEach(add);
+    this.hasJavaBuild = this.paths.some((path) => /(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?)$/i.test(path));
+    for (const [path, file] of this.entries) {
+      // Del indice (0.0.36) o, si no viene, de la estructura ("3: namespace Taller.Modelo {").
+      const declared = file.namespaces
+        || [...String(file.outline || '').matchAll(/^\d+:\s*namespace\s+([A-Za-z_][\w.]*)/gm)].map((match) => match[1]);
+      for (const name of declared) {
+        const list = this.namespaces.get(name) || [];
+        list.push(path);
+        this.namespaces.set(name, list);
+      }
+    }
+  }
+
+  find(path: string | null): Found | null {
+    if (!path) {
+      return null;
+    }
+    if (this.exact.has(path)) {
+      return { path, caseMismatch: false };
+    }
+    const loose = this.lower.get(path.toLowerCase());
+    return loose ? { path: loose, caseMismatch: true } : null;
+  }
+
+  /** Un archivo cuya ruta termina en `suffix` ("modelo/figura.h"), el mas cercano a `nearDir`. */
+  findSuffix(suffix: string, nearDir: string): Found | null {
+    const clean = normalizePath(suffix);
+    if (!clean) {
+      return null;
+    }
+    const candidates = this.byBase.get(basenameOf(clean).toLowerCase()) || [];
+    const pick = (list: string[]) => [...list].sort((left, right) =>
+      sharedPrefix(dirnameOf(right), nearDir) - sharedPrefix(dirnameOf(left), nearDir)
+      || left.split('/').length - right.split('/').length
+      || left.localeCompare(right))[0];
+    const exact = candidates.filter((path) => path === clean || path.endsWith(`/${clean}`));
+    if (exact.length) {
+      return { path: pick(exact), caseMismatch: false };
+    }
+    const lowerSuffix = clean.toLowerCase();
+    const loose = candidates.filter((path) => path.toLowerCase() === lowerSuffix || path.toLowerCase().endsWith(`/${lowerSuffix}`));
+    return loose.length ? { path: pick(loose), caseMismatch: true } : null;
+  }
+
+  /** Archivos de una carpeta (sin subcarpetas) con una extension. */
+  filesInDir(dir: string, extension: string) {
+    const clean = normalizePath(dir);
+    return this.paths.filter((path) => dirnameOf(path) === clean && path.toLowerCase().endsWith(extension));
+  }
+
+  /** Carpetas que terminan en `dirSuffix` ("modelo" o "com/uni/modelo") con archivos .java. */
+  javaFilesUnder(dirSuffix: string) {
+    const clean = normalizePath(dirSuffix);
+    return this.paths.filter((path) => {
+      const dir = dirnameOf(path);
+      return path.endsWith('.java') && (dir === clean || dir.endsWith(`/${clean}`));
+    });
+  }
+
+  /** «¿Quisiste decir ...?»: el archivo de nombre mas parecido (misma extension o mismo nombre). */
+  suggest(name: string, extensions: RegExp): string {
+    const target = basenameOf(name).toLowerCase();
+    if (!target) {
+      return '';
+    }
+    const targetStem = target.replace(/\.[^.]+$/, '');
+    let best = '';
+    let bestScore = Number.MAX_SAFE_INTEGER;
+    const max = target.length >= 6 ? 2 : 1;
+    for (const path of this.paths) {
+      if (!extensions.test(path)) {
+        continue;
+      }
+      const base = basenameOf(path).toLowerCase();
+      const stem = base.replace(/\.[^.]+$/, '');
+      const score = stem === targetStem && base !== target ? 0.5 : editDistance(base, target, max);
+      if (score <= max && score < bestScore) {
+        best = path;
+        bestScore = score;
+      }
+    }
+    return best ? `¿Quisiste decir «${best}»?` : '';
+  }
+}
+
+const CASE_WARNING = (path: string) => `Se llama «${basenameOf(path)}»: en Linux las mayúsculas cuentan.`;
+
+type Resolved = {
+  label: string;
+  type: 'local' | 'library' | 'missing';
+  path?: string;
+  description?: string;
+  warning?: string;
+  hint?: string;
+  /** Nombre de archivo para buscar en el disco si el indice no lo tiene. */
+  probe?: string;
+  names?: string[];
+};
+
+type ResolveOptions = {
+  /** ¿El archivo usa este nombre? (para expandir import a.b.*;). */
+  uses: (name: string) => boolean;
+  /** Calcular «¿Quisiste decir...?» (no hace falta para «La usan»). */
+  hints: boolean;
+};
+
+const C_FAMILY_FILES = /\.(?:h|hh|hpp|hxx|inl|ipp|tpp|txx|c|cc|cpp|cxx)$/i;
+
+function local(label: string, found: Found, warning?: string): Resolved {
+  return { label, type: 'local', path: found.path, warning: found.caseMismatch ? CASE_WARNING(found.path) : warning };
+}
+
+function resolveC(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
+  const spec = imp.specifier.replace(/\\/g, '/').trim();
+  const lower = spec.toLowerCase();
+  const known = C_HEADERS[lower];
+  const warning = C_HEADER_WARNINGS[lower];
+  const fromDir = dirnameOf(fromPath);
+  const explicitRelative = /^\.{1,2}\//.test(spec);
+  const relative = joinPath(fromDir, spec);
+  // <Vector> o <String> pasan en Windows y macOS, no en Linux.
+  const caseWarning = known && spec !== lower && !warning ? `En Linux se escribe en minúsculas: #include <${lower}>.` : undefined;
+  if (imp.kind === 'angle') {
+    if (known) {
+      return [{ label: spec, type: 'library', description: known, warning: warning || caseWarning }];
+    }
+    const found = project.find(relative) || project.findSuffix(spec, fromDir);
+    if (found) {
+      return [local(spec, found, `Es tuyo: inclúyelo con comillas, #include "${spec}".`)];
+    }
+    return [{ label: spec, type: 'library', description: 'biblioteca del sistema o externa' }];
+  }
+  if (relative === null) {
+    return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
+  }
+  const found = project.find(relative) || (explicitRelative ? null : project.findSuffix(spec, fromDir));
+  if (found) {
+    const source = /\.(?:c|cc|cpp|cxx)$/i.exec(found.path);
+    return [local(spec, found, source
+      ? `Incluir un ${source[0]} suele dar «multiple definition»: incluye su .h.`
+      : undefined)];
+  }
+  if (known) {
+    return [{ label: spec, type: 'library', description: known, warning: warning || caseWarning }];
+  }
+  return [{
+    label: spec,
+    type: 'missing',
+    description: 'Revisa el nombre y la carpeta.',
+    hint: options.hints ? project.suggest(spec, C_FAMILY_FILES) : '',
+    probe: basenameOf(spec),
+  }];
+}
+
+function pythonLibrary(spec: string): Resolved | null {
+  const top = spec.split('.')[0];
+  if (PY_STDLIB.has(top)) {
+    return { label: spec, type: 'library', description: PY_DESCRIPTIONS[spec] || PY_DESCRIPTIONS[top] || 'biblioteca estándar de Python', warning: PY_WARNINGS[top] };
+  }
+  const third = PY_THIRD_PARTY[top] || PY_THIRD_PARTY[top.toLowerCase()];
+  return third ? { label: spec, type: 'library', description: third } : null;
+}
+
+function resolvePython(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
+  const spec = imp.specifier;
+  const fromDir = dirnameOf(fromPath);
+  // from x import a, b: a y b son lo que usa de x (salvo que sean modulos: entonces son archivos).
+  const names = imp.names.filter((name) => name !== '*');
+  const findModule = (base: string | null) => (base === null
+    ? null
+    : project.find(`${base}.py`) || project.find(joinPath(base, '__init__.py')));
+  if (imp.kind === 'relative') {
+    const dots = (/^\.+/.exec(spec) || ['.'])[0].length;
+    const rest = spec.slice(dots);
+    const base = joinPath(fromDir, Array.from({ length: dots - 1 }, () => '..').join('/'));
+    if (base === null) {
+      return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
+    }
+    const modulePath = rest ? joinPath(base, rest.replace(/\./g, '/')) : base;
+    if (rest) {
+      const found = findModule(modulePath);
+      if (found) {
+        return [{ ...local(spec, found), names }];
+      }
+    }
+    // from . import a, b  /  from .paquete import modulo: cada nombre puede ser un modulo.
+    const modules = names
+      .map((name) => ({ name, found: findModule(joinPath(modulePath || '', name)) }))
+      .filter((item): item is { name: string; found: Found } => !!item.found);
+    if (modules.length) {
+      return modules.map((item) => local(`${spec}${rest ? '.' : ''}${item.name}`, item.found));
+    }
+    const init = !rest ? project.find(joinPath(base, '__init__.py')) : null;
+    if (init) {
+      return [{ ...local(spec, init), names }];
+    }
+    const missingName = rest.split('.').pop() || names[0] || '';
+    return [{
+      label: spec,
+      type: 'missing',
+      description: 'Revisa el nombre y la carpeta.',
+      hint: options.hints && missingName ? project.suggest(`${missingName}.py`, /\.py$/i) : '',
+      probe: missingName ? `${missingName}.py` : undefined,
+    }];
+  }
+  const asPath = spec.replace(/\./g, '/');
+  const found = findModule(joinPath(fromDir, asPath))
+    || findModule(asPath)
+    || project.findSuffix(`${asPath}.py`, fromDir)
+    || project.findSuffix(`${asPath}/__init__.py`, fromDir);
+  if (found) {
+    // random.py, turtle.py o math.py del estudiante tapan el modulo de Python del mismo nombre.
+    const top = spec.split('.')[0];
+    const ownName = stemOf(found.path) === '__init__' ? basenameOf(dirnameOf(found.path)) : stemOf(found.path);
+    const shadowed = ownName === top && pythonLibrary(top)
+      ? `Tapa el módulo «${top}» de Python: si querías ese, cámbiale el nombre.`
+      : undefined;
+    return [{ ...local(spec, found, shadowed), names }];
+  }
+  // from paquete import modulo
+  const submodules = names
+    .map((name) => ({ name, found: findModule(joinPath(fromDir, `${asPath}/${name}`)) || project.findSuffix(`${asPath}/${name}.py`, fromDir) }))
+    .filter((item): item is { name: string; found: Found } => !!item.found);
+  if (submodules.length) {
+    return submodules.map((item) => local(`${spec}.${item.name}`, item.found));
+  }
+  const library = pythonLibrary(spec);
+  if (library) {
+    return [library];
+  }
+  const top = spec.split('.')[0];
+  if (options.hints) {
+    // Un nombre casi igual a un modulo tuyo o de Python es casi siempre un error de tipeo.
+    const own = project.suggest(`${top}.py`, /\.py$/i);
+    const max = top.length >= 6 ? 2 : 1;
+    const std = own ? '' : [...PY_STDLIB].find((name) => name !== top && editDistance(name.toLowerCase(), top.toLowerCase(), max) <= max) || '';
+    if (own || std) {
+      return [{
+        label: spec,
+        type: 'missing',
+        description: 'No está en tu proyecto ni es un módulo de Python.',
+        hint: own || `¿Quisiste decir «${std}»?`,
+        probe: `${top}.py`,
+      }];
+    }
+  }
+  return [{ label: spec, type: 'library', description: 'paquete externo: si Python no lo encuentra, instálalo con pip', probe: `${top}.py` }];
+}
+
+function javaLibraryDescription(spec: string) {
+  if (JAVA_CLASSES[spec]) {
+    return JAVA_CLASSES[spec];
+  }
+  const parts = spec.split('.');
+  for (let length = parts.length; length > 0; length -= 1) {
+    const prefix = parts.slice(0, length).join('.');
+    if (JAVA_PACKAGES[prefix]) {
+      return JAVA_PACKAGES[prefix];
+    }
+  }
+  return JAVA_STD_PREFIX.test(spec) ? 'biblioteca estándar de Java' : 'biblioteca externa';
+}
+
+function resolveJava(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
+  const spec = imp.specifier;
+  const fromDir = dirnameOf(fromPath);
+  if (imp.kind === 'wildcard') {
+    const classes = project.javaFilesUnder(spec.replace(/\./g, '/'));
+    if (classes.length) {
+      const used = classes.filter((path) => options.uses(stemOf(path)));
+      return used.length
+        ? used.map((path) => local(`${spec}.${stemOf(path)}`, { path, caseMismatch: false }))
+        : [{ label: `${spec}.*`, type: 'local', path: classes[0], description: `${classes.length} clase(s) de tu proyecto` }];
+    }
+    if (JAVA_STD_PREFIX.test(`${spec}.`) || JAVA_THIRD_PARTY_PREFIX.test(spec) || project.hasJavaBuild) {
+      return [{ label: `${spec}.*`, type: 'library', description: javaLibraryDescription(spec) }];
+    }
+    return [{ label: `${spec}.*`, type: 'missing', description: 'No hay una carpeta con ese paquete en tu proyecto.' }];
+  }
+  const found = project.findSuffix(`${spec.replace(/\./g, '/')}.java`, fromDir);
+  if (found) {
+    return [local(spec, found)];
+  }
+  if (JAVA_STD_PREFIX.test(spec) || JAVA_THIRD_PARTY_PREFIX.test(spec)) {
+    return [{ label: spec, type: 'library', description: javaLibraryDescription(spec) }];
+  }
+  const className = spec.slice(spec.lastIndexOf('.') + 1);
+  const elsewhere = project.findSuffix(`${className}.java`, fromDir);
+  if (elsewhere) {
+    return [{
+      label: spec,
+      type: 'missing',
+      description: 'El paquete no coincide con la carpeta de la clase.',
+      hint: `Está en «${elsewhere.path}»: revisa su línea package o el import.`,
+    }];
+  }
+  if (project.hasJavaBuild) {
+    return [{ label: spec, type: 'library', description: 'dependencia del proyecto (Maven o Gradle)' }];
+  }
+  return [{
+    label: spec,
+    type: 'missing',
+    description: 'Revisa el nombre y el paquete.',
+    hint: options.hints ? project.suggest(`${className}.java`, /\.java$/i) : '',
+    probe: `${className}.java`,
+  }];
+}
+
+const JS_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts', '.json', '.vue', '.svelte', '.css', '.scss', '.sass', '.less'];
+const JS_FILES = /\.(?:[cm]?[jt]sx?|json|vue|svelte|css|scss|sass|less|html)$/i;
+
+function findJsFile(base: string, project: ProjectFiles): Found | null {
+  const direct = project.find(base);
+  if (direct && /\.[^/]+$/.test(base)) {
+    return direct;
+  }
+  // TypeScript con ESM escribe './modulo.js' aunque el archivo sea modulo.ts.
+  const swapped = /\.(?:[cm]?js|jsx)$/i.test(base)
+    ? ['.ts', '.tsx', '.mts', '.cts'].map((extension) => project.find(base.replace(/\.(?:[cm]?js|jsx)$/i, extension))).find(Boolean)
+    : null;
+  if (swapped) {
+    return swapped;
+  }
+  for (const extension of JS_EXTENSIONS) {
+    const found = project.find(`${base}${extension}`);
+    if (found) {
+      return found;
+    }
+  }
+  for (const extension of JS_EXTENSIONS.slice(0, 8)) {
+    const found = project.find(`${base}/index${extension}`);
+    if (found) {
+      return found;
+    }
+  }
+  return direct;
+}
+
+function resolveJs(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
+  const spec = imp.specifier;
+  const fromDir = dirnameOf(fromPath);
+  const names = imp.names;
+  const isRelative = /^(?:\.{1,2}(?:\/|$)|\/)/.test(spec);
+  if (isRelative || spec.startsWith('@/')) {
+    const base = spec.startsWith('@/')
+      ? joinPath('src', spec.slice(2))
+      : spec.startsWith('/') ? joinPath('', spec.slice(1)) : joinPath(fromDir, spec);
+    if (base === null) {
+      return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
+    }
+    const found = findJsFile(base, project);
+    if (found) {
+      return [{ ...local(spec, found), names }];
+    }
+    const name = basenameOf(base);
+    return [{
+      label: spec,
+      type: 'missing',
+      description: spec.startsWith('@/') ? 'El alias @/ suele apuntar a src/ y ahí no está.' : 'Revisa el nombre y la carpeta.',
+      hint: options.hints ? project.suggest(/\.[^.]+$/.test(name) ? name : `${name}.js`, JS_FILES) : '',
+      probe: name && !/[*?[\]{}]/.test(name) ? (/\.[^.]+$/.test(name) ? name : `${name}.*`) : undefined,
+    }];
+  }
+  const bare = spec.startsWith('node:') ? spec.slice(5) : spec;
+  const pkg = bare.startsWith('@') ? bare.split('/').slice(0, 2).join('/') : bare.split('/')[0];
+  if (spec.startsWith('node:') || NODE_BUILTINS[bare] || NODE_BUILTINS[pkg]) {
+    return [{ label: spec, type: 'library', description: `${NODE_BUILTINS[bare] || NODE_BUILTINS[pkg] || 'módulo'} (Node.js)` }];
+  }
+  return [{ label: spec, type: 'library', description: NPM_KNOWN[pkg] || 'paquete de npm' }];
+}
+
+function resolveRuby(imp: ParsedImport, fromPath: string, project: ProjectFiles, options: ResolveOptions): Resolved[] {
+  const spec = imp.specifier;
+  const fromDir = dirnameOf(fromPath);
+  const withExtension = /\.rb$/i.test(spec) ? spec : `${spec}.rb`;
+  if (imp.kind === 'relative') {
+    const base = joinPath(fromDir, withExtension);
+    if (base === null) {
+      return [{ label: spec, type: 'missing', description: 'La ruta sale de la carpeta abierta en VS Code.' }];
+    }
+    const found = project.find(base);
+    if (found) {
+      return [local(spec, found)];
+    }
+    return [{
+      label: spec,
+      type: 'missing',
+      description: 'Revisa el nombre y la carpeta.',
+      hint: options.hints ? project.suggest(withExtension, /\.rb$/i) : '',
+      probe: basenameOf(withExtension),
+    }];
+  }
+  const found = project.findSuffix(withExtension, fromDir);
+  if (found) {
+    return [local(spec, found)];
+  }
+  return [{ label: spec, type: 'library', description: RUBY_STD[spec] || 'gema de Ruby' }];
+}
+
+function resolveCSharp(imp: ParsedImport, fromPath: string, project: ProjectFiles): Resolved[] {
+  const spec = imp.specifier;
+  if (/^(?:System|Microsoft)(?:\.|$)/.test(spec)) {
+    return [{ label: spec, type: 'library', description: CS_NAMESPACES[spec] || 'biblioteca de .NET' }];
+  }
+  // Un espacio de nombres declarado en el proyecto.
+  const declaring = (project.namespaces.get(spec) || []).find((path) => path !== fromPath);
+  if (declaring) {
+    return [{ label: spec, type: 'local', path: declaring, description: 'espacio de nombres de tu proyecto' }];
+  }
+  return [{ label: spec, type: 'library', description: 'paquete NuGet o biblioteca externa' }];
+}
+
+function resolveImport(imp: ParsedImport, fromPath: string, family: DependencyFamily, project: ProjectFiles, options: ResolveOptions): Resolved[] {
+  switch (family) {
+    case 'c':
+      return resolveC(imp, fromPath, project, options);
+    case 'python':
+      return resolvePython(imp, fromPath, project, options);
+    case 'java':
+      return resolveJava(imp, fromPath, project, options);
+    case 'js':
+      return resolveJs(imp, fromPath, project, options);
+    case 'ruby':
+      return resolveRuby(imp, fromPath, project, options);
+    case 'csharp':
+      return resolveCSharp(imp, fromPath, project);
+    default:
+      return [];
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Que usa de cada archivo del proyecto
+
+const GENERIC_NAMES = new Set(['main', 'init', 'constructor', 'toString', 'equals', 'hashCode', 'function', 'if', 'for', 'while', 'switch', 'catch', 'return', 'sizeof', 'extends', 'implements']);
+
+/** Clases y funciones declaradas en la estructura de un archivo ("12: class Figura {"). */
+export function declaredNames(outline: string) {
+  const names = new Map<string, 'type' | 'function'>();
+  for (const raw of String(outline || '').split('\n')) {
+    const text = raw.replace(/^\s*\d+:\s?/, '').trim();
+    if (!text || /^(?:#|import\b|from\b|require|using\b|package\b|\(\d+ declaracion)/.test(text) || /\boperator\b/.test(text)) {
+      continue;
+    }
+    const type = /\b(?:class|struct|interface|enum(?:\s+class)?|union|record|module)\s+([A-Za-z_]\w*)/.exec(text);
+    if (type && !GENERIC_NAMES.has(type[1])) {
+      names.set(type[1], 'type');
+      continue;
+    }
+    const def = /^(?:async\s+)?def\s+([A-Za-z_]\w*)/.exec(text);
+    const call = def || /([A-Za-z_~][\w]*)\s*\(/.exec(text);
+    const name = call ? call[1] : '';
+    if (!name || name.startsWith('~') || name.startsWith('__') || GENERIC_NAMES.has(name) || names.has(name)) {
+      continue;
+    }
+    names.set(name, 'function');
+  }
+  return names;
+}
+
+function symbolsUsed(resolved: Resolved, entry: DependencyIndexFile | undefined, identifiers: Set<string>) {
+  const out: string[] = [];
+  for (const name of resolved.names || []) {
+    if (!out.includes(name)) {
+      out.push(name);
+    }
+  }
+  if (!out.length && entry?.outline) {
+    for (const [name, kind] of declaredNames(entry.outline)) {
+      if (identifiers.has(name)) {
+        out.push(kind === 'function' ? `${name}()` : name);
+      }
+    }
+  }
+  return out.slice(0, MAX_SYMBOLS);
+}
+
+/** Primera linea donde aparece `name` como palabra en el codigo (0 si no aparece). */
+function firstUseLine(code: string, starts: number[], name: string, skip = -1) {
+  const pattern = new RegExp(`\\b${name.replace(/[$]/g, '\\$')}\\b`, 'g');
+  for (const match of code.matchAll(pattern)) {
+    const line = lineOfIndex(starts, match.index || 0);
+    if (line !== skip) {
+      return line;
+    }
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Todo junto
+
+/**
+ * Dependencias del archivo activo: lo que usa del proyecto, las bibliotecas, lo que no se
+ * encontro y los archivos que lo usan (por sus imports, guardados en el indice).
+ */
+export function resolveFileDependencies(input: DependencyInput): FileDependencies {
+  const activePath = normalizePath(input.activePath);
+  const family = dependencyFamily(input.language, activePath);
+  // El activo cuenta aunque el indice no lo tenga (archivo recien creado, o un proyecto de mas de
+  // 90 archivos): si no, «La usan» no encontraba los #include que llegan a el.
+  const project = new ProjectFiles(input.files || [], [...(input.extraPaths || []), activePath]);
+  const result: FileDependencies = { family, local: [], libraries: [], missing: [], dependents: [], probes: [] };
+  const probes = new Set<string>();
+  const text = String(input.text || '');
+
+  if (family !== 'none') {
+    const identifiers = collectIdentifiers(text, family);
+    const options: ResolveOptions = { uses: (name) => identifiers.has(name), hints: true };
+    const seen = new Set<string>();
+    const imports = parseImports(text, family);
+    for (const imp of imports) {
+      for (const item of resolveImport(imp, activePath, family, project, options)) {
+        if (item.type === 'local' && item.path === activePath) {
+          // turtle.py con `import turtle` se importa a si mismo: el error clasico de nombrar el
+          // archivo como la biblioteca. Se muestra la biblioteca con el aviso.
+          const library = family === 'python' ? pythonLibrary(imp.specifier) : null;
+          if (library && !seen.has(`library:${library.label}`)) {
+            seen.add(`library:${library.label}`);
+            result.libraries.push({
+              label: library.label,
+              line: imp.line,
+              description: library.description || '',
+              warning: `«import ${imp.specifier.split('.')[0]}» importa este mismo archivo (${basenameOf(activePath)}), no la biblioteca: cámbiale el nombre.`,
+            });
+          }
+          continue; // se incluye a si mismo
+        }
+        const key = item.type === 'local' ? `local:${item.path}:${item.label}` : `${item.type}:${item.label}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        if (item.probe && item.type !== 'local') {
+          probes.add(item.probe);
+        }
+        const base: FileDependencyItem = { label: item.label, line: imp.line };
+        if (item.type === 'local') {
+          const symbols = symbolsUsed(item, item.path ? project.entries.get(item.path) : undefined, identifiers);
+          result.local.push({
+            ...base,
+            path: item.path,
+            ...(item.description ? { description: item.description } : {}),
+            ...(symbols.length ? { symbols } : {}),
+            ...(item.warning ? { warning: item.warning } : {}),
+          });
+        } else if (item.type === 'library') {
+          result.libraries.push({ ...base, description: item.description || '', ...(item.warning ? { warning: item.warning } : {}) });
+        } else {
+          result.missing.push({ ...base, description: item.description || '', ...(item.hint ? { hint: item.hint } : {}) });
+        }
+      }
+    }
+
+    // Java y C#: clases del mismo paquete (o del proyecto) que se usan sin import. Una clase
+    // importada de otro paquete con el mismo nombre no cuenta (el import manda).
+    if (family === 'java' || family === 'csharp') {
+      const code = codeOnly(text, family);
+      const starts = lineStartsOf(code);
+      const own = stemOf(activePath);
+      const already = new Set(result.local.map((item) => item.path));
+      const imported = new Set(imports.map((imp) => imp.specifier.slice(imp.specifier.lastIndexOf('.') + 1)));
+      const candidates = family === 'java'
+        ? project.filesInDir(dirnameOf(activePath), '.java')
+        : project.paths.filter((path) => path.toLowerCase().endsWith('.cs'));
+      for (const path of candidates) {
+        const name = stemOf(path);
+        if (path === activePath || name === own || already.has(path) || imported.has(name) || !/^[A-Z]/.test(name) || !identifiers.has(name)) {
+          continue;
+        }
+        result.local.push({ label: name, line: firstUseLine(code, starts, name), path, implicit: true });
+      }
+    }
+  }
+
+  // «La usan»: los archivos del proyecto cuyos imports llegan a este.
+  const activeClass = family === 'java' || family === 'csharp' ? stemOf(activePath) : '';
+  for (const file of input.files || []) {
+    const path = normalizePath(file.path);
+    if (path === activePath) {
+      continue;
+    }
+    const fileFamily = dependencyFamily(file.language || '', path);
+    if (fileFamily === 'none') {
+      continue;
+    }
+    const refs = new Set(file.typeRefs || []);
+    const options: ResolveOptions = { uses: (name) => refs.has(name), hints: false };
+    let line = -1;
+    for (const imp of file.imports || []) {
+      if (resolveImport(imp, path, fileFamily, project, options).some((item) => item.type === 'local' && item.path === activePath)) {
+        line = imp.line;
+        break;
+      }
+    }
+    const importsOtherWithSameName = (file.imports || []).some((imp) => imp.specifier.slice(imp.specifier.lastIndexOf('.') + 1) === activeClass);
+    if (line < 0 && activeClass && fileFamily === family && refs.has(activeClass) && !importsOtherWithSameName
+      && (family === 'csharp' || dirnameOf(path) === dirnameOf(activePath))) {
+      line = 0;
+    }
+    if (line >= 0) {
+      result.dependents.push({ label: basenameOf(path), line, path, ...(line === 0 ? { implicit: true } : {}) });
+    }
+  }
+
+  const byLine = (left: FileDependencyItem, right: FileDependencyItem) => (left.line || Number.MAX_SAFE_INTEGER) - (right.line || Number.MAX_SAFE_INTEGER);
+  result.local = result.local.sort(byLine).slice(0, MAX_ITEMS_PER_GROUP);
+  result.libraries = result.libraries.sort(byLine).slice(0, MAX_ITEMS_PER_GROUP);
+  result.missing = result.missing.sort(byLine).slice(0, MAX_ITEMS_PER_GROUP);
+  result.dependents = result.dependents
+    .sort((left, right) => (left.path || '').localeCompare(right.path || ''))
+    .slice(0, MAX_ITEMS_PER_GROUP);
+  result.probes = [...probes].slice(0, MAX_PROBES);
+  return result;
+}
+
+/**
+ * Una linea para el resumen del tutor: lo que usa del proyecto, las bibliotecas y quien lo usa.
+ * Lo no encontrado no va: el indice no tiene todos los archivos y el tutor podria decirle al
+ * estudiante que falta un archivo que si existe (la vista lo confirma buscando en el disco).
+ */
+export function formatDependenciesForPrompt(deps: FileDependencies | null, maxChars = 600) {
+  if (!deps) {
+    return '';
+  }
+  const parts: string[] = [];
+  if (deps.local.length) {
+    parts.push(`usa del proyecto ${deps.local.slice(0, 8).map((item) => `${item.path || item.label}${item.symbols?.length ? ` (${item.symbols.join(', ')})` : ''}`).join(', ')}`);
+  }
+  if (deps.libraries.length) {
+    parts.push(`bibliotecas ${deps.libraries.slice(0, 10).map((item) => item.label).join(', ')}`);
+  }
+  if (deps.dependents.length) {
+    parts.push(`lo usan ${deps.dependents.slice(0, 8).map((item) => item.path || item.label).join(', ')}`);
+  }
+  if (!parts.length) {
+    return '';
+  }
+  const text = `Dependencias del archivo: ${parts.join('; ')}.`;
+  return text.length > maxChars ? `${text.slice(0, maxChars - 2)}….` : text;
+}

@@ -120,6 +120,26 @@ export function containsSecret(text: string, relativePath: string) {
   return CONFIG_EXTENSIONS.has(extension) && CONFIG_ASSIGNMENT_PATTERN.test(text);
 }
 
+/** Nombres que suelen guardar una clave: su valor no viaja en la estructura del archivo. */
+const SECRET_NAME = /(?:pass(?:word|wd)?|secret|token|api_?key|apikey|clave|contrase|credential|private_?key)/i;
+
+/**
+ * La estructura de un archivo del indice (workspace-index.ts) que viaja al tutor en
+ * «Declaraciones de archivos relacionados» (0.0.36): sin las lineas que parecen traer una clave
+ * (los patrones de containsSecret) y sin el valor de las constantes con nombre de clave
+ * (`const std::string API_KEY = "...";` queda `= "…";`). En un encabezado la estructura lleva
+ * los atributos con su valor inicial, y el estudiante no abrio ese archivo para mandarlo.
+ */
+export function scrubOutline(outline: string, relativePath: string) {
+  return String(outline || '')
+    .split('\n')
+    .filter((line) => !containsSecret(line, relativePath))
+    .map((line) => (line.includes('=') && SECRET_NAME.test(line.slice(0, line.indexOf('=')))
+      ? line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, '$1…$1')
+      : line))
+    .join('\n');
+}
+
 /**
  * Salida de `git ls-files -z --cached --others --exclude-standard` (rutas separadas por NUL,
  * relativas a la carpeta): los archivos que git no ignora.

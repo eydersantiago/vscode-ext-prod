@@ -6,6 +6,7 @@ import {
   describeScanPermission,
   isSecretPath,
   parseGitLsFiles,
+  scrubOutline,
 } from '../scan-privacy';
 
 // A12.12 · ADACEEN-155, riesgo 4: el escaneo no envia lo que ignora .gitignore ni archivos con claves.
@@ -82,5 +83,28 @@ describe('scan-privacy: git y mensaje de permiso', () => {
     assert.match(text, /3 MB/);
     assert.match(text, /\.gitignore/);
     assert.match(text, /¿Lo permites\?$/);
+  });
+});
+
+describe('scan-privacy: estructura de los archivos relacionados (0.0.36)', () => {
+  it('quita las lineas con una clave y el valor de las constantes con nombre de clave', () => {
+    const outline = [
+      '1: class Config {',
+      '3:   const std::string API_KEY = "abc123secreto";',
+      '4:   const std::string TOKEN = "AKIAABCDEFGHIJKLMNOP";',
+      '5:   std::string clave_admin = "1234";',
+      '6:   int lados = 4;',
+      '7:   std::string nombre = "Figura";',
+      '9:   bool login(const std::string& password = "x");',
+    ].join('\n');
+    assert.equal(scrubOutline(outline, 'src/config.h'), [
+      '1: class Config {',
+      '3:   const std::string API_KEY = "…";',
+      '5:   std::string clave_admin = "…";',
+      '6:   int lados = 4;',
+      '7:   std::string nombre = "Figura";',
+      '9:   bool login(const std::string& password = "…");',
+    ].join('\n'), 'la linea con una llave de AWS se quita entera; lo demas queda igual');
+    assert.equal(scrubOutline('', 'a.h'), '');
   });
 });

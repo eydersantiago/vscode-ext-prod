@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.35",
+  "version": "0.0.36",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -62,6 +62,11 @@
         "command": "adaceen.openFileView",
         "title": "ADACEEN: Ver de qué trata el archivo y el material del curso",
         "icon": "$(book)"
+      },
+      {
+        "command": "adaceen.showDependencies",
+        "title": "ADACEEN: Ver dependencias del archivo",
+        "icon": "$(references)"
       },
       {
         "command": "adaceen.openCourseMaterial",

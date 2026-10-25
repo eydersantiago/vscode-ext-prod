@@ -4,6 +4,38 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.36] - 2026-10-25
+
+Pedido del 25 de octubre: «refuerza más la extensión de VS Code, para que muestre un cuadro con las dependencias del archivo». Va con el backend del mismo día.
+
+### Agregado
+
+- **Cuadro «Dependencias»** en la vista «ADACEEN · Este archivo», debajo de «De qué trata» y plegado tras «Ver dependencias» (`file-dependencies.ts`, sin `vscode` y con pruebas; `dependency-scan.ts`):
+  - «Usa de tu proyecto»: los archivos que incluye o importa (`#include "x"`, `import`, `from … import`, `require`, `require_relative`, `using`), con las clases y funciones que usa de cada uno; un clic abre el archivo. En Java y C#, también las clases del mismo paquete (o del proyecto) que se usan sin import.
+  - «Bibliotecas»: cada una con una línea de para qué sirve (`iostream`: entrada y salida por consola; `java.util.Scanner`: leer datos del teclado; `math`: funciones matemáticas…). Un clic lleva a la línea del import. `conio.h`, `windows.h` e `iostream.h` traen un aviso: en Linux (la VM de editores) o en un compilador actual no existen.
+  - «No encontradas»: lo que no está en el proyecto, con el archivo de nombre parecido («¿Quisiste decir «src/figura.h»?») o el módulo de Python parecido (`import maths` → `math`). Antes de darlo por perdido se busca en el disco: el índice tiene a lo sumo 90 archivos y no todas las extensiones (un `.tpp` o un `.hh` no están).
+  - «La usan»: los archivos del proyecto que lo incluyen o importan; un clic los abre en esa línea. En un `.h` que nadie incluye lo dice.
+  - Avisos de errores clásicos aunque se encuentre: mayúsculas que no coinciden (`#include "Circulo.h"` con `circulo.h`, o `<Vector>`, compilan en Windows y no en Linux), un archivo propio incluido con `< >`, un `.cpp` incluido (suele dar «multiple definition») y, en Python, un archivo propio que se llama como un módulo de Python (`random.py` tapa a `random`; `turtle.py` con `import turtle` se importa a sí mismo).
+  - C y C++, Python, Java, JavaScript y TypeScript, Ruby y C#. Se lee el texto sin comentarios ni docstrings; no compila nada. Se actualiza al cambiar de pestaña, 1,5 s después de dejar de escribir, al guardar y al crear, borrar o renombrar archivos; con la vista oculta no se calcula.
+  - Para no llenar la vista, va plegado: «Ver dependencias» lo abre (si falta algo, «N sin encontrar» se ve aunque esté plegado) y cada grupo es un acordeón con su número que se abre con un clic. Lo abierto se recuerda al cambiar de archivo y al recargar la vista; un grupo largo muestra 6 y «Ver N más».
+- Comando «ADACEEN: Ver dependencias del archivo»: abre la vista en el cuadro.
+- Telemetría `vscode_dependency_opened` (value: local, libraries, missing o dependents) para medir el uso del cuadro.
+
+### Cambiado
+
+- **La vista sigue al editor activo.** Mostraba el archivo de la última sugerencia: al cambiar de pestaña seguía con el nombre y el resumen del anterior hasta que llegaba otra sugerencia. Ahora muestra el archivo activo (con su cuadro aunque todavía no haya sugerencia), no mezcla el resumen ni la sugerencia de otro archivo y se vacía al cerrar el último.
+- **Resumen del archivo.** El tutor recibe una línea «Dependencias del archivo» (lo que usa del proyecto, las bibliotecas y quién lo usa) para explicar qué papel tiene el archivo en el proyecto. No lleva lo no encontrado: eso solo lo confirma la búsqueda en el disco, y el tutor podría decir que falta un archivo que existe.
+- **Índice del proyecto** (`workspace-index.ts`):
+  - Lee cada archivo de sus bytes (o del editor si está abierto, con lo no guardado) en vez de abrirlo con `openTextDocument`, que hacía que las extensiones de C/C++ y Python analizaran hasta 90 archivos.
+  - No incluye archivos de claves (`.env`, `credentials.json`, `*.pem`…), igual que el escaneo.
+  - La estructura de los archivos relacionados que viaja al tutor no lleva líneas con claves ni el valor de las constantes con nombre de clave (`API_KEY = "…"`, `scrubOutline` en `scan-privacy.ts`).
+  - Se rearma al crear o borrar archivos (también desde la terminal o con git) y al cambiar `adaceen.scan.*`; un índice que se armaba mientras se guardaba un archivo ya no queda en la caché un minuto.
+- 29 pruebas unitarias nuevas (280 en total).
+
+### Compatibilidad
+
+- Con el backend anterior, la línea «Dependencias del archivo» queda pegada a la parte anterior del contexto y se recorta como antes. El backend del 25 de octubre la reconoce y, si el prompt no cabe, la quita después del mapa del proyecto.
+
 ## [0.0.35] - 2026-10-21
 
 Revisión de precisión del tutor, con técnicas de otros asistentes de código y tutores de programación (SWE-agent, Aider, Continue, Roo Code, OpenHands, CodeHelp, Iris). Va con el backend del mismo día.

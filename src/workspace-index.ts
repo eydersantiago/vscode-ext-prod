@@ -2,7 +2,9 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_INDEX_MAX_FILES, ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB, ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS, ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES, ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS } from './constants';
+import { collectNamespaces, collectTypeReferences, dependencyFamily, parseImports } from './file-dependencies';
 import { buildCodeOutline } from './prompt-context';
+import { isSecretPath, scrubOutline } from './scan-privacy';
 import { resolveScanOptions } from './settings';
 import { inferActiveLanguage, pathExtension, truncateInline } from './suggestion-results';
 import type { ActiveEditorSnapshot, WorkspaceProjectIndex, WorkspaceProjectIndexEntry } from './types';
@@ -66,30 +68,45 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
   const selection = selectFolders(options.mode, workspaceFolders);
   const files = await findWorkspaceFiles(selection.folders, options);
   const entries: WorkspaceProjectIndexEntry[] = [];
+  // Lo que el estudiante tiene abierto se lee del editor (con lo que no ha guardado); el resto,
+  // del disco. Antes cada archivo se abria con openTextDocument: las extensiones de lenguaje
+  // (C/C++, Python) recibian hasta 90 archivos "abiertos" y los analizaban.
+  const openDocuments = new Map(vscode.workspace.textDocuments.map((document) => [document.uri.toString(), document]));
+  const decoder = new TextDecoder('utf-8');
 
   for (const uri of files) {
     try {
+      const relativePath = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+      // Archivos de claves y credenciales: tampoco su nombre va en el contexto (como en el escaneo).
+      if (isSecretPath(relativePath)) {
+        continue;
+      }
       const stat = await vscode.workspace.fs.stat(uri);
       if (stat.size > options.maxFileBytes) {
         continue;
       }
 
-      const document = await vscode.workspace.openTextDocument(uri);
-      const text = document.getText();
-      const relativePath = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
-      const language = inferActiveLanguage(relativePath, document.languageId);
+      const open = openDocuments.get(uri.toString());
+      const text = open ? open.getText() : decoder.decode(await vscode.workspace.fs.readFile(uri));
+      const language = inferActiveLanguage(relativePath, open?.languageId || '');
+      const family = dependencyFamily(language, relativePath);
       entries.push({
         path: relativePath,
+        uri: uri.toString(),
         language,
         bytes: stat.size,
         lines: text.length ? text.split(/\r?\n/).length : 0,
         preview: text.slice(0, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS).replace(/\s+/g, ' ').trim(),
         // Firmas para "Declaraciones de archivos relacionados" (0.0.35); en un encabezado de
         // C/C++ tambien los atributos (los nombres de los miembros que usa el .cpp).
-        outline: buildCodeOutline(text, language, {
+        outline: scrubOutline(buildCodeOutline(text, language, {
           maxChars: ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS,
           members: /\.(?:h|hh|hpp|hxx)$/i.test(relativePath),
-        }),
+        }), relativePath),
+        // Para «La usan» en el cuadro «Dependencias» (0.0.36).
+        ...(family !== 'none' ? { imports: parseImports(text, family) } : {}),
+        ...(family === 'java' || family === 'csharp' ? { typeRefs: collectTypeReferences(text, family) } : {}),
+        ...(family === 'csharp' ? { namespaces: collectNamespaces(text, family) } : {}),
       });
     } catch (error) {
       output.appendLine(`[Suggestions] No se pudo indexar ${vscode.workspace.asRelativePath(uri, false)}: ${String(error)}`);
