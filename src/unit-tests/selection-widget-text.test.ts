@@ -102,7 +102,7 @@ describe('ventana flotante (0.0.34)', () => {
 
   it('sin modelo (GPU apagada): dice que el tutor no esta disponible y nada mas (piloto del 25/10)', () => {
     const offline = model({
-      unavailable: true,
+      tutorUnavailable: true,
       headline: 'El tutor no esta disponible en este momento: el servidor del modelo no respondio.',
       completionText: '',
       completionMode: '',

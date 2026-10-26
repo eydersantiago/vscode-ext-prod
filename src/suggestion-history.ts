@@ -42,7 +42,7 @@ export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): Sel
     codeRequestNote: model.codeRequestNote || '',
     requestedAction: model.requestedAction || '',
     proposalWarning: model.proposalWarning || '',
-    unavailable: !!model.unavailable,
+    tutorUnavailable: !!model.tutorUnavailable,
   };
 }
 
@@ -126,7 +126,7 @@ export function buildSuggestionHistoryEntryId(model: ActiveSuggestionModel, kind
 
 export function buildSuggestionHistoryEntries(model: ActiveSuggestionModel): ActiveSuggestionHistoryEntry[] {
   // Sin modelo no hubo sugerencia: «El tutor no esta disponible» no va al historial.
-  if (model.loading || model.applied || model.source === 'local-fallback' || model.unavailable) {
+  if (model.loading || model.applied || model.source === 'local-fallback' || model.tutorUnavailable) {
     return [];
   }
 

@@ -6,6 +6,12 @@
  * y queda guardado en globalState. Si ademas hay sesion compartida se manda
  * x-session-id, y en el backend gana la sesion.
  *
+ * Desde la 0.0.37 cada llamada dice tambien que version de ADACEEN es esta
+ * (x-adaceen-client-version) y donde corre el editor (x-adaceen-editor-host):
+ * con eso el backend sabe que extension tiene el VS Code de cada estudiante en
+ * cada tipo de editor, y la guia del navegador comprueba que en el tunel este
+ * la ultima. Las tres se fijan una vez, en initClientIdentity.
+ *
  * Lo usan TODAS las llamadas al backend (sugerencias, metricas, apply-check,
  * indicador de GPU, worker y quiz). La clave de almacenamiento es la que ya
  * usaba la vista de quiz, asi que los estudiantes conservan su id.
@@ -13,6 +19,8 @@
  * Este modulo no importa vscode: solo necesita algo con get/update (un
  * Memento), para poder probarlo con node:test.
  */
+
+import type { EditorHost } from './backend-url';
 
 /** Clave historica en globalState (la creo la vista de quiz en la 0.0.26). */
 export const CLIENT_ID_STORAGE_KEY = 'adaceen.quiz.clientId';
@@ -25,20 +33,24 @@ export const SESSION_ID_HEADER = 'x-session-id';
 export const SESSION_STATUS_HEADER = 'x-adaceen-session';
 /** Mismo patron que valida el backend. */
 export const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,80}$/;
-/**
- * Version de esta extension (0.0.37): el backend sabe que version tiene el VS Code de cada
- * estudiante y la guia del navegador comprueba que en el tunel este la ultima.
- */
-export const EXTENSION_VERSION_HEADER = 'x-adaceen-vscode-version';
-const EXTENSION_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
-let activeExtensionVersion = '';
-
-/** La fija activate() con la version del package.json. */
-export function setExtensionVersion(version: unknown) {
-  activeExtensionVersion = typeof version === 'string' && EXTENSION_VERSION_PATTERN.test(version.trim()) ? version.trim() : '';
-}
+/** Version de esta extension (la del package.json), como x-adaceen-client-id: del cliente. */
+export const CLIENT_VERSION_HEADER = 'x-adaceen-client-version';
+/** Donde corre el editor: local, tunnel, codespaces o remote (detectEditorHost). */
+export const EDITOR_HOST_HEADER = 'x-adaceen-editor-host';
+const CLIENT_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
+const EDITOR_HOSTS: readonly EditorHost[] = ['local', 'tunnel', 'codespaces', 'remote'];
 
 const TOKEN_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+
+/** Version x.y.z del package.json, o '' si no lo es (y entonces no se manda). */
+export function cleanClientVersion(value: unknown): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return CLIENT_VERSION_PATTERN.test(text) ? text : '';
+}
+
+export function isEditorHost(value: unknown): value is EditorHost {
+  return typeof value === 'string' && (EDITOR_HOSTS as readonly string[]).includes(value);
+}
 
 export type ClientIdStore = {
   get<T>(key: string): T | undefined;
@@ -80,30 +92,51 @@ export function getOrCreateClientId(store: ClientIdStore, random: () => number =
   return id;
 }
 
-let activeClientId = '';
+export type ClientIdentityOptions = {
+  /** Version del package.json; si no es x.y.z, la llamada no lleva x-adaceen-client-version. */
+  extensionVersion?: unknown;
+  /** Donde corre el editor (detectEditorHost); sin valor valido no se manda x-adaceen-editor-host. */
+  editorHost?: unknown;
+};
 
-/** Se llama una vez al activar la extension, antes de cualquier llamada al backend. */
-export function initClientIdentity(store: ClientIdStore): string {
-  activeClientId = getOrCreateClientId(store);
-  return activeClientId;
+/** Lo que se acepto al activar: '' en lo que no traia un valor valido. */
+export type ClientIdentity = { clientId: string; extensionVersion: string; editorHost: EditorHost | '' };
+
+let activeIdentity: ClientIdentity = { clientId: '', extensionVersion: '', editorHost: '' };
+
+/**
+ * Se llama una vez al activar la extension, antes de cualquier llamada al backend. Devuelve lo
+ * que quedo fijado: quien llama ve si la version o el tipo de editor no se aceptaron.
+ */
+export function initClientIdentity(store: ClientIdStore, options: ClientIdentityOptions = {}): ClientIdentity {
+  activeIdentity = {
+    clientId: getOrCreateClientId(store),
+    extensionVersion: cleanClientVersion(options.extensionVersion),
+    editorHost: isEditorHost(options.editorHost) ? options.editorHost : '',
+  };
+  return { ...activeIdentity };
 }
 
 /** Id de esta instalacion ('' si todavia no se inicializo). */
 export function currentClientId(): string {
-  return activeClientId;
+  return activeIdentity.clientId;
 }
 
 /**
- * Cabeceras de identidad para el backend: x-adaceen-client-id siempre que
- * haya un id valido y x-session-id cuando exista sesion.
+ * Cabeceras de identidad para el backend: x-adaceen-client-id siempre que haya un id valido,
+ * x-adaceen-client-version y x-adaceen-editor-host con lo fijado en initClientIdentity, y
+ * x-session-id cuando exista sesion.
  */
-export function buildIdentityHeaders(sessionId = '', clientId: string = activeClientId): Record<string, string> {
+export function buildIdentityHeaders(sessionId = '', clientId: string = activeIdentity.clientId): Record<string, string> {
   const headers: Record<string, string> = {};
   if (isValidClientId(clientId)) {
     headers[CLIENT_ID_HEADER] = clientId;
   }
-  if (activeExtensionVersion) {
-    headers[EXTENSION_VERSION_HEADER] = activeExtensionVersion;
+  if (activeIdentity.extensionVersion) {
+    headers[CLIENT_VERSION_HEADER] = activeIdentity.extensionVersion;
+  }
+  if (activeIdentity.editorHost) {
+    headers[EDITOR_HOST_HEADER] = activeIdentity.editorHost;
   }
   const cleanSession = sessionId.trim();
   if (cleanSession) {

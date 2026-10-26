@@ -2,8 +2,9 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
   buildIdentityHeaders,
-  EXTENSION_VERSION_HEADER,
-  setExtensionVersion,
+  CLIENT_VERSION_HEADER,
+  EDITOR_HOST_HEADER,
+  initClientIdentity,
   CLIENT_ID_HEADER,
   CLIENT_ID_PATTERN,
   CLIENT_ID_STORAGE_KEY,
@@ -72,14 +73,24 @@ describe('client-identity', () => {
     assert.deepEqual(buildIdentityHeaders('sesion-1', 'mal id'), { [SESSION_ID_HEADER]: 'sesion-1' });
   });
 
-  it('0.0.37: con la version fijada, cada llamada dice que version de ADACEEN tiene este VS Code', () => {
-    setExtensionVersion('0.0.37');
+  it('0.0.37: cada llamada dice que version de ADACEEN es y donde corre el editor', () => {
+    const { store } = memoryStore({ [CLIENT_ID_STORAGE_KEY]: 'vscabcdefgh123' });
     try {
-      assert.deepEqual(buildIdentityHeaders('', 'vscabcdefgh123'), { [CLIENT_ID_HEADER]: 'vscabcdefgh123', [EXTENSION_VERSION_HEADER]: '0.0.37' });
-      setExtensionVersion('no es version');
+      const identity = initClientIdentity(store, { extensionVersion: '0.0.37', editorHost: 'tunnel' });
+      assert.deepEqual(identity, { clientId: 'vscabcdefgh123', extensionVersion: '0.0.37', editorHost: 'tunnel' });
+      assert.deepEqual(buildIdentityHeaders('sesion-1'), {
+        [CLIENT_ID_HEADER]: 'vscabcdefgh123',
+        [CLIENT_VERSION_HEADER]: '0.0.37',
+        [EDITOR_HOST_HEADER]: 'tunnel',
+        [SESSION_ID_HEADER]: 'sesion-1',
+      });
+      // Lo que no es valido no se manda, y quien activa lo ve en lo devuelto.
+      const rejected = initClientIdentity(store, { extensionVersion: 'no es version', editorHost: 'windows' });
+      assert.deepEqual([rejected.extensionVersion, rejected.editorHost], ['', '']);
       assert.deepEqual(buildIdentityHeaders('', 'vscabcdefgh123'), { [CLIENT_ID_HEADER]: 'vscabcdefgh123' });
+      assert.equal(initClientIdentity(store, { extensionVersion: ' 1.2.3 ', editorHost: 'codespaces' }).extensionVersion, '1.2.3');
     } finally {
-      setExtensionVersion('');
+      initClientIdentity(memoryStore().store);
     }
   });
 

@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import { buildBackendActiveSuggestionModel, buildLocalActiveSuggestion, fetchBackendSuggestionText, isSuggestionApplyOffered, primarySuggestionText } from './active-suggestion';
 import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, fetchJsonWithTimeout, sendScanFailure, sendScanResult } from './backend-http';
 import { describeBackendUrlSource, detectEditorHost } from './backend-url';
-import { currentClientId, initClientIdentity, setExtensionVersion } from './client-identity';
+import { currentClientId, initClientIdentity } from './client-identity';
 import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './code-actions';
 import { guardCodeApplication, isExplicitClickOrigin } from './code-application-guard';
 import { setEditorConnection } from './connection-state';
@@ -61,15 +61,20 @@ export async function activate(context: vscode.ExtensionContext) {
       // Canal ya cerrado (desactivacion): se descarta la linea.
     }
   };
-  // Identidad unica para TODAS las llamadas al backend (x-adaceen-client-id);
-  // es el mismo id persistente que usaba la vista de quiz.
-  initClientIdentity(context.globalState);
-  setExtensionVersion(context.extension?.packageJSON?.version);
   // Donde corre el editor (VS Code instalado, tunel, Codespaces), en cada evento.
   const editorMetadata = {
     editorHost: detectEditorHost({ remoteName: vscode.env.remoteName, codespace: isCodespaceRuntime() }),
     editorUi: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
   };
+  // Identidad unica para TODAS las llamadas al backend (x-adaceen-client-id, el mismo id
+  // persistente que usaba la vista de quiz) y, desde la 0.0.37, esta version y donde corre.
+  const identity = initClientIdentity(context.globalState, {
+    extensionVersion: context.extension?.packageJSON?.version,
+    editorHost: editorMetadata.editorHost,
+  });
+  if (!identity.extensionVersion) {
+    safeLog('[ADACEEN] Sin version valida en el package.json: el backend vera esta extension como anterior a la 0.0.37.');
+  }
   // Sesion de ADACEEN: SecretStorage, archivo del tunel o ajuste heredado (src/editor-connect.ts).
   const connection = new EditorConnection({
     context,
@@ -1158,7 +1163,8 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
     if (!isSuggestionApplyOffered(model)) {
-      // Respuesta bloqueada o sin permiso para aplicar: no hay acciones que revelar.
+      // Respuesta bloqueada, sin modelo, pista local o sin permiso para aplicar: no hay acciones
+      // que revelar (ni vscode_suggestion_actions_revealed que contar).
       return;
     }
 
@@ -1272,7 +1278,7 @@ export async function activate(context: vscode.ExtensionContext) {
   /** Nota bajo el codigo pedido cuando no es para la accion que se pidio (o no hay codigo). */
   const codeRequestNoteFor = (next: ActiveSuggestionModel, mode: EditorCodeAction) => {
     // Sin modelo la ventana ya explica que el tutor no esta disponible.
-    if (suggestionReadyForMode(next, mode) || next.unavailable) {
+    if (suggestionReadyForMode(next, mode) || next.tutorUnavailable) {
       return '';
     }
     // 0.0.35: el motivo concreto si el codigo no se puede aplicar tal cual (resumen «...» o

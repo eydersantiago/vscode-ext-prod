@@ -6,6 +6,7 @@ import {
   selectionWidgetShowsTitleActions,
 } from './selection-widget-text';
 import type { SelectionWidgetModel } from './selection-widget-text';
+import { suggestionPhase } from './suggestion-phase';
 
 export {
   sanitizeTutorMarkdown,
@@ -50,24 +51,30 @@ export function buildSelectionWidgetMarkdown(model: SelectionWidgetModel) {
 }
 
 function threadLabel(model: SelectionWidgetModel) {
-  if (model.loading) {
-    return 'ADACEEN · cargando';
+  switch (suggestionPhase(model)) {
+    case 'loading':
+      return 'ADACEEN · cargando';
+    case 'pending':
+      return 'ADACEEN · preparando código';
+    case 'blocked':
+      return 'ADACEEN · tutor';
+    default:
+      return 'ADACEEN · sugerencia';
   }
-  if (model.pendingMode) {
-    return 'ADACEEN · preparando código';
-  }
-  return model.blocked ? 'ADACEEN · tutor' : 'ADACEEN · sugerencia';
 }
 
 function commentLabel(model: SelectionWidgetModel) {
-  if (model.loading || model.pendingMode) {
-    return 'cargando';
+  switch (suggestionPhase(model)) {
+    case 'loading':
+    case 'pending':
+      return 'cargando';
+    case 'blocked':
+      return 'mensaje del tutor';
+    default: {
+      const ready = model.completionText.trim() ? model.completionMode : '';
+      return ready ? APPLY_LABEL[ready].toLowerCase() : 'pista';
+    }
   }
-  if (model.blocked) {
-    return 'mensaje del tutor';
-  }
-  const ready = model.completionText.trim() ? model.completionMode : '';
-  return ready ? APPLY_LABEL[ready].toLowerCase() : 'pista';
 }
 
 export class AdaceenSelectionWidget implements vscode.Disposable {
@@ -111,31 +118,21 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       return;
     }
 
+    // La clave es lo que se pinta (texto, etiquetas y botones del titulo): un campo nuevo del
+    // modelo que cambie la ventana la repinta sin tener que acordarse de agregarlo aqui.
+    const contextValue = selectionWidgetShowsTitleActions(model) ? THREAD_CONTEXT : THREAD_CONTEXT_READONLY;
     const key = [
       model.uriString,
       model.startLine,
       model.endLine,
-      model.loading ? 'loading' : 'ready',
-      model.source,
-      model.recommendedMode,
-      model.headline,
-      model.completionText,
-      model.completionMode,
-      model.blocked ? 'blocked' : 'open',
-      model.tutorMessage || '',
-      model.applyAllowed === false ? 'readonly' : 'apply',
-      model.applicationNote || '',
-      model.pendingMode || '',
-      model.slow ? 'slow' : '',
-      model.codeRequestNote || '',
-      model.requestedAction || '',
-      model.proposalWarning || '',
-      model.unavailable ? 'unavailable' : '',
+      contextValue,
+      threadLabel(model),
+      commentLabel(model),
+      buildSelectionWidgetText(model),
     ].join('\u0000');
     if (key === this.currentKey && this.thread) {
       return;
     }
-    const contextValue = selectionWidgetShowsTitleActions(model) ? THREAD_CONTEXT : THREAD_CONTEXT_READONLY;
 
     let uri: vscode.Uri;
     try {

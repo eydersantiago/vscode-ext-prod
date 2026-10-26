@@ -160,7 +160,7 @@ export function buildRackReplacementOptions(
   model: ActiveSuggestionModel,
 ): VscodeReplacementOption[] {
   if (!isSuggestionApplyOffered(model)) {
-    // Respuesta bloqueada o aplicacion no permitida: el navegador tampoco ofrece reemplazos.
+    // Respuesta bloqueada, sin modelo, pista local o aplicacion no permitida: sin reemplazos.
     return [];
   }
   const applyMode = model.applyMode || inferSuggestionApplyMode(snapshot, summarizeActiveSuggestion(model), model.completionText);

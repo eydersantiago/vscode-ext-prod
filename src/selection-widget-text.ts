@@ -11,6 +11,9 @@
 //   - «Ver panel» llevaba al quiz; ahora es «Resumen y material» (vista «Este
 //     archivo» con el resumen y el material del curso).
 
+import { suggestionPhase, suggestionRulesOutApply } from './suggestion-phase';
+import type { SuggestionPhase, SuggestionSource } from './suggestion-phase';
+
 export type SelectionWidgetMode = 'insert' | 'replace' | 'delete';
 
 export type SelectionWidgetModel = {
@@ -30,7 +33,7 @@ export type SelectionWidgetModel = {
   /** Accion que el tutor recomienda. */
   recommendedMode: SelectionWidgetMode;
   /** De donde salio: backend | local | local-fallback. */
-  source: string;
+  source: SuggestionSource;
   /** Etiqueta del RAG, p. ej. "FPOO". Vacia si no aplica. */
   ragCourseCode: string;
   loading: boolean;
@@ -56,7 +59,7 @@ export type SelectionWidgetModel = {
   /** Aviso sobre el codigo (una version mejorada que quita casi todo el bloque). */
   proposalWarning?: string;
   /** El backend respondio sin modelo: solo «Otra sugerencia» (y el resumen), sin pedir codigo. */
-  unavailable?: boolean;
+  tutorUnavailable?: boolean;
 };
 
 /** Comandos que puede abrir un enlace de la ventana (y ninguno mas). */
@@ -108,14 +111,14 @@ export function sanitizeTutorMarkdown(text: string) {
     .trim();
 }
 
-/** La ventana ofrece acciones de aplicar para este modelo. */
+/** La ventana ofrece acciones de aplicar para este modelo (la misma regla que isSuggestionApplyOffered). */
 export function selectionWidgetOffersApply(model: SelectionWidgetModel) {
-  return !model.blocked && !model.unavailable && model.applyAllowed !== false && model.source !== 'local-fallback';
+  return !suggestionRulesOutApply(model) && model.applyAllowed !== false;
 }
 
 /** Los botones del titulo (Insertar / Modificar / Eliminar) solo cuando hay algo que aplicar. */
 export function selectionWidgetShowsTitleActions(model: SelectionWidgetModel) {
-  return !model.loading && !model.pendingMode && selectionWidgetOffersApply(model);
+  return suggestionPhase(model) === 'ready' && selectionWidgetOffersApply(model);
 }
 
 function safeFence(code: string) {
@@ -130,42 +133,40 @@ export function selectionRangeLabel(model: Pick<SelectionWidgetModel, 'startLine
     : `líneas ${model.startLine}-${model.endLine}`;
 }
 
-function sourceLabel(model: SelectionWidgetModel) {
-  if (model.loading || model.pendingMode) {
-    return '$(sync~spin) consultando al tutor';
+function sourceLabel(model: SelectionWidgetModel, phase: SuggestionPhase) {
+  switch (phase) {
+    case 'loading':
+    case 'pending':
+      return '$(sync~spin) consultando al tutor';
+    case 'tutor_unavailable':
+      return 'tutor no disponible';
+    case 'local_fallback':
+      return 'pista local (el tutor no respondió)';
+    default:
+      if (model.source === 'backend') {
+        return model.ragCourseCode ? `tutor · material ${escapeMarkdown(model.ragCourseCode)}` : 'tutor';
+      }
+      return 'pista local';
   }
-  if (model.unavailable) {
-    return 'tutor no disponible';
-  }
-  if (model.source === 'backend') {
-    return model.ragCourseCode ? `tutor · material ${escapeMarkdown(model.ragCourseCode)}` : 'tutor';
-  }
-  if (model.source === 'local-fallback') {
-    return 'pista local (el tutor no respondió)';
-  }
-  return 'pista local';
 }
 
 export function selectionWidgetTitle(model: SelectionWidgetModel) {
-  if (model.loading) {
-    return 'Sugerencia para la selección';
+  switch (suggestionPhase(model)) {
+    case 'pending':
+      return model.pendingMode === 'replace' ? 'Preparando una versión mejorada' : 'Preparando código para continuar';
+    case 'blocked':
+      return 'Mensaje del tutor';
+    case 'ready':
+      if (model.requestedAction === 'replace' && model.completionMode === 'replace') {
+        return 'Versión mejorada de la selección';
+      }
+      if (model.requestedAction === 'insert' && model.completionMode === 'insert') {
+        return 'Código para continuar';
+      }
+      return 'Sugerencia para la selección';
+    default:
+      return 'Sugerencia para la selección';
   }
-  if (model.pendingMode === 'replace') {
-    return 'Preparando una versión mejorada';
-  }
-  if (model.pendingMode === 'insert') {
-    return 'Preparando código para continuar';
-  }
-  if (model.blocked) {
-    return 'Mensaje del tutor';
-  }
-  if (model.requestedAction === 'replace' && model.completionMode === 'replace') {
-    return 'Versión mejorada de la selección';
-  }
-  if (model.requestedAction === 'insert' && model.completionMode === 'insert') {
-    return 'Código para continuar';
-  }
-  return 'Sugerencia para la selección';
 }
 
 /** Enlaces de accion, en orden: aplicar (y ver cambios), proponer, eliminar. */
@@ -193,30 +194,15 @@ export function selectionWidgetActionLinks(model: SelectionWidgetModel, origin =
 }
 
 export function buildSelectionWidgetText(model: SelectionWidgetModel) {
+  const phase = suggestionPhase(model);
   const lines: string[] = [];
   const range = selectionRangeLabel(model);
-  lines.push(`**${selectionWidgetTitle(model)}** (${range}) · ${sourceLabel(model)}`);
+  lines.push(`**${selectionWidgetTitle(model)}** (${range}) · ${sourceLabel(model, phase)}`);
   lines.push('');
 
-  if (model.headline && !model.blocked && !model.unavailable) {
+  if (model.headline && phase !== 'blocked' && phase !== 'tutor_unavailable') {
     lines.push(escapeMarkdown(model.headline));
     lines.push('');
-  }
-
-  if (model.loading) {
-    lines.push(`_${model.slow ? SLOW_NOTE : 'Cuando llegue la respuesta aparecen aquí el código y las acciones.'}_`);
-    return lines.join('\n');
-  }
-
-  if (model.pendingMode === 'replace' || model.pendingMode === 'insert') {
-    const target = model.startLine === model.endLine
-      ? `la línea ${model.startLine}`
-      : `las líneas ${model.startLine}-${model.endLine}`;
-    const waiting = model.pendingMode === 'replace'
-      ? `Preparando la versión mejorada de ${target}…`
-      : 'Preparando el código para continuar debajo de la selección…';
-    lines.push(`$(sync~spin) _${model.slow ? `${waiting} ${SLOW_NOTE}` : waiting}_`);
-    return lines.join('\n');
   }
 
   const secondary = [
@@ -224,29 +210,41 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
     `[$(book) Resumen y material](${commandUri('adaceen.openFileView')})`,
   ].join(' · ');
 
-  if (model.blocked) {
-    // Mensaje controlado del tutor (ya viene en Markdown) y ninguna accion de aplicar.
-    lines.push(sanitizeTutorMarkdown(model.tutorMessage || '') || '_El tutor no propone código para este bloque._');
-    lines.push('');
-    lines.push(secondary);
-    return lines.join('\n');
-  }
-
-  if (model.source === 'local-fallback') {
-    lines.push('_El tutor no respondió a tiempo: esta es una pista local, sin código. Pide otra sugerencia en un momento._');
-    lines.push('');
-    lines.push(secondary);
-    return lines.join('\n');
-  }
-
-  if (model.unavailable) {
-    // Una sola explicacion, sin «respondio sin codigo» y sin pedir codigo (tambien fallaria).
-    lines.push(UNAVAILABLE_TEXT);
-    lines.push('');
-    lines.push(`_${UNAVAILABLE_NOTE}_`);
-    lines.push('');
-    lines.push(secondary);
-    return lines.join('\n');
+  switch (phase) {
+    case 'loading':
+      lines.push(`_${model.slow ? SLOW_NOTE : 'Cuando llegue la respuesta aparecen aquí el código y las acciones.'}_`);
+      return lines.join('\n');
+    case 'pending': {
+      const target = model.startLine === model.endLine
+        ? `la línea ${model.startLine}`
+        : `las líneas ${model.startLine}-${model.endLine}`;
+      const waiting = model.pendingMode === 'replace'
+        ? `Preparando la versión mejorada de ${target}…`
+        : 'Preparando el código para continuar debajo de la selección…';
+      lines.push(`$(sync~spin) _${model.slow ? `${waiting} ${SLOW_NOTE}` : waiting}_`);
+      return lines.join('\n');
+    }
+    case 'blocked':
+      // Mensaje controlado del tutor (ya viene en Markdown) y ninguna accion de aplicar.
+      lines.push(sanitizeTutorMarkdown(model.tutorMessage || '') || '_El tutor no propone código para este bloque._');
+      lines.push('');
+      lines.push(secondary);
+      return lines.join('\n');
+    case 'tutor_unavailable':
+      // Una sola explicacion, sin «respondio sin codigo» y sin pedir codigo (tambien fallaria).
+      lines.push(UNAVAILABLE_TEXT);
+      lines.push('');
+      lines.push(`_${UNAVAILABLE_NOTE}_`);
+      lines.push('');
+      lines.push(secondary);
+      return lines.join('\n');
+    case 'local_fallback':
+      lines.push('_El tutor no respondió a tiempo: esta es una pista local, sin código. Pide otra sugerencia en un momento._');
+      lines.push('');
+      lines.push(secondary);
+      return lines.join('\n');
+    case 'ready':
+      break;
   }
 
   const code = model.completionText.trim() ? model.completionText.replace(/\r\n/g, '\n').replace(/\n+$/, '') : '';

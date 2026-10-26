@@ -11,6 +11,7 @@ import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, repla
 import type { EditorCodeAction } from './suggestion-code';
 import { countMatches, inferSuggestionApplyMode } from './suggestion-edit';
 import { parseBackendSuggestionSections } from './suggestion-format';
+import { suggestionRulesOutApply } from './suggestion-phase';
 import { createEmptyBackendSuggestionResult, normalizeBackendSuggestionResult, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, BackendSuggestionSections, SuggestionTrigger, WorkspaceProjectIndex } from './types';
 import { buildCodeOutline, buildNumberedWindow, formatOtherFilesLine, formatRelatedDeclarations, selectRelatedFiles } from './prompt-context';
@@ -613,13 +614,16 @@ export function buildBackendActiveSuggestionModel(
     ...(prepared.unusable ? { codeRequestNote: prepared.unusableReason } : {}),
     // Respuesta sin modelo para el foco: antes la ventana decia ademas «El tutor respondio sin
     // codigo para esto», como si hubiera respondido (piloto del 25/10/2026).
-    ...(primaryResult === focusResult && focusResult.degraded ? { unavailable: true } : {}),
+    ...(primaryResult === focusResult && focusResult.degraded ? { tutorUnavailable: true } : {}),
   };
 }
 
-/** Se ofrece aplicar codigo para este modelo (no bloqueado y permitido por la politica). */
+/**
+ * Se ofrece aplicar codigo para este modelo: la respuesta no lo descarta (bloqueada, sin modelo
+ * o pista local; la misma regla que la ventana flotante) y la politica lo permite.
+ */
 export function isSuggestionApplyOffered(model: ActiveSuggestionModel) {
-  return !model.blocked && model.codeApplication?.allowed !== false;
+  return !suggestionRulesOutApply(model) && model.codeApplication?.allowed !== false;
 }
 
 /**

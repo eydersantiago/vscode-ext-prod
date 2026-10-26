@@ -269,9 +269,10 @@ export type ActiveSuggestionModel = {
   proposalWarning?: string;
   /**
    * El backend respondio sin modelo (GPU apagada o sin worker: «El tutor no esta disponible»).
-   * La ventana lo dice asi y no ofrece pedir codigo, que tambien fallaria.
+   * La ventana lo dice asi y no ofrece pedir codigo, que tambien fallaria; tampoco se revelan
+   * acciones ni se ofrece aplicar (suggestionRulesOutApply, src/suggestion-phase.ts).
    */
-  unavailable?: boolean;
+  tutorUnavailable?: boolean;
 };
 
 export type VscodeReplacementOption = {
