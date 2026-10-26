@@ -86,7 +86,7 @@ describe('client-identity', () => {
       });
       // Lo que no es valido no se manda, y quien activa lo ve en lo devuelto.
       const rejected = initClientIdentity(store, { extensionVersion: 'no es version', editorHost: 'windows' });
-      assert.deepEqual([rejected.extensionVersion, rejected.editorHost], ['', '']);
+      assert.deepEqual([rejected.extensionVersion, rejected.editorHost], [null, null]);
       assert.deepEqual(buildIdentityHeaders('', 'vscabcdefgh123'), { [CLIENT_ID_HEADER]: 'vscabcdefgh123' });
       assert.equal(initClientIdentity(store, { extensionVersion: ' 1.2.3 ', editorHost: 'codespaces' }).extensionVersion, '1.2.3');
     } finally {

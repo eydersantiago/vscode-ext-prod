@@ -1,11 +1,12 @@
 // ADACEEN (VS Code): proveedores de VS Code para la sugerencia (CodeLens, acciones de codigo e inlay hints).
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { isRecommendedActionReady, suggestionApplicationNote } from './active-suggestion';
+import { suggestionApplicationNote } from './active-suggestion';
 import { quickFixOrigin } from './code-application-guard';
 import { buildSelectionRangeKey } from './editor-snapshot';
 import { buildSuggestionHoverMarkdown } from './suggestion-decorations';
 import { getSelectedFullLineRange, suggestionApplyModeLabel } from './suggestion-edit';
+import { canOfferRecommendedAction } from './suggestion-phase';
 import { truncateInline } from './suggestion-results';
 import { codeLensOffersApply } from './suggestion-surfaces';
 import type { SelectionWidgetPresence } from './suggestion-surfaces';
@@ -54,11 +55,7 @@ export class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvide
         },
       ),
     ];
-    const applyOffered = !!this.model.actionsVisible &&
-      !this.model.loading &&
-      !this.model.applied &&
-      this.model.source !== 'local-fallback' &&
-      isRecommendedActionReady(this.model);
+    const applyOffered = !!this.model.actionsVisible && canOfferRecommendedAction(this.model);
     // Con la ventana flotante abierta en este archivo, ella ofrece la accion: sin repetirla aqui.
     // Tampoco si el estudiante cerro la ventana de esta sugerencia con la X.
     if (codeLensOffersApply({
@@ -159,11 +156,8 @@ export class AdaceenSuggestionCodeActionProvider implements vscode.CodeActionPro
   ): vscode.CodeAction[] {
     if (
       !this.model ||
-      this.model.loading ||
-      this.model.applied ||
-      this.model.source === 'local-fallback' ||
       !this.model.actionsVisible ||
-      !isRecommendedActionReady(this.model) ||
+      !canOfferRecommendedAction(this.model) ||
       !isSuggestionCodeActionRequestFocused(this.model, document, range)
     ) {
       return [];
@@ -195,13 +189,7 @@ export function isSuggestionInlineHintFocused(model: ActiveSuggestionModel, docu
 }
 
 export function isSuggestionInlineHintVisible(model: ActiveSuggestionModel, document: vscode.TextDocument) {
-  if (
-    model.loading ||
-    model.applied ||
-    model.source === 'local-fallback' ||
-    !isRecommendedActionReady(model) ||
-    document.uri.toString() !== model.uriString
-  ) {
+  if (!canOfferRecommendedAction(model) || document.uri.toString() !== model.uriString) {
     return false;
   }
 

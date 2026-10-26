@@ -123,10 +123,10 @@ describe('ventana flotante (0.0.34)', () => {
     assert.match(blocked, /\*\*Mensaje del tutor\*\*/);
     assert.doesNotMatch(blocked, /\(command:adaceen\.applySuggestionCompletion\)/, 'el texto del servidor no dispara comandos');
 
-    const guide = decoded(buildSelectionWidgetText(model({ applyAllowed: false, applicationNote: 'Tu docente no permite aplicar código aquí.' })));
+    const guide = decoded(buildSelectionWidgetText(model({ codeApplicationAllowed: false, applicationNote: 'Tu docente no permite aplicar código aquí.' })));
     assert.match(guide, /Tu docente no permite aplicar código aquí\\?\./);
     assert.doesNotMatch(guide, /applySuggestionCompletion/);
-    assert.equal(selectionWidgetShowsTitleActions(model({ applyAllowed: false })), false);
+    assert.equal(selectionWidgetShowsTitleActions(model({ codeApplicationAllowed: false })), false);
     assert.equal(selectionWidgetShowsTitleActions(model()), true);
   });
 

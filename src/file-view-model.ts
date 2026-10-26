@@ -7,6 +7,7 @@
 // y todo el material del curso.
 import type { CourseMaterialItem } from './course-material';
 import type { DependencyFamily, FileDependencies, FileDependencyItem } from './file-dependencies';
+import { assertNeverPhase, suggestionPhase } from './suggestion-phase';
 import type { ActiveSuggestionModel, ActiveSuggestionRagSource } from './types';
 
 /** Resumen del archivo que hizo el tutor (file_summary), guardado por archivo. */
@@ -233,20 +234,27 @@ export function focusLabelFor(model: ActiveSuggestionModel | null) {
   return model.triggerKind === 'cursor' && model.line > 0 ? `Línea ${model.line}` : 'Archivo completo';
 }
 
+/** El estado de la sugerencia junto a su frase: el mismo que dice la ventana flotante. */
 function suggestionStatus(model: ActiveSuggestionModel) {
-  if (model.loading || model.pendingMode) {
-    return model.slow ? 'el tutor está tardando' : 'consultando al tutor';
-  }
-  if (model.blocked) {
-    return 'mensaje del tutor';
-  }
   if (model.applied) {
     return 'aplicada';
   }
-  if (model.source === 'local-fallback') {
-    return 'pista local (el tutor no respondió)';
+  const phase = suggestionPhase(model);
+  switch (phase) {
+    case 'loading':
+    case 'pending':
+      return model.slow ? 'el tutor está tardando' : 'consultando al tutor';
+    case 'blocked':
+      return 'mensaje del tutor';
+    case 'tutor_unavailable':
+      return 'tutor no disponible';
+    case 'local_fallback':
+      return 'pista local (el tutor no respondió)';
+    case 'ready':
+      return model.source === 'backend' ? 'del tutor' : 'pista local';
+    default:
+      return assertNeverPhase(phase);
   }
-  return model.source === 'backend' ? 'del tutor' : 'pista local';
 }
 
 export type FileViewExtras = {

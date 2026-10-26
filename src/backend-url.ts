@@ -114,13 +114,30 @@ export async function probeLocalBackend(
 }
 
 /**
- * Donde corre el editor, para la telemetria (metadata.editorHost):
+ * Donde corre el editor, para la telemetria (metadata.editorHost) y, desde la 0.0.37, para el
+ * backend en cada llamada (x-adaceen-editor-host; los mismos cuatro valores que acepta
+ * GET /api/vscode/presence?editorHost=):
  *   local       VS Code instalado en el equipo (por ejemplo una Mac del laboratorio)
  *   tunnel      VS Code Tunnels (vscode.dev o VS Code conectado a un tunel)
  *   codespaces  GitHub Codespaces
  *   remote      otro remoto (SSH, WSL, contenedor)
  */
-export type EditorHost = 'local' | 'tunnel' | 'codespaces' | 'remote';
+export const EDITOR_HOSTS = ['local', 'tunnel', 'codespaces', 'remote'] as const;
+export type EditorHost = typeof EDITOR_HOSTS[number];
+
+export function isEditorHost(value: unknown): value is EditorHost {
+  return typeof value === 'string' && (EDITOR_HOSTS as readonly string[]).includes(value);
+}
+
+/**
+ * El tipo de editor que se manda al canjear la vinculacion (editorHost del canje): los de
+ * EditorHost y 'web', vscode.dev o github.dev sin tunel (sin servidor de VS Code detras).
+ */
+export type PairingEditorHost = EditorHost | 'web';
+
+export function pairingEditorHost(editorHost: EditorHost, editorUi: 'web' | 'desktop'): PairingEditorHost {
+  return editorHost === 'local' && editorUi === 'web' ? 'web' : editorHost;
+}
 
 export function detectEditorHost(input: { remoteName?: string | null; codespace: boolean }): EditorHost {
   if (input.codespace) {

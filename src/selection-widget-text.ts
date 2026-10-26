@@ -11,10 +11,12 @@
 //   - «Ver panel» llevaba al quiz; ahora es «Resumen y material» (vista «Este
 //     archivo» con el resumen y el material del curso).
 
-import { suggestionPhase, suggestionRulesOutApply } from './suggestion-phase';
-import type { SuggestionPhase, SuggestionSource } from './suggestion-phase';
+import { assertNeverPhase, responseAllowsApply, suggestionPhase } from './suggestion-phase';
+import type { SuggestionPhase } from './suggestion-phase';
+import type { SuggestionApplyMode, SuggestionSource } from './types';
 
-export type SelectionWidgetMode = 'insert' | 'replace' | 'delete';
+/** La accion de la ventana: la misma que la de la sugerencia (insertar, reemplazar o eliminar). */
+export type SelectionWidgetMode = SuggestionApplyMode;
 
 export type SelectionWidgetModel = {
   /** Documento al que pertenece la sugerencia. */
@@ -44,8 +46,12 @@ export type SelectionWidgetModel = {
    */
   blocked?: boolean;
   tutorMessage?: string;
-  /** false cuando el backend dice que no se puede aplicar codigo aqui (code_application.allowed). */
-  applyAllowed?: boolean;
+  /**
+   * false cuando la politica del docente no permite aplicar codigo en este archivo
+   * (code_application.allowed). Lo que descarta la respuesta (bloqueada, sin modelo o pista
+   * local) no va aqui: lo deriva responseAllowsApply de las otras banderas.
+   */
+  codeApplicationAllowed?: boolean;
   /** Nota discreta bajo las acciones, p. ej. "Te quedan 3 aplicaciones en este archivo". */
   applicationNote?: string;
   /** Se esta pidiendo al tutor el codigo de esta accion. */
@@ -113,7 +119,7 @@ export function sanitizeTutorMarkdown(text: string) {
 
 /** La ventana ofrece acciones de aplicar para este modelo (la misma regla que isSuggestionApplyOffered). */
 export function selectionWidgetOffersApply(model: SelectionWidgetModel) {
-  return !suggestionRulesOutApply(model) && model.applyAllowed !== false;
+  return responseAllowsApply(model) && model.codeApplicationAllowed !== false;
 }
 
 /** Los botones del titulo (Insertar / Modificar / Eliminar) solo cuando hay algo que aplicar. */
@@ -142,16 +148,20 @@ function sourceLabel(model: SelectionWidgetModel, phase: SuggestionPhase) {
       return 'tutor no disponible';
     case 'local_fallback':
       return 'pista local (el tutor no respondió)';
-    default:
+    case 'blocked':
+    case 'ready':
       if (model.source === 'backend') {
         return model.ragCourseCode ? `tutor · material ${escapeMarkdown(model.ragCourseCode)}` : 'tutor';
       }
       return 'pista local';
+    default:
+      return assertNeverPhase(phase);
   }
 }
 
 export function selectionWidgetTitle(model: SelectionWidgetModel) {
-  switch (suggestionPhase(model)) {
+  const phase = suggestionPhase(model);
+  switch (phase) {
     case 'pending':
       return model.pendingMode === 'replace' ? 'Preparando una versión mejorada' : 'Preparando código para continuar';
     case 'blocked':
@@ -164,8 +174,12 @@ export function selectionWidgetTitle(model: SelectionWidgetModel) {
         return 'Código para continuar';
       }
       return 'Sugerencia para la selección';
-    default:
+    case 'loading':
+    case 'tutor_unavailable':
+    case 'local_fallback':
       return 'Sugerencia para la selección';
+    default:
+      return assertNeverPhase(phase);
   }
 }
 
@@ -245,6 +259,8 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
       return lines.join('\n');
     case 'ready':
       break;
+    default:
+      return assertNeverPhase(phase);
   }
 
   const code = model.completionText.trim() ? model.completionText.replace(/\r\n/g, '\n').replace(/\n+$/, '') : '';

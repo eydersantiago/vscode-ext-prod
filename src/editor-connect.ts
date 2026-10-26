@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { PairingEditorHost } from './backend-url';
 import { buildIdentityHeaders } from './client-identity';
 import {
   classifyConnectInput,
@@ -61,8 +62,8 @@ export type EditorConnectionOptions = {
   log: (line: string) => void;
   /** Backend ya resuelto (src/backend-url.ts). */
   backendUrl: () => string;
-  /** local | tunnel | codespaces | remote | web */
-  editorHost: () => string;
+  /** local | tunnel | codespaces | remote | web (pairingEditorHost, src/backend-url.ts). */
+  editorHost: () => PairingEditorHost;
   /** owner/repo (minusculas) del workspace abierto, si se puede detectar. */
   detectWorkspaceRepo: (folders: readonly vscode.WorkspaceFolder[]) => Promise<string | undefined>;
   /** owner/repo (minusculas) del clon que hay en esa carpeta (lee .git/config). */

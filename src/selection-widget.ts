@@ -6,7 +6,7 @@ import {
   selectionWidgetShowsTitleActions,
 } from './selection-widget-text';
 import type { SelectionWidgetModel } from './selection-widget-text';
-import { suggestionPhase } from './suggestion-phase';
+import { assertNeverPhase, suggestionPhase } from './suggestion-phase';
 
 export {
   sanitizeTutorMarkdown,
@@ -51,29 +51,42 @@ export function buildSelectionWidgetMarkdown(model: SelectionWidgetModel) {
 }
 
 function threadLabel(model: SelectionWidgetModel) {
-  switch (suggestionPhase(model)) {
+  const phase = suggestionPhase(model);
+  switch (phase) {
     case 'loading':
       return 'ADACEEN · cargando';
     case 'pending':
       return 'ADACEEN · preparando código';
     case 'blocked':
       return 'ADACEEN · tutor';
-    default:
+    case 'tutor_unavailable':
+      return 'ADACEEN · tutor no disponible';
+    case 'local_fallback':
+    case 'ready':
       return 'ADACEEN · sugerencia';
+    default:
+      return assertNeverPhase(phase);
   }
 }
 
 function commentLabel(model: SelectionWidgetModel) {
-  switch (suggestionPhase(model)) {
+  const phase = suggestionPhase(model);
+  switch (phase) {
     case 'loading':
     case 'pending':
       return 'cargando';
     case 'blocked':
       return 'mensaje del tutor';
-    default: {
+    case 'tutor_unavailable':
+      return 'tutor no disponible';
+    case 'local_fallback':
+      return 'pista';
+    case 'ready': {
       const ready = model.completionText.trim() ? model.completionMode : '';
       return ready ? APPLY_LABEL[ready].toLowerCase() : 'pista';
     }
+    default:
+      return assertNeverPhase(phase);
   }
 }
 

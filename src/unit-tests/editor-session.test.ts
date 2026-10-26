@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
+import type { PairingEditorHost } from '../backend-url';
 import {
   classifyConnectInput,
   CONNECT_CODE_CHOICE,
@@ -9,6 +10,7 @@ import {
   connectInputProblem,
   describeClaimError,
   describeSessionStatus,
+  SESSION_STATUS_UNCONNECTED_TEXT,
   EditorClaimKind,
   EditorClaimResult,
   EditorSessionLabel,
@@ -300,6 +302,11 @@ describe('orden de resolucion', () => {
     const status = describeSessionStatus({ ...record(), source: 'secret' });
     assert.equal(status.connected, true);
     assert.equal(status.text, '$(account) ADACEEN: Ana Estudiante');
+    // La guia del tunel del navegador lee la barra: «ADACEEN» y «sin conectar» solo sin sesion.
+    assert.equal(SESSION_STATUS_UNCONNECTED_TEXT, 'ADACEEN: sin conectar');
+    assert.ok(describeSessionStatus(null).text.endsWith(SESSION_STATUS_UNCONNECTED_TEXT));
+    assert.match(status.text, /\bADACEEN\b/);
+    assert.doesNotMatch(status.text, /sin conectar/i);
     assert.match(status.tooltip, /Conectado como Ana Estudiante \(ana@correounivalle.edu.co\)/);
     assert.match(status.tooltip, /cuenta de GitHub de VS Code/);
     assert.doesNotMatch(status.tooltip, new RegExp(SESSION_A));
@@ -414,7 +421,7 @@ function harness(options: {
   check?: SessionCheck;
   failStore?: boolean;
   backendUrl?: string;
-  editorHost?: string;
+  editorHost?: PairingEditorHost;
   unlinked?: boolean;
   silentGithubAllowed?: boolean;
   /** Demora de cada canje (ms), para las carreras. */

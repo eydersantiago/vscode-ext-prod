@@ -167,6 +167,20 @@ describe('cuadro «Dependencias»: revision independiente (0.0.36)', () => {
     assert.equal(dependencyItemId({ label: 'main.cpp', path: 'src/main.cpp' }), dependencyItemId({ label: 'main.cpp', path: 'src/main.cpp' }));
   });
 
+  it('el estado de la sugerencia sale de su fase (0.0.37): sin modelo dice «tutor no disponible»', () => {
+    const activeFile = { uriString: 'file:///repo/src/main.cpp', fileName: 'main.cpp', language: 'cpp' };
+    const status = (patch: Partial<ActiveSuggestionModel>) =>
+      buildFileViewState(model(patch), null, false, EMPTY_MATERIAL_STATE, { activeFile }).suggestion?.status;
+    assert.equal(status({}), 'del tutor');
+    assert.equal(status({ tutorUnavailable: true }), 'tutor no disponible', 'antes decia «del tutor» sin haber tutor');
+    assert.equal(status({ loading: true }), 'consultando al tutor');
+    assert.equal(status({ pendingMode: 'replace', slow: true }), 'el tutor está tardando');
+    assert.equal(status({ blocked: true }), 'mensaje del tutor');
+    assert.equal(status({ source: 'local-fallback' }), 'pista local (el tutor no respondió)');
+    assert.equal(status({ source: 'local' }), 'pista local');
+    assert.equal(status({ applied: true, blocked: true }), 'aplicada');
+  });
+
   it('un archivo fuera de la carpeta abierta lo dice', () => {
     const view = buildDependencyViewState({
       family: 'c', local: [], libraries: [{ label: 'iostream', line: 1, description: 'entrada y salida por consola (cin, cout)' }],

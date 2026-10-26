@@ -4,7 +4,7 @@
 import * as vscode from 'vscode';
 import { buildBackendActiveSuggestionModel, buildLocalActiveSuggestion, fetchBackendSuggestionText, isSuggestionApplyOffered, primarySuggestionText } from './active-suggestion';
 import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, fetchJsonWithTimeout, sendScanFailure, sendScanResult } from './backend-http';
-import { describeBackendUrlSource, detectEditorHost } from './backend-url';
+import { describeBackendUrlSource, detectEditorHost, pairingEditorHost } from './backend-url';
 import { currentClientId, initClientIdentity } from './client-identity';
 import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './code-actions';
 import { guardCodeApplication, isExplicitClickOrigin } from './code-application-guard';
@@ -64,7 +64,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Donde corre el editor (VS Code instalado, tunel, Codespaces), en cada evento.
   const editorMetadata = {
     editorHost: detectEditorHost({ remoteName: vscode.env.remoteName, codespace: isCodespaceRuntime() }),
-    editorUi: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
+    editorUi: vscode.env.uiKind === vscode.UIKind.Web ? 'web' as const : 'desktop' as const,
   };
   // Identidad unica para TODAS las llamadas al backend (x-adaceen-client-id, el mismo id
   // persistente que usaba la vista de quiz) y, desde la 0.0.37, esta version y donde corre.
@@ -81,7 +81,7 @@ export async function activate(context: vscode.ExtensionContext) {
     log: safeLog,
     backendUrl: () => resolveCurrentBackendBaseUrl().baseUrl,
     // Para el canje: vscode.dev sin tunel es "web".
-    editorHost: () => (editorMetadata.editorHost === 'local' && editorMetadata.editorUi === 'web' ? 'web' : editorMetadata.editorHost),
+    editorHost: () => pairingEditorHost(editorMetadata.editorHost, editorMetadata.editorUi),
     detectWorkspaceRepo: (folders) => detectRepoFullName(folders),
     readRepoOfFolder: async (uri) => {
       const text = await readGitConfigText({ uri, name: '', index: 0 });

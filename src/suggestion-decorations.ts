@@ -1,12 +1,13 @@
 // ADACEEN (VS Code): barra de estado de la sugerencia, hover y decoraciones en el editor.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { isRecommendedActionReady, primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
+import { primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
 import { ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import { buildSelectionRangeKey } from './editor-snapshot';
-import { sanitizeTutorMarkdown } from './selection-widget-text';
+import { sanitizeTutorMarkdown, UNAVAILABLE_TEXT } from './selection-widget-text';
 import { suggestionApplyModeLabel } from './suggestion-edit';
 import { buildCommandUri } from './suggestion-format';
+import { assertNeverPhase, canOfferRecommendedAction, suggestionPhase } from './suggestion-phase';
 import { truncateInline } from './suggestion-results';
 import type { ActiveSuggestionModel } from './types';
 
@@ -23,7 +24,8 @@ export function updateSuggestionStatusBar(statusBar: vscode.StatusBarItem, model
     return;
   }
 
-  if (model.loading || model.pendingMode) {
+  const phase = suggestionPhase(model);
+  if (phase === 'loading' || phase === 'pending') {
     // 0.0.34: si tarda (GPU lenta o encendiendose) se dice, en vez de un «cargando» de 2 minutos.
     statusBar.text = model.slow ? '$(sync~spin) ADACEEN: el tutor está tardando' : '$(sync~spin) ADACEEN: cargando';
     statusBar.tooltip = [
@@ -56,19 +58,29 @@ export function escapeMarkdown(value: string) {
 }
 
 export function buildInlineSuggestionLabel(model: ActiveSuggestionModel) {
-  if (model.loading) {
-    return "ADACEEN: cargando pista";
-  }
   if (model.applied) {
     return `ADACEEN aplicado: ${truncateInline(model.lineSummary || primarySuggestionText(model), 82)}`;
   }
-  if (model.blocked) {
-    return `ADACEEN tutor: ${truncateInline(primarySuggestionText(model), 82)}`;
+  const phase = suggestionPhase(model);
+  switch (phase) {
+    case 'loading':
+    case 'pending':
+      return 'ADACEEN: cargando pista';
+    case 'blocked':
+      return `ADACEEN tutor: ${truncateInline(primarySuggestionText(model), 82)}`;
+    case 'tutor_unavailable':
+      // Sin modelo no hay pista que resumir: lo mismo que dice la ventana flotante.
+      return 'ADACEEN: tutor no disponible';
+    case 'local_fallback':
+    case 'ready': {
+      const action = suggestionApplyModeLabel(model.applyMode).toLowerCase();
+      const focus = primarySuggestionText(model);
+      const scope = model.selectionLineCount ? 'seleccion' : action;
+      return `ADACEEN ${scope}: ${truncateInline(focus, 82)}`;
+    }
+    default:
+      return assertNeverPhase(phase);
   }
-  const action = suggestionApplyModeLabel(model.applyMode).toLowerCase();
-  const focus = primarySuggestionText(model);
-  const scope = model.selectionLineCount ? 'seleccion' : action;
-  return `ADACEEN ${scope}: ${truncateInline(focus, 82)}`;
 }
 
 export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
@@ -91,9 +103,14 @@ export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
     );
   }
   const openPanelUri = buildCommandUri('adaceen.openFileView');
-  if (model.blocked) {
+  const phase = suggestionPhase(model);
+  if (phase === 'blocked') {
     // Mensaje controlado del tutor: se muestra tal cual (Markdown) y sin enlace de aplicar.
     markdown.appendMarkdown(`${sanitizeTutorMarkdown(model.tutorMessage || primarySuggestionText(model))}\n\n`);
+    markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
+  } else if (phase === 'tutor_unavailable') {
+    // Sin modelo: ni accion recomendada ni «aceptar ayuda» (la ventana flotante dice lo mismo).
+    markdown.appendMarkdown(`${escapeMarkdown(UNAVAILABLE_TEXT)}\n\n`);
     markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
   } else {
     markdown.appendMarkdown(`${escapeMarkdown(primarySuggestionText(model))}\n\n`);
@@ -102,7 +119,7 @@ export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
     const applyUri = buildCommandUri('adaceen.applySuggestionCompletion', [model.applyMode, 'hover']);
     const applicationNote = suggestionApplicationNote(model);
     markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
-    if (!model.loading && !model.applied && model.source !== 'local-fallback' && isRecommendedActionReady(model)) {
+    if (canOfferRecommendedAction(model)) {
       markdown.appendMarkdown(` · [Aceptar ayuda: ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}](${applyUri})`);
     } else if (model.applied) {
       markdown.appendMarkdown(`\n\n_Ayuda aplicada. Mantengo el contexto para que puedas validar el cambio._`);
@@ -157,7 +174,9 @@ export function applySuggestionDecoration(
   const range = model.selectionLineCount > 0 && buildSelectionRangeKey(editor) === model.selectionRangeKey
     ? editor.selection
     : new vscode.Range(line.range.end, line.range.end);
-  const showPassiveLabel = model.loading || model.applied || model.source === 'local-fallback' || !!model.blocked;
+  // Sin «aceptar ayuda» que ofrecer en la linea (cargando, aplicada, bloqueada, sin modelo o pista
+  // local), la etiqueta junto a la linea dice en que esta la sugerencia.
+  const showPassiveLabel = model.applied || suggestionPhase(model) !== 'ready';
   const decoration: vscode.DecorationOptions = {
     range,
     hoverMessage: buildSuggestionHoverMarkdown(model),

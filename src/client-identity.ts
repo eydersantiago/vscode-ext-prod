@@ -20,6 +20,7 @@
  * Memento), para poder probarlo con node:test.
  */
 
+import { isEditorHost } from './backend-url';
 import type { EditorHost } from './backend-url';
 
 /** Clave historica en globalState (la creo la vista de quiz en la 0.0.26). */
@@ -38,18 +39,13 @@ export const CLIENT_VERSION_HEADER = 'x-adaceen-client-version';
 /** Donde corre el editor: local, tunnel, codespaces o remote (detectEditorHost). */
 export const EDITOR_HOST_HEADER = 'x-adaceen-editor-host';
 const CLIENT_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
-const EDITOR_HOSTS: readonly EditorHost[] = ['local', 'tunnel', 'codespaces', 'remote'];
 
 const TOKEN_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
-/** Version x.y.z del package.json, o '' si no lo es (y entonces no se manda). */
-export function cleanClientVersion(value: unknown): string {
+/** Version x.y.z del package.json, o null si no lo es (y entonces no se manda). */
+export function cleanClientVersion(value: unknown): string | null {
   const text = typeof value === 'string' ? value.trim() : '';
-  return CLIENT_VERSION_PATTERN.test(text) ? text : '';
-}
-
-export function isEditorHost(value: unknown): value is EditorHost {
-  return typeof value === 'string' && (EDITOR_HOSTS as readonly string[]).includes(value);
+  return CLIENT_VERSION_PATTERN.test(text) ? text : null;
 }
 
 export type ClientIdStore = {
@@ -99,10 +95,10 @@ export type ClientIdentityOptions = {
   editorHost?: unknown;
 };
 
-/** Lo que se acepto al activar: '' en lo que no traia un valor valido. */
-export type ClientIdentity = { clientId: string; extensionVersion: string; editorHost: EditorHost | '' };
+/** Lo que se acepto al activar: null en lo que no traia un valor valido (y no se manda). */
+export type ClientIdentity = { clientId: string; extensionVersion: string | null; editorHost: EditorHost | null };
 
-let activeIdentity: ClientIdentity = { clientId: '', extensionVersion: '', editorHost: '' };
+let activeIdentity: ClientIdentity = { clientId: '', extensionVersion: null, editorHost: null };
 
 /**
  * Se llama una vez al activar la extension, antes de cualquier llamada al backend. Devuelve lo
@@ -112,7 +108,7 @@ export function initClientIdentity(store: ClientIdStore, options: ClientIdentity
   activeIdentity = {
     clientId: getOrCreateClientId(store),
     extensionVersion: cleanClientVersion(options.extensionVersion),
-    editorHost: isEditorHost(options.editorHost) ? options.editorHost : '',
+    editorHost: isEditorHost(options.editorHost) ? options.editorHost : null,
   };
   return { ...activeIdentity };
 }

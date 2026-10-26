@@ -1,7 +1,7 @@
 // ADACEEN (VS Code): historial de sugerencias (modelo del widget, guardar y mostrar).
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { isSuggestionApplyOffered, primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
+import { primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
 import { ACTIVE_SUGGESTION_HISTORY_LIMIT, ACTIVE_SUGGESTION_HISTORY_STORAGE_KEY } from './constants';
 import type { SelectionWidgetModel } from './selection-widget-text';
 import { producedMode } from './suggestion-code';
@@ -35,7 +35,8 @@ export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): Sel
     applied: !!model.applied,
     blocked: !!model.blocked,
     tutorMessage: model.tutorMessage || '',
-    applyAllowed: isSuggestionApplyOffered(model),
+    // Solo la politica: lo que descarta la respuesta lo deriva la ventana de las otras banderas.
+    codeApplicationAllowed: model.codeApplication?.allowed !== false,
     applicationNote: suggestionApplicationNote(model),
     pendingMode: model.pendingMode || '',
     slow: !!model.slow,

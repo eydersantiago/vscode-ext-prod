@@ -2,9 +2,12 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
   detectEditorHost,
+  EDITOR_HOSTS,
   isAdaceenHealth,
+  isEditorHost,
   LOCAL_BACKEND_BASE_URL,
   needsLocalBackendProbe,
+  pairingEditorHost,
   probeLocalBackend,
   PRODUCTION_BACKEND_BASE_URL,
   resolveBackendBaseUrl,
@@ -100,5 +103,21 @@ describe('detectEditorHost', () => {
     assert.equal(detectEditorHost({ remoteName: 'codespaces', codespace: true }), 'codespaces');
     assert.equal(detectEditorHost({ remoteName: 'ssh-remote', codespace: false }), 'remote');
     assert.equal(detectEditorHost({ remoteName: 'wsl', codespace: false }), 'remote');
+  });
+
+  it('los cuatro tipos son los que acepta el backend (x-adaceen-editor-host y ?editorHost=)', () => {
+    assert.deepEqual([...EDITOR_HOSTS], ['local', 'tunnel', 'codespaces', 'remote']);
+    for (const host of EDITOR_HOSTS) {
+      assert.equal(isEditorHost(host), true, host);
+    }
+    for (const value of ['web', 'Tunnel', '', null, 3]) {
+      assert.equal(isEditorHost(value), false, String(value));
+    }
+  });
+
+  it('para el canje, vscode.dev sin tunel es «web»', () => {
+    assert.equal(pairingEditorHost('local', 'web'), 'web');
+    assert.equal(pairingEditorHost('local', 'desktop'), 'local');
+    assert.equal(pairingEditorHost('tunnel', 'web'), 'tunnel');
   });
 });

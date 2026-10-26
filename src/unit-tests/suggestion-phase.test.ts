@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { suggestionPhase, suggestionRulesOutApply } from '../suggestion-phase';
+import { canOfferRecommendedAction, responseAllowsApply, suggestionPhase } from '../suggestion-phase';
+import type { RecommendedActionInput } from '../suggestion-phase';
 import { selectionWidgetOffersApply, selectionWidgetShowsTitleActions } from '../selection-widget-text';
 import type { SelectionWidgetModel } from '../selection-widget-text';
 
@@ -35,18 +36,40 @@ describe('fase de la sugerencia (0.0.37)', () => {
     assert.equal(suggestionPhase({ source: 'backend', pendingMode: '' }), 'ready');
   });
 
-  it('bloqueada, sin modelo o pista local descartan aplicar aunque esten cargando', () => {
-    assert.equal(suggestionRulesOutApply({ source: 'backend' }), false);
-    assert.equal(suggestionRulesOutApply({ source: 'local' }), false);
-    assert.equal(suggestionRulesOutApply({ source: 'backend', blocked: true }), true);
-    assert.equal(suggestionRulesOutApply({ source: 'backend', tutorUnavailable: true, loading: true }), true);
-    assert.equal(suggestionRulesOutApply({ source: 'local-fallback' }), true);
+  it('la respuesta deja aplicar salvo bloqueada, sin modelo o pista local (aunque este cargando)', () => {
+    assert.equal(responseAllowsApply({ source: 'backend' }), true);
+    assert.equal(responseAllowsApply({ source: 'local' }), true);
+    assert.equal(responseAllowsApply({ source: 'backend', loading: true }), true);
+    assert.equal(responseAllowsApply({ source: 'backend', blocked: true }), false);
+    assert.equal(responseAllowsApply({ source: 'backend', tutorUnavailable: true, loading: true }), false);
+    assert.equal(responseAllowsApply({ source: 'local-fallback' }), false);
+  });
+
+  it('«Aceptar ayuda» (CodeLens, arreglo rapido, pista en linea, hover): lista, sin aplicar, permitida y con su codigo', () => {
+    const ready: RecommendedActionInput = { source: 'backend', applyMode: 'insert', completionText: '}', completionMode: 'insert' };
+    assert.equal(canOfferRecommendedAction(ready), true);
+    const cases: Array<[string, Partial<RecommendedActionInput>]> = [
+      ['cargando', { loading: true }],
+      ['pidiendo codigo para otra accion', { pendingMode: 'replace' }],
+      ['ya aplicada', { applied: true }],
+      ['bloqueada', { blocked: true }],
+      ['sin modelo', { tutorUnavailable: true }],
+      ['pista local', { source: 'local-fallback' }],
+      ['el docente no permite aplicar aqui', { codeApplication: { allowed: false } }],
+      ['sin codigo', { completionText: '' }],
+      ['codigo escrito para otra accion', { completionMode: 'replace' }],
+    ];
+    for (const [label, patch] of cases) {
+      assert.equal(canOfferRecommendedAction({ ...ready, ...patch }), false, label);
+    }
+    // Eliminar no necesita codigo del tutor.
+    assert.equal(canOfferRecommendedAction({ source: 'backend', applyMode: 'delete', completionText: '' }), true);
   });
 
   it('la ventana usa la misma regla: sin tutor no ofrece aplicar ni muestra botones', () => {
     assert.equal(selectionWidgetOffersApply(widget()), true);
     assert.equal(selectionWidgetShowsTitleActions(widget()), true);
-    for (const patch of [{ tutorUnavailable: true }, { blocked: true }, { source: 'local-fallback' as const }, { applyAllowed: false }]) {
+    for (const patch of [{ tutorUnavailable: true }, { blocked: true }, { source: 'local-fallback' as const }, { codeApplicationAllowed: false }]) {
       assert.equal(selectionWidgetOffersApply(widget(patch)), false, JSON.stringify(patch));
       assert.equal(selectionWidgetShowsTitleActions(widget(patch)), false, JSON.stringify(patch));
     }

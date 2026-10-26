@@ -7,11 +7,11 @@ import type { SuggestDiagnostic } from './error-signals';
 import { indexFilesInFolderOf } from './dependency-scan';
 import { formatDependenciesForPrompt, isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
-import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionReadyForMode } from './suggestion-code';
+import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { countMatches, inferSuggestionApplyMode } from './suggestion-edit';
 import { parseBackendSuggestionSections } from './suggestion-format';
-import { suggestionRulesOutApply } from './suggestion-phase';
+import { responseAllowsApply } from './suggestion-phase';
 import { createEmptyBackendSuggestionResult, normalizeBackendSuggestionResult, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, BackendSuggestionSections, SuggestionTrigger, WorkspaceProjectIndex } from './types';
 import { buildCodeOutline, buildNumberedWindow, formatOtherFilesLine, formatRelatedDeclarations, selectRelatedFiles } from './prompt-context';
@@ -619,20 +619,13 @@ export function buildBackendActiveSuggestionModel(
 }
 
 /**
- * Se ofrece aplicar codigo para este modelo: la respuesta no lo descarta (bloqueada, sin modelo
- * o pista local; la misma regla que la ventana flotante) y la politica lo permite.
+ * Se ofrece aplicar codigo para este modelo: la respuesta lo permite (no esta bloqueada, hubo
+ * modelo y no es una pista local; la misma regla que la ventana flotante) y la politica tambien.
+ * Para ofrecer «Aceptar ayuda» con la accion recomendada: canOfferRecommendedAction
+ * (src/suggestion-phase.ts), que ademas pide la sugerencia lista, sin aplicar y con su codigo.
  */
 export function isSuggestionApplyOffered(model: ActiveSuggestionModel) {
-  return !suggestionRulesOutApply(model) && model.codeApplication?.allowed !== false;
-}
-
-/**
- * La accion recomendada se puede aplicar con un clic: la politica lo permite y,
- * salvo eliminar, el tutor ya escribio el codigo para esa accion (CodeLens,
- * pista en linea y arreglo rapido solo ofrecen «Aceptar ayuda» en ese caso).
- */
-export function isRecommendedActionReady(model: ActiveSuggestionModel) {
-  return isSuggestionApplyOffered(model) && suggestionReadyForMode(model, model.applyMode || 'insert');
+  return responseAllowsApply(model) && model.codeApplication?.allowed !== false;
 }
 
 /** Nota discreta sobre la aplicacion de codigo para mostrar junto a la sugerencia. */

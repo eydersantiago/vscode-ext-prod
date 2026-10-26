@@ -210,7 +210,7 @@ export type ActiveSuggestionModel = {
   lineSuggestions: string[];
   nextSteps: string[];
   chips: string[];
-  source: 'local' | 'backend' | 'local-fallback';
+  source: SuggestionSource;
   backendError: string;
   ragSources: ActiveSuggestionRagSource[];
   ragCourseCode: string;
@@ -270,7 +270,7 @@ export type ActiveSuggestionModel = {
   /**
    * El backend respondio sin modelo (GPU apagada o sin worker: «El tutor no esta disponible»).
    * La ventana lo dice asi y no ofrece pedir codigo, que tambien fallaria; tampoco se revelan
-   * acciones ni se ofrece aplicar (suggestionRulesOutApply, src/suggestion-phase.ts).
+   * acciones ni se ofrece aplicar (suggestionPhase y responseAllowsApply, src/suggestion-phase.ts).
    */
   tutorUnavailable?: boolean;
 };
@@ -357,7 +357,11 @@ export type BackendSuggestionSettledResult =
   | { ok: true; result: BackendSuggestionResult }
   | { ok: false; error: unknown };
 
+/** La accion sobre el codigo: insertar debajo, reemplazar la seleccion o eliminarla. */
 export type SuggestionApplyMode = 'insert' | 'replace' | 'delete';
+
+/** De donde salio la sugerencia: el tutor, la pista local o la pista local porque el tutor no respondio. */
+export type SuggestionSource = 'local' | 'backend' | 'local-fallback';
 
 export type ActiveSuggestionHistoryKind = 'line' | 'file';
 

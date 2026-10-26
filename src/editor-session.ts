@@ -29,6 +29,7 @@
  * el log ids de sesion, codigos ni tokens.
  */
 
+import type { PairingEditorHost } from './backend-url';
 import { SESSION_STATUS_HEADER } from './client-identity';
 
 export const EDITOR_SESSION_SECRET_KEY = 'adaceen.editorSession';
@@ -536,12 +537,20 @@ export function describeSessionOrigin(session: Pick<ResolvedEditorSession, 'sour
   }
 }
 
+/**
+ * Lo que dice la barra de estado sin sesion. Contrato con el navegador (0.8.4): en vscode.dev la
+ * guia del tunel (readVscodeStatusBarAdaceen, browser-ext-prod/services/tunnel-entry-guide.service.js)
+ * busca un item con «ADACEEN» y «sin conectar» para decir «la extension esta, pero sin conectar
+ * a tu cuenta» y senalar este boton. Si cambia, hay que cambiar tambien esa busqueda.
+ */
+export const SESSION_STATUS_UNCONNECTED_TEXT = 'ADACEEN: sin conectar';
+
 /** Texto y tooltip de la barra de estado de la sesion. */
 export function describeSessionStatus(session: ResolvedEditorSession | null) {
   if (!session) {
     return {
       connected: false,
-      text: '$(debug-disconnect) ADACEEN: sin conectar',
+      text: `$(debug-disconnect) ${SESSION_STATUS_UNCONNECTED_TEXT}`,
       tooltip: 'VS Code no está conectado a tu cuenta de ADACEEN: tus sugerencias y métricas no quedan a tu nombre.\nClic para conectar.',
     };
   }
@@ -817,8 +826,8 @@ export type EditorSessionManagerDeps = {
   readEnv(): string | undefined;
   /** Backend ya resuelto (src/backend-url.ts). */
   backendUrl(): string;
-  /** local | tunnel | codespaces | remote | web (editorHost del canje). */
-  editorHost(): string;
+  /** local | tunnel | codespaces | remote | web (editorHost del canje, pairingEditorHost). */
+  editorHost(): PairingEditorHost;
   /**
    * Token de GitHub de VS Code: silent no pregunta nada; interactive muestra
    * «Permitir». null si no hay cuenta o el estudiante cancela. No se guarda.
