@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { decodeSourceBytes } from '../source-text';
+import { decodeSourceBytes, readWorkspaceText } from '../source-text';
 
 // Archivos leidos de sus bytes para el indice y el escaneo (0.0.36).
 
@@ -31,5 +31,31 @@ describe('un par UTF-8 por casualidad no vuelve UTF-8 un archivo de Windows-1252
       0x93, 0x53, 0xcd, 0x94, ...new TextEncoder().encode('";\n'),
     ]);
     assert.equal(decodeSourceBytes(bytes), '// línea\n#include "lógica.h"\ncout << "“SÍ”";\n');
+  });
+});
+
+describe('leer un archivo del proyecto (0.0.38)', () => {
+  const uri = { toString: () => 'file:///p/main.cpp' };
+  const fs = (size: number, bytes = new TextEncoder().encode('int main(){}')) => {
+    let reads = 0;
+    return {
+      fs: { stat: async () => ({ size }), readFile: async () => { reads += 1; return bytes; } },
+      reads: () => reads,
+    };
+  };
+
+  it('del editor si esta abierto (con lo no guardado), si no del disco', async () => {
+    const disk = fs(12);
+    assert.deepEqual(await readWorkspaceText(uri, new Map(), disk.fs, 1000), { text: 'int main(){}', languageId: '', bytes: 12 });
+    const open = new Map([['file:///p/main.cpp', { getText: () => 'int main(){ return 0; }', languageId: 'cpp' }]]);
+    const editor = fs(12);
+    assert.deepEqual(await readWorkspaceText(uri, open, editor.fs, 1000), { text: 'int main(){ return 0; }', languageId: 'cpp', bytes: 12 });
+    assert.equal(editor.reads(), 0, 'no lee el disco');
+  });
+
+  it('un archivo mas grande que el tope no se lee', async () => {
+    const big = fs(5000);
+    assert.equal(await readWorkspaceText(uri, new Map(), big.fs, 1000), null);
+    assert.equal(big.reads(), 0);
   });
 });

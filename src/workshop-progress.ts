@@ -3,7 +3,7 @@
 // La VM de editores mide cada cierto tiempo cuanto lleva cada estudiante del taller (puntos
 // hechos, si compila) y el backend lo guarda (POST /api/workspaces/progress-report). La vista
 // «Este archivo» muestra el suyo en la esquina: «35 %», con los puntos que faltan al pasar el
-// mouse. Contrato: GET /api/workspaces/my-progress[?repo=<owner/name>] ->
+// mouse. Contrato: GET /api/workspaces/my-progress[?repoFullName=<owner/name>] ->
 //   { ok: true, progress: null | { taller, titulo, percent, compiles, done, total,
 //     missing: [{ id, hu, texto }], stale, receivedAt, lastChangeAt } }
 // Con un backend anterior (404), sin sesion (401) o sin red no se muestra nada.
@@ -37,8 +37,8 @@ export type ProgressPill = {
 
 export const PROGRESS_PATH = '/api/workspaces/my-progress';
 export const MAX_TOOLTIP_POINTS = 8;
-/** Despues de compilar o guardar, a lo sumo una consulta cada 2 minutos. */
-export const PROGRESS_SAVE_THROTTLE_MS = 2 * 60_000;
+/** Despues de guardar o compilar, a lo sumo una consulta cada 2 minutos. */
+export const PROGRESS_WORK_THROTTLE_MS = 2 * 60_000;
 /** Con la vista a la vista, una consulta cada 5 minutos. */
 export const PROGRESS_POLL_MS = 5 * 60_000;
 
@@ -61,7 +61,7 @@ export function progressRepoParam(repo: string | undefined) {
 export function progressUrl(baseUrl: string, repo?: string) {
   const base = String(baseUrl || '').replace(/\/+$/, '');
   const param = progressRepoParam(repo);
-  return `${base}${PROGRESS_PATH}${param ? `?repo=${encodeURIComponent(param)}` : ''}`;
+  return `${base}${PROGRESS_PATH}${param ? `?repoFullName=${encodeURIComponent(param)}` : ''}`;
 }
 
 /**
@@ -168,6 +168,24 @@ export function buildProgressPill(progress: WorkshopProgress | null, now: Date =
 }
 
 /** ¿Toca pedir el avance despues de guardar o compilar? (a lo sumo una vez cada 2 minutos) */
-export function shouldRefreshAfterSave(lastFetchAt: number, now: number) {
-  return !lastFetchAt || now - lastFetchAt >= PROGRESS_SAVE_THROTTLE_MS;
+export function shouldRefreshAfterWork(lastFetchAt: number, now: number) {
+  return !lastFetchAt || now - lastFetchAt >= PROGRESS_WORK_THROTTLE_MS;
+}
+
+/** Programas que compilan, prueban o ejecutan un taller. */
+const BUILD_PROGRAMS = /^(?:make|mingw32-make|cmake|ninja|g\+\+(?:-\d+)?|gcc(?:-\d+)?|c\+\+|cc|clang\+?\+?(?:-\d+)?|javac|java|mvn|mvnw|gradle|gradlew|python3?|py|pytest|dotnet|node|npm|ctest)$/;
+
+/**
+ * Una orden de la terminal que compila o ejecuta el taller (make, cmake, g++, javac, mvn,
+ * python...): al terminar, el avance puede haber cambiado. Solo la primera palabra de cada orden
+ * encadenada (`cd build && make`), sin la ruta (`/usr/bin/g++`) ni `sudo`/`time`.
+ */
+export function isBuildCommandLine(commandLine: string) {
+  return String(commandLine || '')
+    .split(/&&|\|\||;|\|/)
+    .map((part) => part.trim().replace(/^(?:(?:sudo|time|env)\s+|[A-Z_][A-Z0-9_]*=\S*\s+)*/, ''))
+    .some((part) => {
+      const program = (part.split(/\s+/)[0] || '').replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
+      return BUILD_PROGRAMS.test(program) || /^\.\/[\w.-]+$/.test(part.split(/\s+/)[0] || '');
+    });
 }

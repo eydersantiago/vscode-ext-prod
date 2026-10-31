@@ -52,3 +52,37 @@ const CP1252_HIGH = [
   '€', '', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '', 'Ž', '',
   '', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '', 'ž', 'Ÿ',
 ];
+
+/** Un documento abierto en el editor: su texto (con lo no guardado) y su lenguaje. */
+export type OpenTextDocumentLike = { getText(): string; languageId: string };
+
+/** Lo que hace falta del sistema de archivos (vscode.workspace.fs, o uno simulado en las pruebas). */
+export type TextFileSystem<U> = {
+  stat(uri: U): PromiseLike<{ size: number }>;
+  readFile(uri: U): PromiseLike<Uint8Array>;
+};
+
+export type WorkspaceText = { text: string; languageId: string; bytes: number };
+
+/**
+ * El texto de un archivo del proyecto (0.0.38, el indice del tutor y «Ver diagrama» leen igual):
+ * del editor si esta abierto (con lo que no se ha guardado y su lenguaje) y si no de sus bytes
+ * (decodeSourceBytes), sin abrirlo con openTextDocument (las extensiones de C/C++ y Python
+ * analizaban cada archivo «abierto»). null si en el disco pasa de `maxBytes`. `bytes` es el
+ * tamaño en el disco.
+ */
+export async function readWorkspaceText<U extends { toString(): string }>(
+  uri: U,
+  openDocuments: ReadonlyMap<string, OpenTextDocumentLike>,
+  fs: TextFileSystem<U>,
+  maxBytes: number,
+): Promise<WorkspaceText | null> {
+  const stat = await fs.stat(uri);
+  if (stat.size > maxBytes) {
+    return null;
+  }
+  const open = openDocuments.get(uri.toString());
+  return open
+    ? { text: open.getText(), languageId: open.languageId, bytes: stat.size }
+    : { text: decodeSourceBytes(await fs.readFile(uri)), languageId: '', bytes: stat.size };
+}

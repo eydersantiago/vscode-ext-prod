@@ -11,8 +11,10 @@
 //   - «Ver panel» llevaba al quiz; ahora es «Resumen y material» (vista «Este
 //     archivo» con el resumen y el material del curso).
 
-import { assertNeverPhase, responseAllowsApply, suggestionPhase } from './suggestion-phase';
-import type { SuggestionPhase } from './suggestion-phase';
+import { GUIDE_CODE_LABEL } from './suggestion-code';
+import type { SuggestionGuide } from './suggestion-code';
+import { assertNeverPhase, resolveDisplayedCode, responseAllowsApply, suggestionPhase } from './suggestion-phase';
+import type { DisplayedCode, SuggestionPhase } from './suggestion-phase';
 import type { SuggestionApplyMode, SuggestionSource } from './types';
 
 /** La accion de la ventana: la misma que la de la sugerencia (insertar, reemplazar o eliminar). */
@@ -68,10 +70,9 @@ export type SelectionWidgetModel = {
   tutorUnavailable?: boolean;
   /**
    * Codigo del tutor que no se aplica con un clic (0.0.38): se muestra de solo lectura, como
-   * guia, con guideReason. Antes la ventana lo escondia y solo quedaba el motivo.
+   * guia, con su motivo y su causa. Antes la ventana lo escondia y solo quedaba el motivo.
    */
-  guideCode?: string;
-  guideReason?: string;
+  guide?: SuggestionGuide | null;
 };
 
 /** Comandos que puede abrir un enlace de la ventana (y ninguno mas). */
@@ -133,34 +134,21 @@ export function selectionWidgetShowsTitleActions(model: SelectionWidgetModel) {
   return suggestionPhase(model) === 'ready' && selectionWidgetOffersApply(model);
 }
 
-/** Rotulo del codigo que se muestra solo como guia (ventana flotante y vista «Este archivo»). */
-export const GUIDE_CODE_LABEL = 'Código de guía (no se aplica con un clic):';
-const GUIDE_CODE_FALLBACK_REASON = 'Este código no se puede aplicar tal cual: úsalo como guía y escríbelo tú.';
-
-function cleanCode(text: string) {
-  return String(text || '').trim() ? String(text).replace(/\r\n?/g, '\n').replace(/\n+$/, '') : '';
+/**
+ * Lo que la ventana muestra del codigo del tutor (0.0.38): la misma regla que la vista «Este
+ * archivo» (resolveDisplayedCode). La ventana guarda la politica como codeApplicationAllowed y su
+ * motivo en applicationNote.
+ */
+export function selectionWidgetCode(model: SelectionWidgetModel): DisplayedCode {
+  return resolveDisplayedCode({
+    ...model,
+    codeApplication: { allowed: model.codeApplicationAllowed !== false, reason: model.applicationNote || '' },
+  });
 }
 
-/** Lo que la ventana muestra del codigo del tutor: para aplicar, como guia, o nada. */
-export type SelectionWidgetCode =
-  | { kind: 'apply'; code: string; mode: SelectionWidgetMode }
-  | { kind: 'guide'; code: string }
-  | { kind: 'none' };
-
-/**
- * El codigo que se ve (0.0.38): el de la accion si se puede aplicar; si el docente no deja
- * aplicar, ese mismo codigo como guia; si no se pudo dejar listo para aplicar (guideCode), como
- * guia tambien. Nunca se esconde un codigo que el tutor escribio.
- */
-export function selectionWidgetCode(model: SelectionWidgetModel): SelectionWidgetCode {
-  const code = cleanCode(model.completionText);
-  if (code && model.completionMode) {
-    return selectionWidgetOffersApply(model)
-      ? { kind: 'apply', code, mode: model.completionMode }
-      : { kind: 'guide', code };
-  }
-  const guide = cleanCode(model.guideCode || '');
-  return guide ? { kind: 'guide', code: guide } : { kind: 'none' };
+/** Causas de guia que ya explican la politica del docente: la nota de la politica no se repite. */
+function guideExplainsPolicy(shown: DisplayedCode) {
+  return shown.kind === 'guide' && (shown.cause === 'policy_cut' || shown.cause === 'policy_blocked');
 }
 
 function safeFence(code: string) {
@@ -318,34 +306,27 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
       lines.push('');
     }
   } else if (shown.kind === 'guide') {
-    // 0.0.38: el codigo se ve siempre. Si no se puede aplicar tal cual (resumen «...», llaves
-    // sin cerrar, recortado) o el docente no deja aplicarlo, como guia de solo lectura.
+    // 0.0.38: el codigo se ve siempre. Si no se puede aplicar tal cual (recortado, resumen «...»,
+    // llaves sin cerrar) o el docente no deja aplicarlo, como guia de solo lectura con el motivo.
     lines.push(`_${GUIDE_CODE_LABEL}_`);
     pushCode(shown.code);
-    if (model.guideReason) {
-      lines.push(`$(info) _${escapeMarkdown(model.guideReason)}_`);
-      lines.push('');
-    }
+    lines.push(`$(info) _${escapeMarkdown(shown.reason)}_`);
+    lines.push('');
   } else {
     lines.push(`_${escapeMarkdown(model.codeRequestNote || 'El tutor no escribió código para este bloque. Puedes pedírselo con «Proponer una mejora» o «Proponer código para continuar».')}_`);
     lines.push('');
   }
 
   if (!offersApply) {
-    // El docente no permite aplicar codigo aqui: el codigo queda como guia. Si el motivo de la
-    // guia ya dice que el codigo se recorto, la nota del backend («pasaba de 5 lineas y se
-    // recorto») no lo repite.
+    // El docente no permite aplicar codigo aqui. Si la guia ya lo explica (recortado por el tope
+    // de lineas o aplicacion no permitida), la nota del backend («pasaba de 5 lineas y se
+    // recorto») no lo repite con otras palabras.
     lines.push(secondary);
-    const note = model.applicationNote || 'Usa el código como guía y escríbelo tú.';
-    if (!(shown.kind === 'guide' && model.guideReason && /recort/i.test(note))) {
+    if (!guideExplainsPolicy(shown)) {
       lines.push('');
-      lines.push(`_${escapeMarkdown(note)}_`);
+      lines.push(`_${escapeMarkdown(model.applicationNote || 'Usa el código como guía y escríbelo tú.')}_`);
     }
     return lines.join('\n');
-  }
-  if (shown.kind === 'guide' && !model.guideReason) {
-    lines.push(`_${GUIDE_CODE_FALLBACK_REASON}_`);
-    lines.push('');
   }
 
   lines.push(selectionWidgetActionLinks(model).join(' · '));

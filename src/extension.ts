@@ -45,7 +45,7 @@ import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSetti
 import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity, stableStringHash } from './workspace-index';
 import { askScanPermission, performWorkspaceScan, renderScanOutput } from './workspace-scan';
 import { buildProgressPill } from './workshop-progress';
-import { fetchMyWorkshopProgress } from './workshop-progress-client';
+import { fetchMyWorkshopProgress, registerWorkshopProgressTriggers } from './workshop-progress-client';
 import { WorkshopProgressPoller } from './workshop-progress-poller';
 
 /** /suggest-tab respondio, pero sin texto ni codigo que mostrar. */
@@ -537,7 +537,7 @@ export async function activate(context: vscode.ExtensionContext) {
       clearTimeout(dependencyTimer);
       dependencyTimer = null;
     }
-    // Con la vista oculta no se calcula nada: se calcula al mostrarla (onVisible).
+    // Con la vista oculta no se calcula nada: se calcula al mostrarla (onVisibilityChanged).
     if (!fileView?.visible) {
       return;
     }
@@ -1292,7 +1292,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const codeRequestNoteFor = (next: ActiveSuggestionModel, mode: EditorCodeAction) => {
     // Sin modelo la ventana ya explica que el tutor no esta disponible. Con codigo de guia
     // (0.0.38: resumen «...», llaves sin cerrar o recortado) la ventana lo muestra con su motivo.
-    if (suggestionReadyForMode(next, mode) || next.tutorUnavailable || next.guideCode) {
+    if (suggestionReadyForMode(next, mode) || next.tutorUnavailable || next.guide) {
       return '';
     }
     const produced = producedMode(next);
@@ -1732,14 +1732,13 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(diagram);
 
   fileView = new AdaceenFileViewProvider({
-    onVisible: () => {
-      refreshFileView();
-      void requestFileSummary(false);
-      scheduleDependencyRefresh(0);
-      workshopProgress.setVisible(true);
-    },
-    onHidden: () => {
-      workshopProgress.setVisible(false);
+    onVisibilityChanged: (visible) => {
+      workshopProgress.setVisible(visible);
+      if (visible) {
+        refreshFileView();
+        void requestFileSummary(false);
+        scheduleDependencyRefresh(0);
+      }
     },
     openDiagram: () => {
       void diagram.open('file_view');
@@ -1778,10 +1777,9 @@ export async function activate(context: vscode.ExtensionContext) {
         recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', 'file_view');
       }
     }),
-    // 0.0.38: «ADACEEN: Abrir panel» trae el panel ADACEEN (su icono) con «Este archivo».
-    vscode.commands.registerCommand('adaceen.openPanel', async () => {
-      await fileView?.reveal(false);
-    }),
+    // 0.0.38: «ADACEEN: Abrir panel» trae el panel ADACEEN (su icono) con «Este archivo»: lo mismo
+    // que el bombillo de la barra de estado (y cuenta la misma metrica).
+    vscode.commands.registerCommand('adaceen.openPanel', () => vscode.commands.executeCommand('adaceen.openFileView')),
     vscode.commands.registerCommand('adaceen.showDiagram', async () => {
       await diagram.open('command');
     }),
@@ -1997,8 +1995,6 @@ export async function activate(context: vscode.ExtensionContext) {
   connection.onDidChangeSession((_session, idChanged) => {
     if (idChanged) {
       scheduleCursorIdleSuggestionRefresh();
-      // Otra cuenta (o se conecto): su avance, aunque el backend anterior no tuviera la ruta.
-      void workshopProgress.refresh(true);
     }
   });
 
@@ -2292,8 +2288,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       clearWorkspaceProjectIndexCache();
-      // El avance del taller cambia con lo que se guarda (a lo sumo una consulta cada 2 minutos).
-      workshopProgress.noteWork();
       // Otro archivo pudo empezar (o dejar) de incluir al de la vista: «La usan» cambia. Guardar
       // el mismo archivo de la vista no cambia quien lo usa (y lo suyo se lee del editor); queda
       // anotado para cuando se vea otro archivo.
@@ -2529,23 +2523,14 @@ export async function activate(context: vscode.ExtensionContext) {
     },
   );
 
-  // Una compilacion (tarea de VS Code o comando en la terminal con integracion de shell) tambien
-  // cambia el avance; a lo sumo una consulta cada 2 minutos.
-  if (typeof vscode.tasks?.onDidEndTaskProcess === 'function') {
-    context.subscriptions.push(vscode.tasks.onDidEndTaskProcess(() => workshopProgress.noteWork()));
-  }
-  if (typeof vscode.window.onDidEndTerminalShellExecution === 'function') {
-    context.subscriptions.push(vscode.window.onDidEndTerminalShellExecution((event) => {
-      if (/\b(?:make|cmake|g\+\+|gcc|clang\+?\+?|javac|mvn|gradle|python3?|dotnet)\b/.test(event.execution.commandLine.value || '')) {
-        workshopProgress.noteWork();
-      }
-    }));
-  }
+  // 0.0.38: el avance del taller se vuelve a pedir al guardar, al compilar y al cambiar de sesion.
+  context.subscriptions.push(...registerWorkshopProgressTriggers(workshopProgress, {
+    onDidChangeSession: (listener) => connection.onDidChangeSession((_session, idChanged) => listener(idChanged)),
+  }));
 
   scheduleCursorIdleSuggestionRefresh();
   evaluateErrorSignals();
   void runWorkerCycle();
-  void workshopProgress.refresh();
 }
 
 export function deactivate() {}

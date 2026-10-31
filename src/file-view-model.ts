@@ -8,7 +8,9 @@
 import type { CourseMaterialItem } from './course-material';
 import type { ProgressPill } from './workshop-progress';
 import type { DependencyFamily, FileDependencies, FileDependencyItem } from './file-dependencies';
-import { assertNeverPhase, suggestionPhase } from './suggestion-phase';
+import { GUIDE_CODE_LABEL } from './suggestion-code';
+import type { SuggestionGuide } from './suggestion-code';
+import { assertNeverPhase, resolveDisplayedCode, suggestionPhase } from './suggestion-phase';
 import type { ActiveSuggestionModel, ActiveSuggestionRagSource } from './types';
 
 /** Resumen del archivo que hizo el tutor (file_summary), guardado por archivo. */
@@ -35,6 +37,12 @@ export type FileViewSource = {
   excerpt: string;
   supplemental: boolean;
 };
+
+/**
+ * Codigo de guia en la vista (0.0.38): el de la sugerencia (resolveDisplayedCode, la misma regla
+ * que la ventana flotante), a lo sumo 40 lineas, con el rotulo y el lenguaje para pintarlo.
+ */
+export type FileViewGuide = SuggestionGuide & { label: string; language: string };
 
 /** El archivo del editor activo (0.0.36): la vista lo muestra aunque todavia no haya sugerencia. */
 export type FileViewActiveFile = { uriString: string; fileName: string; language: string };
@@ -88,7 +96,7 @@ export type FileViewState = {
    * codigo del tutor que no se aplica con un clic (guia de solo lectura, con su motivo): la
    * ventana flotante puede estar cerrada o en otra pestaña y el codigo no se debe perder.
    */
-  suggestion: { headline: string; status: string; guide: { code: string; reason: string; language: string } | null } | null;
+  suggestion: { headline: string; status: string; guide: FileViewGuide | null } | null;
   sources: FileViewSource[];
   material: {
     status: FileViewMaterialStatus;
@@ -268,25 +276,22 @@ function suggestionStatus(model: ActiveSuggestionModel) {
 const GUIDE_MAX_LINES = 40;
 
 /**
- * Codigo de guia de la sugerencia (0.0.38): el que no se pudo dejar listo para aplicar
- * (guideCode) o, si el docente no deja aplicar, el de la accion. null si no hay, o si la
+ * Codigo de guia de la sugerencia (0.0.38), con la misma regla que la ventana flotante
+ * (resolveDisplayedCode): el que no se pudo dejar listo para aplicar o, si el docente no deja
+ * aplicar, el de la accion. null si no hay guia (el codigo se aplica desde la ventana), o si la
  * sugerencia ya se aplico o no esta lista.
  */
-export function suggestionGuide(model: ActiveSuggestionModel) {
-  if (model.applied || suggestionPhase(model) !== 'ready') {
+export function suggestionGuide(model: ActiveSuggestionModel): FileViewGuide | null {
+  const shown = resolveDisplayedCode(model);
+  if (shown.kind !== 'guide') {
     return null;
   }
-  const policyBlocks = model.codeApplication?.allowed === false;
-  const code = String(model.guideCode || (policyBlocks ? model.completionText : '') || '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/\n+$/, '');
-  if (!code.trim()) {
-    return null;
-  }
-  const lines = code.split('\n');
+  const lines = shown.code.split('\n');
   return {
-    code: lines.length > GUIDE_MAX_LINES ? `${lines.slice(0, GUIDE_MAX_LINES).join('\n')}\n…` : code,
-    reason: model.guideReason || (policyBlocks ? model.codeApplication?.reason || '' : ''),
+    code: lines.length > GUIDE_MAX_LINES ? `${lines.slice(0, GUIDE_MAX_LINES).join('\n')}\n…` : shown.code,
+    reason: shown.reason,
+    cause: shown.cause,
+    label: GUIDE_CODE_LABEL,
     language: model.language || '',
   };
 }

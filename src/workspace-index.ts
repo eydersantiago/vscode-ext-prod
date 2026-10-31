@@ -2,9 +2,9 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_INDEX_MAX_FILES, ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB, ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS, ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES, ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS } from './constants';
-import { collectJavaPackage, collectNamespaces, collectTypeReferences, dependencyFamily, parseImports } from './file-dependencies';
+import { dependencyFamily, dependencyIndexFields } from './file-dependencies';
 import { buildCodeOutline } from './prompt-context';
-import { decodeSourceBytes } from './source-text';
+import { readWorkspaceText } from './source-text';
 import { isSecretPath, scrubOutline } from './scan-privacy';
 import { resolveScanOptions } from './settings';
 import { inferActiveLanguage, pathExtension, truncateInline } from './suggestion-results';
@@ -81,20 +81,18 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
       if (isSecretPath(relativePath)) {
         continue;
       }
-      const stat = await vscode.workspace.fs.stat(uri);
-      if (stat.size > options.maxFileBytes) {
+      const read = await readWorkspaceText(uri, openDocuments, vscode.workspace.fs, options.maxFileBytes);
+      if (!read) {
         continue;
       }
-
-      const open = openDocuments.get(uri.toString());
-      const text = open ? open.getText() : decodeSourceBytes(await vscode.workspace.fs.readFile(uri));
-      const language = inferActiveLanguage(relativePath, open?.languageId || '');
+      const { text } = read;
+      const language = inferActiveLanguage(relativePath, read.languageId);
       const family = dependencyFamily(language, relativePath);
       entries.push({
         path: relativePath,
         uri: uri.toString(),
         language,
-        bytes: stat.size,
+        bytes: read.bytes,
         lines: text.length ? text.split(/\r?\n/).length : 0,
         preview: text.slice(0, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS).replace(/\s+/g, ' ').trim(),
         // Firmas para "Declaraciones de archivos relacionados" (0.0.35); en un encabezado de
@@ -104,10 +102,7 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
           members: /\.(?:h|hh|hpp|hxx)$/i.test(relativePath),
         }), relativePath),
         // Para «La usan» en el cuadro «Dependencias» (0.0.36).
-        ...(family !== 'none' ? { imports: parseImports(text, family) } : {}),
-        ...(family === 'java' || family === 'csharp' ? { typeRefs: collectTypeReferences(text, family) } : {}),
-        ...(family === 'csharp' ? { namespaces: collectNamespaces(text, family) } : {}),
-        ...(family === 'java' && collectJavaPackage(text, family) ? { javaPackage: collectJavaPackage(text, family) } : {}),
+        ...dependencyIndexFields(text, family),
       });
     } catch (error) {
       output.appendLine(`[Suggestions] No se pudo indexar ${vscode.workspace.asRelativePath(uri, false)}: ${String(error)}`);

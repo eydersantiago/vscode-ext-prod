@@ -8,6 +8,7 @@
 //   «Dependencias de tu proyecto»: los archivos del proyecto y quien incluye o importa a quien,
 //   con el archivo activo resaltado y los #include que no se encontraron.
 // Se prueba con node:test.
+import { assertNeverRelation } from './class-diagram';
 import type { ClassDiagram, DiagramClassKind, DiagramMember, DiagramRelationKind } from './class-diagram';
 import type { ProjectDependencyGraph } from './file-dependencies';
 import type { SourceClass } from './source-classes';
@@ -138,7 +139,7 @@ function relationDone(kind: DiagramRelationKind, from: SourceClass | undefined, 
       return has(from, 'fieldTypes', to.name) || has(to, 'fieldTypes', from.name)
         || has(from, 'usedTypes', to.name) || has(to, 'usedTypes', from.name);
     default:
-      return false;
+      return assertNeverRelation(kind);
   }
 }
 
@@ -222,6 +223,9 @@ export function buildDependencyGraphView(graph: ProjectDependencyGraph, activePa
     hidden: Math.max(0, graph.files.length - kept.size),
   };
 }
+
+/** Desde donde se abrio «Ver diagrama»: el value de vscode_diagram_opened. */
+export type DiagramOpenOrigin = 'file_view' | 'command';
 
 /**
  * Metadata de vscode_diagram_opened: solo cuentas de clases del diagrama (ni codigo, ni nombres

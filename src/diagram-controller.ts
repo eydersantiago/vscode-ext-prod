@@ -7,7 +7,7 @@
 import * as vscode from 'vscode';
 import type { BuildFileCache } from './dependency-scan';
 import { buildDependencyGraphView, diagramTelemetryMetadata } from './diagram-model';
-import type { DiagramViewState } from './diagram-model';
+import type { DiagramOpenOrigin, DiagramViewState } from './diagram-model';
 import { AdaceenDiagramPanel } from './diagram-panel';
 import { activePathIn, scanDiagram } from './diagram-scan';
 import type { DiagramScanResult } from './diagram-scan';
@@ -70,7 +70,7 @@ export class DiagramController implements vscode.Disposable {
   }
 
   /** Comando «ADACEEN: Ver diagrama» y boton de la vista «Este archivo». */
-  async open(origin: string) {
+  async open(origin: DiagramOpenOrigin) {
     const first = !this.panel.isOpen;
     this.panel.show();
     if (first || !this.last) {

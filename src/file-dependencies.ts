@@ -2489,6 +2489,75 @@ function firstUseLine(code: string, starts: number[], name: string, skip = -1) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Java y C#: clases que se usan sin import
+
+/** Un archivo que puede usar clases sin importarlas: lo que nombra, sus imports y su paquete. */
+type ImplicitUser = {
+  path: string;
+  family: DependencyFamily;
+  /** Nombres que usa (identificadores del codigo, o typeRefs del indice). */
+  names: Set<string>;
+  imports: ParsedImport[];
+  /** Java: su linea package ('' si no tiene). */
+  javaPackage: string;
+};
+
+/**
+ * Java y C#: ¿`user` usa sin import la clase que declara `targetPath`? Java: del mismo paquete
+ * (en cualquier carpeta de fuentes: src/main/java y src/test/java) o de la misma carpeta si no se
+ * sabe el paquete; C#: de todo el proyecto. Una clase importada de otro paquete con el mismo
+ * nombre no cuenta (el import manda).
+ */
+function usesImplicitly(user: ImplicitUser, targetPath: string, targetPackage: string) {
+  if ((user.family !== 'java' && user.family !== 'csharp') || targetPath === user.path) {
+    return false;
+  }
+  const name = stemOf(targetPath);
+  if (!/^\p{Lu}/u.test(name) || name === stemOf(user.path) || !user.names.has(name)) {
+    return false;
+  }
+  if (user.imports.some((imp) => imp.specifier.slice(imp.specifier.lastIndexOf('.') + 1) === name)) {
+    return false;
+  }
+  return user.family === 'csharp'
+    || dirnameOf(targetPath) === dirnameOf(user.path)
+    || (!!user.javaPackage && user.javaPackage === targetPackage);
+}
+
+/**
+ * Las clases del proyecto que `user` usa sin import (usesImplicitly). La usan el cuadro
+ * «Dependencias» (lo que usa el archivo activo) y el grafo de «Ver diagrama» (0.0.38: antes el
+ * grafo no las tenia y un proyecto Java de un solo paquete salia casi sin flechas).
+ */
+function implicitLocalDependencies(user: ImplicitUser, project: ProjectFiles): string[] {
+  if (user.family !== 'java' && user.family !== 'csharp') {
+    return [];
+  }
+  const candidates = user.family === 'java'
+    ? [...new Set([...(user.javaPackage ? project.javaPackages.get(user.javaPackage) || [] : []), ...project.filesInDir(dirnameOf(user.path), '.java')])]
+    : project.paths.filter((path) => path.toLowerCase().endsWith('.cs'));
+  return candidates.filter((path) => usesImplicitly(user, path, project.entries.get(path)?.javaPackage || ''));
+}
+
+/**
+ * Lo que guarda el indice de un archivo para el cuadro «Dependencias» y el grafo (0.0.38: en un
+ * solo sitio para workspace-index.ts y diagram-scan.ts): sus imports y, en Java y C#, las clases
+ * que nombra, sus espacios de nombres y su paquete.
+ */
+export function dependencyIndexFields(text: string, family: DependencyFamily): Pick<DependencyIndexFile, 'imports' | 'typeRefs' | 'namespaces' | 'javaPackage'> {
+  if (family === 'none') {
+    return {};
+  }
+  const javaPackage = family === 'java' ? collectJavaPackage(text, family) : '';
+  return {
+    imports: parseImports(text, family),
+    ...(family === 'java' || family === 'csharp' ? { typeRefs: collectTypeReferences(text, family) } : {}),
+    ...(family === 'csharp' ? { namespaces: collectNamespaces(text, family) } : {}),
+    ...(javaPackage ? { javaPackage } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Todo junto
 
 /**
@@ -2595,31 +2664,22 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
       }
     }
 
-    // Java y C#: clases del mismo paquete (o del proyecto) que se usan sin import. Una clase
-    // importada de otro paquete con el mismo nombre no cuenta (el import manda).
+    // Java y C#: clases del mismo paquete (o del proyecto) que se usan sin import
+    // (implicitLocalDependencies, la misma regla que el grafo de «Ver diagrama»).
     if (family === 'java' || family === 'csharp') {
       const code = codeOnly(text, family);
       const starts = lineStartsOf(code);
-      const own = stemOf(activePath);
       const already = new Set(result.local.map((item) => item.path));
-      const imported = new Set(imports.map((imp) => imp.specifier.slice(imp.specifier.lastIndexOf('.') + 1)));
-      // Java: el mismo paquete, en cualquier carpeta de fuentes (src/main/java y src/test/java),
-      // o la misma carpeta si no se sabe el paquete.
-      const candidates = family === 'java'
-        ? [...new Set([...(activePackage ? project.javaPackages.get(activePackage) || [] : []), ...project.filesInDir(dirnameOf(activePath), '.java')])]
-        : project.paths.filter((path) => path.toLowerCase().endsWith('.cs'));
-      for (const path of candidates) {
-        const name = stemOf(path);
-        if (path === activePath || name === own || already.has(path) || imported.has(name) || !/^\p{Lu}/u.test(name) || !identifiers.has(name)) {
-          continue;
+      const user: ImplicitUser = { path: activePath, family, names: identifiers, imports, javaPackage: activePackage };
+      for (const path of implicitLocalDependencies(user, project)) {
+        if (!already.has(path)) {
+          result.local.push({ label: stemOf(path), line: firstUseLine(code, starts, stemOf(path)), path, implicit: true });
         }
-        result.local.push({ label: name, line: firstUseLine(code, starts, name), path, implicit: true });
       }
     }
   }
 
-  // «La usan»: los archivos del proyecto cuyos imports llegan a este.
-  const activeClass = family === 'java' || family === 'csharp' ? stemOf(activePath) : '';
+  // «La usan»: los archivos del proyecto cuyos imports llegan a este (o que lo usan sin import).
   for (const file of input.files || []) {
     const path = normalizePath(file.path);
     if (path === activePath) {
@@ -2639,11 +2699,8 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
         break;
       }
     }
-    const importsOtherWithSameName = (file.imports || []).some((imp) => imp.specifier.slice(imp.specifier.lastIndexOf('.') + 1) === activeClass);
-    const samePackage = family === 'csharp'
-      || dirnameOf(path) === dirnameOf(activePath)
-      || (!!activePackage && file.javaPackage === activePackage);
-    if (line < 0 && activeClass && fileFamily === family && refs.has(activeClass) && !importsOtherWithSameName && samePackage) {
+    if (line < 0 && fileFamily === family
+      && usesImplicitly({ path, family: fileFamily, names: refs, imports: file.imports || [], javaPackage: file.javaPackage || '' }, activePath, activePackage)) {
       line = 0;
     }
     if (line >= 0) {
@@ -2728,14 +2785,17 @@ export function resolveProjectDependencyGraph(input: { files: DependencyIndexFil
     const refs = new Set(file.typeRefs || []);
     const options: ResolveOptions = { uses: (name) => refs.has(name), hints: true, ownPackage: file.javaPackage };
     const missingHere = new Set<string>();
+    const addEdge = (to: string) => {
+      const key = `${path}\n${to}`;
+      if (!edgeKeys.has(key)) {
+        edgeKeys.add(key);
+        graph.edges.push({ from: path, to });
+      }
+    };
     for (const imp of (file.imports || []).slice(0, 300)) {
       for (const item of resolveImport(imp, path, family, project, options)) {
         if (item.type === 'local' && item.path && item.path !== path) {
-          const key = `${path}\n${item.path}`;
-          if (!edgeKeys.has(key)) {
-            edgeKeys.add(key);
-            graph.edges.push({ from: path, to: item.path });
-          }
+          addEdge(item.path);
         } else if (item.type === 'library') {
           const entry = libraries.get(item.label) || { label: item.label, description: item.description || '', users: new Set<string>() };
           entry.users.add(path);
@@ -2746,6 +2806,9 @@ export function resolveProjectDependencyGraph(input: { files: DependencyIndexFil
         }
       }
     }
+    // Java y C#: las clases del mismo paquete (o del proyecto) que usa sin import.
+    const user: ImplicitUser = { path, family, names: refs, imports: file.imports || [], javaPackage: file.javaPackage || '' };
+    implicitLocalDependencies(user, project).forEach(addEdge);
   }
   graph.libraries = [...libraries.values()]
     .map((entry) => ({ label: entry.label, description: entry.description, count: entry.users.size }))

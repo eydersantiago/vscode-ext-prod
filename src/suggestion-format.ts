@@ -1,6 +1,7 @@
 // ADACEEN (VS Code): secciones de la respuesta, fuentes RAG en Markdown y URIs de comando.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import { ragViewerUrl } from './rag-viewer-url';
+import { unwrapEmphasisLine } from './suggestion-code';
 import { resolveCurrentBackendBaseUrl, toOptionalString } from './settings';
 import { uniqueCompactStrings } from './suggestion-results';
 import type { ActiveSuggestionRagSource, BackendSuggestionScope, BackendSuggestionSections } from './types';
@@ -10,11 +11,12 @@ export function getBackendSuggestionScopeLabel(scope: BackendSuggestionScope) {
 }
 
 export function cleanBackendSuggestionLine(value: string) {
-  return value
+  // 0.0.38: una nota en cursiva del backend (`_..._`) se lee como texto, sin los guiones bajos.
+  return unwrapEmphasisLine(value
     .replace(/^\s*(?:[-*]|\d+[.)])\s+/g, '')
     .replace(/^#+\s*/g, '')
     .replace(/\*\*/g, '')
-    .trim();
+    .trim());
 }
 
 export function parseBackendSuggestionSections(output: string): BackendSuggestionSections {

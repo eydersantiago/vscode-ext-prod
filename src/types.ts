@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import type { BackendUrlSource } from './backend-url';
 import type { DiagnosticsSummary } from './error-signals';
 import type { ParsedImport } from './file-dependencies';
+import type { CodeCutSummary, CodeTruncation, SuggestionGuide } from './suggestion-code';
 
 export type ScanMode = 'auto' | 'local' | 'codespace' | 'all';
 
@@ -143,6 +144,12 @@ export type SuggestionCodeApplication = {
   requireConfirmation: boolean;
   countsAsHint: boolean;
   reason: string;
+  /** Codigo de la politica (CODE_APPLICATION_REASON_CODES); '' con un backend que no lo manda. */
+  reasonCode: string;
+  /** El guardarrail recorto el codigo (0.0.38): applicable, guide o '' (sin recorte). */
+  truncation: CodeTruncation;
+  /** Cuanto del codigo quedo, si se recorto (0.0.38). */
+  cut?: CodeCutSummary;
 };
 
 export type ActiveSuggestionRagSource = {
@@ -268,13 +275,12 @@ export type ActiveSuggestionModel = {
   /** Aviso sobre el codigo propuesto (p. ej. una version mejorada que quita casi todo el bloque). */
   proposalWarning?: string;
   /**
-   * Codigo del tutor que no se puede aplicar tal cual (0.0.38): un resumen «...» que no se pudo
-   * completar, llaves sin cerrar o un bloque que el backend recorto. Se muestra de solo lectura,
-   * como guia, con guideReason; completionText queda vacio, asi que nada lo aplica.
+   * Codigo del tutor que no se puede aplicar tal cual (0.0.38): recortado por el tope de lineas
+   * del docente, un resumen «...» que no se pudo completar o llaves sin cerrar. Se muestra de solo
+   * lectura, como guia, con su motivo y su causa; completionText queda vacio, asi que nada lo
+   * aplica (resolveDisplayedCode en suggestion-phase.ts decide que se ve).
    */
-  guideCode?: string;
-  /** Por que guideCode no se aplica con un clic. */
-  guideReason?: string;
+  guide?: SuggestionGuide | null;
   /**
    * El backend respondio sin modelo (GPU apagada o sin worker: «El tutor no esta disponible»).
    * La ventana lo dice asi y no ofrece pedir codigo, que tambien fallaria; tampoco se revelan

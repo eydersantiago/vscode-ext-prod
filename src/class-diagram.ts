@@ -567,7 +567,7 @@ export function pickDiagramFile(paths: string[]): string | null {
   return [...candidates].sort((left, right) => score(right) - score(left) || left.localeCompare(right))[0];
 }
 
-/** ¿El texto parece un diagrama de clases (y no de secuencia o de casos de uso)? */
-export function looksLikeClassDiagram(diagram: ClassDiagram) {
-  return diagram.classes.length > 0;
+/** Para los switch sobre el tipo de relacion: si aparece uno nuevo, tsc obliga a decidir como se dibuja. */
+export function assertNeverRelation(kind: never): never {
+  throw new Error(`Relacion de diagrama sin manejar: ${String(kind)}`);
 }

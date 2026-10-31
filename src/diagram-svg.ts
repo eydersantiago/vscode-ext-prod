@@ -9,6 +9,7 @@
 import { edgeBetween, layeredLayout } from './diagram-layout';
 import type { LayoutBox, LayoutEdge, LayoutNode } from './diagram-layout';
 import type { DependencyGraphView, DiagramClassView, DiagramRelationView, DiagramTargetView } from './diagram-model';
+import { assertNeverRelation } from './class-diagram';
 import type { DiagramRelationKind } from './class-diagram';
 
 const CHAR_WIDTH_NAME = 7.6;
@@ -59,7 +60,19 @@ const RELATION_TEXT: Record<DiagramRelationKind, string> = {
   link: 'se relaciona con',
 };
 
-type ClassBoxText = { stereotype: string; name: string; status: string; missing: string[] };
+type ClassBoxText = {
+  stereotype: string;
+  name: string;
+  status: string;
+  /** Lo que falta que entra en la caja (a lo sumo MAX_MISSING_LINES). */
+  missing: string[];
+  /** Cuantos miembros que faltan no entran (se dice «y N más»). */
+  hiddenMissingCount: number;
+};
+
+function moreText(count: number) {
+  return `y ${count} más`;
+}
 
 function classBoxText(item: DiagramClassView): ClassBoxText {
   const status = item.status === 'partial'
@@ -68,34 +81,43 @@ function classBoxText(item: DiagramClassView): ClassBoxText {
       ? 'falta'
       : 'hecha';
   const missing = item.missingMembers.slice(0, MAX_MISSING_LINES);
-  const rest = item.missingMembers.length - missing.length;
   return {
     stereotype: KIND_TEXT[item.kind] || '',
     name: item.name,
     status,
-    missing: rest > 0 ? [...missing, `y ${rest} más`] : missing,
+    missing,
+    hiddenMissingCount: item.missingMembers.length - missing.length,
   };
 }
 
 function classBoxSize(text: ClassBoxText) {
+  const lines = text.missing.length + (text.hiddenMissingCount ? 1 : 0);
   const longest = Math.max(
     text.name.length * CHAR_WIDTH_NAME,
     text.status.length * CHAR_WIDTH_SMALL,
     ...text.missing.map((line) => (line.length + 2) * CHAR_WIDTH_SMALL),
+    text.hiddenMissingCount ? moreText(text.hiddenMissingCount).length * CHAR_WIDTH_SMALL : 0,
   );
   const width = Math.round(clamp(longest + 30, 130, 240));
-  const height = 10 + (text.stereotype ? 14 : 0) + 20 + 16 + (text.missing.length ? 4 + text.missing.length * 15 : 0) + 8;
+  const height = 10 + (text.stereotype ? 14 : 0) + 20 + 16 + (lines ? 4 + lines * 15 : 0) + 8;
   return { width, height };
 }
 
 /** Caja de arriba y de abajo de cada relacion: el padre y el todo arriba. */
 function layoutEdgeOf(relation: DiagramRelationView): LayoutEdge {
-  switch (relation.kind) {
+  const kind = relation.kind;
+  switch (kind) {
     case 'inheritance':
     case 'realization':
       return { from: relation.to, to: relation.from };
-    default:
+    case 'composition':
+    case 'aggregation':
+    case 'association':
+    case 'dependency':
+    case 'link':
       return { from: relation.from, to: relation.to };
+    default:
+      return assertNeverRelation(kind);
   }
 }
 
@@ -109,13 +131,20 @@ function orientedSegment(relation: DiagramRelationView, boxes: Map<string, Layou
   if (!from || !to) {
     return null;
   }
-  switch (relation.kind) {
+  const kind = relation.kind;
+  switch (kind) {
     case 'composition':
     case 'aggregation':
       // Del lado de la parte hacia el todo: el rombo queda en el todo.
       return { segment: edgeBetween(to, from), startName: relation.to, endName: relation.from };
-    default:
+    case 'inheritance':
+    case 'realization':
+    case 'association':
+    case 'dependency':
+    case 'link':
       return { segment: edgeBetween(from, to), startName: relation.from, endName: relation.to };
+    default:
+      return assertNeverRelation(kind);
   }
 }
 
@@ -210,8 +239,11 @@ function renderClassBox(item: DiagramClassView, box: LayoutBox, text: ClassBoxTe
     const max = Math.floor((box.width - 30) / CHAR_WIDTH_SMALL);
     for (const line of text.missing) {
       y += 15;
-      const more = /^y \d+ más$/.test(line);
-      parts.push(`<text class="member${more ? ' more' : ''}" x="16" y="${y}">${escapeXml(more ? line : `– ${fitText(line, max)}`)}</text>`);
+      parts.push(`<text class="member" x="16" y="${y}">${escapeXml(`– ${fitText(line, max)}`)}</text>`);
+    }
+    if (text.hiddenMissingCount) {
+      y += 15;
+      parts.push(`<text class="member more" x="16" y="${y}">${escapeXml(moreText(text.hiddenMissingCount))}</text>`);
     }
   }
   parts.push('</g>');

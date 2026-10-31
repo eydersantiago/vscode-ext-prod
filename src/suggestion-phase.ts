@@ -7,8 +7,8 @@
 // orden: una sugerencia sin modelo podia revelar acciones y contar
 // vscode_suggestion_actions_revealed mientras la ventana decia «El tutor no esta disponible».
 // Ahora todas preguntan aqui.
-import { suggestionReadyForMode } from './suggestion-code';
-import type { CodeReadiness } from './suggestion-code';
+import { POLICY_BLOCKED_REASON, suggestionReadyForMode } from './suggestion-code';
+import type { CodeReadiness, SuggestionGuide } from './suggestion-code';
 import type { SuggestionApplyMode, SuggestionSource } from './types';
 
 /**
@@ -78,6 +78,49 @@ export function canOfferRecommendedAction(model: RecommendedActionInput): boolea
     && responseAllowsApply(model)
     && model.codeApplication?.allowed !== false
     && suggestionReadyForMode(model, model.applyMode || 'insert');
+}
+
+/** Lo que la ventana flotante y la vista «Este archivo» muestran del codigo del tutor. */
+export type DisplayedCode =
+  | { kind: 'apply'; code: string; mode: SuggestionApplyMode }
+  | ({ kind: 'guide' } & SuggestionGuide)
+  | { kind: 'none' };
+
+/** Lo que necesita resolveDisplayedCode (lo tienen el modelo de la sugerencia y el de la ventana). */
+export type DisplayedCodeInput = SuggestionPhaseInput & {
+  applied?: boolean;
+  completionText?: string;
+  completionMode?: SuggestionApplyMode | '';
+  guide?: SuggestionGuide | null;
+  /** Lo que dice la politica del docente para aplicar en este archivo (allowed false: no deja). */
+  codeApplication?: { allowed?: boolean; reason?: string } | null;
+};
+
+function cleanCode(text: string | undefined) {
+  const value = String(text || '');
+  return value.trim() ? value.replace(/\r\n?/g, '\n').replace(/\n+$/, '') : '';
+}
+
+/**
+ * El codigo que se ve (0.0.38), decidido en un solo sitio: el de la accion si se puede aplicar;
+ * el mismo como guia si el docente no deja aplicar (policy_blocked); la guia que dejo
+ * prepareSuggestionCode (recortado, resumen «...» o llaves sin cerrar); o nada. Nunca se esconde
+ * un codigo que el tutor escribio, y una guia nunca se ofrece para aplicar. Solo con la sugerencia
+ * lista y sin aplicar (en las demas fases no se muestra codigo).
+ */
+export function resolveDisplayedCode(model: DisplayedCodeInput): DisplayedCode {
+  if (model.applied || suggestionPhase(model) !== 'ready') {
+    return { kind: 'none' };
+  }
+  const code = cleanCode(model.completionText);
+  if (code && model.completionMode) {
+    // En la fase lista la respuesta deja aplicar (responseAllowsApply); falta la politica.
+    return model.codeApplication?.allowed === false
+      ? { kind: 'guide', code, reason: model.codeApplication.reason || POLICY_BLOCKED_REASON, cause: 'policy_blocked' }
+      : { kind: 'apply', code, mode: model.completionMode };
+  }
+  const guide = model.guide ? cleanCode(model.guide.code) : '';
+  return guide && model.guide ? { kind: 'guide', code: guide, reason: model.guide.reason, cause: model.guide.cause } : { kind: 'none' };
 }
 
 /** Para los switch sobre la fase: si aparece una fase nueva, tsc obliga a decidir que mostrar. */

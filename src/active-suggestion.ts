@@ -7,7 +7,7 @@ import type { SuggestDiagnostic } from './error-signals';
 import { indexFilesInFolderOf } from './dependency-scan';
 import { formatDependenciesForPrompt, isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
-import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionCodeFields } from './suggestion-code';
+import { DROPS_MOST_WARNING, extractSuggestionCode, guideForPolicy, policyTruncation, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, stripCutNoteAfterFence, toSuggestionCodeFields } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { countMatches, inferSuggestionApplyMode } from './suggestion-edit';
 import { parseBackendSuggestionSections } from './suggestion-format';
@@ -498,8 +498,11 @@ export function buildBackendActiveSuggestionModel(
   }
 
   const emptySections: BackendSuggestionSections = { resumen: [], sugerencias: [], riesgos: [], all: [] };
-  const focusSections = focusOutputText
-    ? parseBackendSuggestionSections(focusOutputText)
+  // 0.0.38: la nota del backend despues de un bloque recortado no se repite como texto de la
+  // sugerencia: la ventana y la vista dicen lo mismo con code_application.cut.
+  const focusDisplayText = focusResult.codeApplication?.cut ? stripCutNoteAfterFence(focusOutputText) : focusOutputText;
+  const focusSections = focusDisplayText
+    ? parseBackendSuggestionSections(focusDisplayText)
     : emptySections;
   // Sin resumen de archivo del backend se usa la pista local del archivo,
   // nunca las secciones del foco: eso hacia que el "resumen de archivo"
@@ -520,21 +523,26 @@ export function buildBackendActiveSuggestionModel(
   });
   // 0.0.35: sin el margen numerado si el modelo lo copio, con los «...» completados con el
   // bloque original y sin ofrecer con un clic una version que deja llaves sin cerrar.
+  // 0.0.38: si el backend recorto el codigo por el tope del docente lo dice code_application
+  // (truncation, cut); con un backend anterior, la marca vieja dentro del codigo.
   const prepared = prepareSuggestionCode(resolvedModes.completionText, {
     selection: snapshot.selectionText,
     mode: resolvedModes.completionMode,
     language: snapshot.language,
+    truncation: policyTruncation(primaryResult.codeApplication),
+    cut: primaryResult.codeApplication?.cut,
   });
-  // 0.0.38: el codigo que no se puede aplicar tal cual se muestra como guia (guideCode) en vez
-  // de borrarse: la accion queda sin codigo y nada lo aplica por error.
-  const modes = { ...resolvedModes, ...suggestionCodeFields(prepared, resolvedModes) };
+  // El codigo que no se puede aplicar tal cual se muestra como guia en vez de borrarse: la accion
+  // queda sin codigo y nada lo aplica por error.
+  const codeFields = toSuggestionCodeFields(prepared, resolvedModes.completionMode);
+  const modes = { ...resolvedModes, ...codeFields, guide: guideForPolicy(codeFields.guide, primaryResult.codeApplication) };
   // Una respuesta que es solo la linea "Aplicar:" y el bloque de codigo tambien vale
   // (antes se descartaba por no traer texto fuera del bloque).
   const codeOnlyHeadline = modes.completionText
     ? (modes.completionMode === 'replace'
       ? 'El tutor propone una versión mejorada del bloque.'
       : 'El tutor propone código para continuar.')
-    : modes.guideCode
+    : modes.guide
       // Escribio codigo, pero no se puede aplicar tal cual: se muestra como guia con el motivo.
       ? 'El tutor propone código para usar como guía.'
       : '';
@@ -573,8 +581,8 @@ export function buildBackendActiveSuggestionModel(
     ...localFallback,
     title: `ADACEEN en ${snapshot.fileName}`,
     summary: scope === 'cursor'
-      ? focusSummary || fileOverview || truncateInline(focusOutputText.replace(/\s+/g, ' '), 260)
-      : fileOverview || truncateInline(focusOutputText.replace(/\s+/g, ' '), 260),
+      ? focusSummary || fileOverview || truncateInline(focusDisplayText.replace(/\s+/g, ' '), 260)
+      : fileOverview || truncateInline(focusDisplayText.replace(/\s+/g, ' '), 260),
     fileOverview,
     lineSummary: scope === 'cursor'
       ? focusSummary || localFallback.lineSummary || `Foco actual: linea ${snapshot.line}.`
@@ -611,7 +619,7 @@ export function buildBackendActiveSuggestionModel(
       modes.completionMode === 'replace' && replacementDropsMostOfSelection(snapshot.selectionText, completionText) ? DROPS_MOST_WARNING : '',
       ...prepared.notes,
     ].filter(Boolean).join(' '),
-    ...(modes.guideCode ? { guideCode: modes.guideCode, guideReason: modes.guideReason } : {}),
+    ...(modes.guide ? { guide: modes.guide } : {}),
     // Respuesta sin modelo para el foco: antes la ventana decia ademas «El tutor respondio sin
     // codigo para esto», como si hubiera respondido (piloto del 25/10/2026).
     ...(primaryResult === focusResult && focusResult.degraded ? { tutorUnavailable: true } : {}),

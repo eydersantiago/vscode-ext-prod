@@ -1,3 +1,4 @@
+import { CODE_APPLICATION_REASON_CODES } from './suggestion-code';
 import type { TelemetryEventInput } from './telemetry';
 
 /**
@@ -166,11 +167,11 @@ export function isOfflineApplicationAllowed(linesChanged: number, offlineMaxLine
 
 export function defaultBlockedReason(reasonCode: string) {
   switch (reasonCode) {
-    case 'code_application_disabled':
+    case CODE_APPLICATION_REASON_CODES.disabled:
       return 'Tu docente desactivó la aplicación de código del tutor. Usa la sugerencia como guía y escríbela tú.';
-    case 'code_application_too_large':
+    case CODE_APPLICATION_REASON_CODES.tooLarge:
       return 'El cambio es demasiado grande para aplicarlo automáticamente. Úsalo como guía y escríbelo tú.';
-    case 'code_application_limit_reached':
+    case CODE_APPLICATION_REASON_CODES.limitReached:
       return 'Ya usaste todas las aplicaciones de código permitidas en este archivo. Sigue con la sugerencia como guía.';
     default:
       return 'Tu docente no permite aplicar este cambio automáticamente. Úsalo como guía.';

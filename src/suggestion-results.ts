@@ -1,6 +1,7 @@
 // ADACEEN (VS Code): utilidades de texto y normalizacion de la respuesta del backend para la sugerencia activa.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import { asRecord, toOptionalString } from './settings';
+import { normalizeCodeCutSummary, normalizeCodeTruncation } from './suggestion-code';
 import type { ActiveSuggestionRagSource, BackendSuggestionResult, BackendSuggestionSettledResult, SuggestionCodeApplication, SuggestionPolicyApplied } from './types';
 
 export function pathBaseName(value: string) {
@@ -217,6 +218,7 @@ export function normalizeSuggestionCodeApplication(value: unknown): SuggestionCo
     return null;
   }
   const data = asRecord(value);
+  const cut = normalizeCodeCutSummary(data.cut);
   return {
     allowed: data.allowed !== false,
     maxLines: optionalFiniteInt(data.maxLines),
@@ -224,6 +226,9 @@ export function normalizeSuggestionCodeApplication(value: unknown): SuggestionCo
     requireConfirmation: data.requireConfirmation === true,
     countsAsHint: data.countsAsHint === true,
     reason: (toOptionalString(data.reason) || '').slice(0, 600),
+    reasonCode: (toOptionalString(data.reasonCode) || '').slice(0, 80),
+    truncation: normalizeCodeTruncation(data.truncation),
+    ...(cut ? { cut } : {}),
   };
 }
 

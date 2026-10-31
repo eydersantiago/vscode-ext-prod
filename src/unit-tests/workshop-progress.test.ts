@@ -5,7 +5,8 @@ import {
   formatReportTime,
   normalizeWorkshopProgress,
   progressUrl,
-  shouldRefreshAfterSave,
+  isBuildCommandLine,
+  shouldRefreshAfterWork,
 } from '../workshop-progress';
 import { WorkshopProgressPoller } from '../workshop-progress-poller';
 
@@ -79,16 +80,25 @@ describe('avance del taller (0.0.38)', () => {
     assert.equal(formatReportTime('no es fecha', NOW), '');
   });
 
-  it('la URL lleva el repositorio solo si tiene forma owner/name', () => {
-    assert.equal(progressUrl('https://api.x/', 'eyder/banco-taller'), 'https://api.x/api/workspaces/my-progress?repo=eyder%2Fbanco-taller');
+  it('la URL lleva el repositorio (repoFullName, como las demas rutas) solo si tiene forma owner/name', () => {
+    assert.equal(progressUrl('https://api.x/', 'eyder/banco-taller'), 'https://api.x/api/workspaces/my-progress?repoFullName=eyder%2Fbanco-taller');
     assert.equal(progressUrl('https://api.x', '../../etc'), 'https://api.x/api/workspaces/my-progress');
     assert.equal(progressUrl('https://api.x', undefined), 'https://api.x/api/workspaces/my-progress');
   });
 
-  it('despues de guardar, a lo sumo una consulta cada 2 minutos', () => {
-    assert.equal(shouldRefreshAfterSave(0, 1000), true);
-    assert.equal(shouldRefreshAfterSave(1000, 1000 + 60_000), false);
-    assert.equal(shouldRefreshAfterSave(1000, 1000 + 120_000), true);
+  it('despues de guardar o compilar, a lo sumo una consulta cada 2 minutos', () => {
+    assert.equal(shouldRefreshAfterWork(0, 1000), true);
+    assert.equal(shouldRefreshAfterWork(1000, 1000 + 60_000), false);
+    assert.equal(shouldRefreshAfterWork(1000, 1000 + 120_000), true);
+  });
+
+  it('que ordenes de la terminal cuentan como compilar o ejecutar el taller', () => {
+    for (const line of ['make', 'cd build && make -j4', 'g++ -o banco src/*.cpp', '/usr/bin/g++-12 main.cpp', 'cmake --build build', 'python3 main.py', 'javac *.java', './banco', 'sudo make install', 'CXX=clang++ make', 'mvn test', 'dotnet run']) {
+      assert.equal(isBuildCommandLine(line), true, line);
+    }
+    for (const line of ['ls -la', 'git status', 'cat Makefile', 'echo make', 'cd src', '', 'code .']) {
+      assert.equal(isBuildCommandLine(line), false, line);
+    }
   });
 });
 
@@ -140,15 +150,15 @@ describe('cuando se pide el avance (0.0.38)', () => {
       return response();
     });
     await poller.refresh();
-    poller.noteWork();
+    poller.refreshAfterWork();
     assert.equal(calls, 1);
     advance(121_000);
-    poller.noteWork();
+    poller.refreshAfterWork();
     await poller.refresh();
     assert.equal(calls, 2);
   });
 
-  it('un backend anterior (404) o sin sesion esconde la pastilla sin avisar y no insiste', async () => {
+  it('un backend anterior (404) esconde la pastilla sin avisar y no insiste; otra sesion si pregunta', async () => {
     let calls = 0;
     let fail: number | null = null;
     const { poller, changes, advance } = setup(async () => {
@@ -166,12 +176,34 @@ describe('cuando se pide el avance (0.0.38)', () => {
     advance(130_000);
     await poller.refresh();
     assert.equal(calls, 2, 'tras un 404 espera 30 minutos');
-    await poller.refresh(true);
-    assert.equal(calls, 3, 'salvo que se pida a proposito');
+    await poller.refetchForNewSession();
+    assert.equal(calls, 3, 'con otra sesion pregunta igual');
     fail = null;
     advance(31 * 60_000);
     await poller.refresh();
     assert.deepEqual(changes, [35, null, 35]);
+  });
+
+  it('al cambiar de sesion se esconde enseguida y lo que llega de la sesion anterior se descarta', async () => {
+    const pending: Array<(value: unknown) => void> = [];
+    const { poller, changes, advance } = setup(() => new Promise((resolve) => pending.push(resolve)));
+    const first = poller.refresh();
+    pending[0](response({ percent: 35 }));
+    await first;
+    assert.deepEqual(changes, [35]);
+
+    // Consulta en curso con la sesion de Ana; Beto inicia sesion en el mismo equipo mientras tanto.
+    advance(30_000);
+    const anaFetch = poller.refresh();
+    const betoFetch = poller.refetchForNewSession();
+    assert.equal(pending.length, 3, 'la consulta de la sesion nueva sale aunque haya otra en curso');
+    assert.deepEqual(changes, [35, null], 'lo de Ana se esconde enseguida');
+    pending[2](response({ percent: 80 }));
+    await betoFetch;
+    pending[1](response({ percent: 35 }));
+    await anaFetch;
+    assert.deepEqual(changes, [35, null, 80], 'la respuesta de la sesion de Ana se ignora aunque llegue despues');
+    assert.equal(poller.progress?.percent, 80);
   });
 
   it('sin sesion no hay avance', async () => {

@@ -22,9 +22,13 @@ import type { FileViewDependencyGroup, FileViewState } from './file-view-model';
 
 const DEPENDENCY_GROUPS: readonly FileViewDependencyGroup[] = ['local', 'libraries', 'missing', 'dependents'];
 
-type FileViewHandlers = {
-  /** La vista se mostro u oculto (para pedir el resumen o el material si faltan). */
-  onVisible: () => void;
+export type FileViewHandlers = {
+  /**
+   * La vista se mostro (visible: true; tambien al crearse) o se oculto o se cerro (false). Al
+   * mostrarse se pide lo que falte (resumen, dependencias, avance del taller); oculta, el avance
+   * deja de pedirse cada 5 minutos.
+   */
+  onVisibilityChanged: (visible: boolean) => void;
   openSource: (index: number) => void;
   openMaterial: (id: string) => void;
   loadMaterial: () => void;
@@ -34,8 +38,6 @@ type FileViewHandlers = {
   openDependency: (group: FileViewDependencyGroup, index: number, key: string, id: string) => void;
   /** Boton «Ver diagrama» (0.0.38): abre el panel con el diagrama del taller y las dependencias. */
   openDiagram: () => void;
-  /** La vista se oculto (0.0.38: deja de pedir el avance del taller cada 5 minutos). */
-  onHidden?: () => void;
 };
 
 function randomId(length: number) {
@@ -123,22 +125,16 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     this.applyDescription();
     this.disposables.push(
       webviewView.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message)),
-      webviewView.onDidChangeVisibility(() => {
-        if (webviewView.visible) {
-          this.handlers.onVisible();
-        } else {
-          this.handlers.onHidden?.();
-        }
-      }),
+      webviewView.onDidChangeVisibility(() => this.handlers.onVisibilityChanged(webviewView.visible)),
       webviewView.onDidDispose(() => {
         if (this.view === webviewView) {
           this.view = null;
           this.ready = false;
         }
-        this.handlers.onHidden?.();
+        this.handlers.onVisibilityChanged(false);
       }),
     );
-    this.handlers.onVisible();
+    this.handlers.onVisibilityChanged(true);
   }
 
   dispose() {
@@ -506,7 +502,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
           el('div', { class: 'now' }, [
             el('div', { text: state.suggestion.headline }),
             // 0.0.38: el codigo que no se aplica con un clic se ve aqui tambien, de solo lectura.
-            guide ? el('p', { class: 'label guide-label', text: 'Código de guía (no se aplica con un clic):' }) : null,
+            guide ? el('p', { class: 'label guide-label', text: guide.label }) : null,
             guide ? el('pre', { class: 'guide', 'aria-label': 'Código de guía del tutor' }, [el('code', { text: guide.code })]) : null,
             guide && guide.reason ? el('p', { class: 'muted guide-reason', text: guide.reason }) : null,
             el('div', { class: 'status', text: state.suggestion.status + (guide ? ' · escríbelo tú usando la guía' : ' · el código y las acciones están junto a tu selección') }),

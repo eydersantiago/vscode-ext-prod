@@ -3,7 +3,7 @@ import * as assert from 'node:assert/strict';
 import { convertIndentStyle, deepestIndentBelow, indentUnitFromOptions, insertTargetIndent, opensBlock, placeInsertedCode, reindentCode, stripLineGutters } from '../code-reindent';
 import {
   ELISION_EXPANDED_NOTE,
-  ELISION_UNUSABLE_REASON,
+  ELISION_GUIDE_REASON,
   UNBALANCED_REASON,
   bracketBalance,
   expandElisions,
@@ -195,13 +195,12 @@ describe('resumenes "..." del modelo (0.0.35)', () => {
 
   it('prepareSuggestionCode completa en un reemplazo y avisa; sin anclas no se aplica', () => {
     const ready = prepareSuggestionCode('double area() const {\n  // ...\n  return a;\n}', { selection: ORIGINAL, mode: 'replace', language: 'cpp' });
-    assert.equal(ready.unusable, false);
+    assert.equal(ready.guideOnly, null);
     assert.deepEqual(ready.notes, [ELISION_EXPANDED_NOTE]);
     assert.match(ready.code, /double a = base \* altura;/);
 
     const lost = prepareSuggestionCode('void otra() {\n  // ...\n  imprimir();\n}', { selection: ORIGINAL, mode: 'replace', language: 'cpp' });
-    assert.equal(lost.unusable, true);
-    assert.equal(lost.unusableReason, ELISION_UNUSABLE_REASON);
+    assert.deepEqual(lost.guideOnly, { cause: 'elision', reason: ELISION_GUIDE_REASON });
   });
 });
 
@@ -264,22 +263,21 @@ describe('llaves y parentesis (0.0.35)', () => {
   it('una version del bloque que deja llaves abiertas no se aplica con un clic', () => {
     const broken = '  double area() const {\n    if (base < 0) {\n      return 0;\n    double a = base * altura;\n    return a;\n  }';
     const result = prepareSuggestionCode(broken, { selection: ORIGINAL, mode: 'replace', language: 'cpp' });
-    assert.equal(result.unusable, true);
-    assert.equal(result.unusableReason, UNBALANCED_REASON);
+    assert.deepEqual(result.guideOnly, { cause: 'unbalanced', reason: UNBALANCED_REASON });
     const fine = prepareSuggestionCode(ORIGINAL.replace('cout << a;', 'cout << a << endl;'), { selection: ORIGINAL, mode: 'replace', language: 'cpp' });
-    assert.equal(fine.unusable, false);
+    assert.equal(fine.guideOnly, null);
     assert.deepEqual(fine.notes, []);
   });
 
   it('si el bloque seleccionado ya estaba incompleto, su version tampoco se bloquea', () => {
     const partial = '  double area() const {\n    return base * altura;';
     const result = prepareSuggestionCode('  double area() const {\n    return base * altura / 2;', { selection: partial, mode: 'replace', language: 'cpp' });
-    assert.equal(result.unusable, false);
+    assert.equal(result.guideOnly, null);
   });
 
   it('al insertar solo avisa', () => {
     const result = prepareSuggestionCode('if (total > 0) {\n  cout << total;', { mode: 'insert', language: 'cpp' });
-    assert.equal(result.unusable, false);
+    assert.equal(result.guideOnly, null);
     assert.equal(result.notes.length, 1);
   });
 });

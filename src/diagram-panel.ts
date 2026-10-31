@@ -7,7 +7,8 @@
 // CSP estricta (nonce): funciona igual en vscode.dev. Los colores salen del tema de VS Code.
 import * as vscode from 'vscode';
 import type { DiagramViewState } from './diagram-model';
-import { renderClassDiagramSvg, renderDependencyGraphSvg } from './diagram-svg';
+import { buildDiagramPanelMessage, parseDiagramPanelInboundMessage } from './diagram-panel-messages';
+import type { DiagramPanelMessage } from './diagram-panel-messages';
 
 export type DiagramPanelHandlers = {
   /** «Actualizar»: volver a leer el proyecto. */
@@ -20,52 +21,8 @@ export type DiagramPanelHandlers = {
   onVisible: () => void;
 };
 
-/** Lo que viaja al script del panel: los SVG ya armados y los textos. */
-export type DiagramPanelMessage = {
-  type: 'state';
-  status: DiagramViewState['status'];
-  updatedLabel: string;
-  target: null | {
-    title: string;
-    sourcePath: string;
-    counts: { classes: number; done: number; partial: number; missing: number };
-    relationsDone: number;
-    relationsTotal: number;
-    svg: string;
-  };
-  targetNote: string;
-  files: {
-    svg: string;
-    hidden: number;
-    libraries: Array<{ label: string; description: string; count: number }>;
-    missing: Array<{ from: string; label: string; hint: string }>;
-  };
-};
-
-export function buildDiagramPanelMessage(state: DiagramViewState): DiagramPanelMessage {
-  const target = state.target;
-  return {
-    type: 'state',
-    status: state.status,
-    updatedLabel: state.updatedLabel,
-    target: target
-      ? {
-        title: target.title,
-        sourcePath: target.sourcePath,
-        counts: target.counts,
-        relationsDone: target.relations.filter((item) => item.done).length,
-        relationsTotal: target.relations.length,
-        svg: renderClassDiagramSvg(target),
-      }
-      : null,
-    targetNote: state.targetNote,
-    files: {
-      svg: renderDependencyGraphSvg(state.dependencies),
-      hidden: state.dependencies.hidden,
-      libraries: state.dependencies.libraries.slice(0, 20),
-      missing: state.dependencies.missing.slice(0, 20).map((item) => ({ from: item.from, label: item.label, hint: item.hint })),
-    },
-  };
+function assertNeverMessage(message: never): never {
+  throw new Error(`Mensaje del panel sin manejar: ${JSON.stringify(message)}`);
 }
 
 function randomNonce() {
@@ -83,7 +40,6 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
   private panel: vscode.WebviewPanel | null = null;
   private ready = false;
   private pending: DiagramPanelMessage | null = null;
-  private readonly disposables: vscode.Disposable[] = [];
 
   constructor(private readonly handlers: DiagramPanelHandlers) {}
 
@@ -110,7 +66,9 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
     this.panel = panel;
     this.ready = false;
     panel.webview.html = this.renderShell(randomNonce());
-    this.disposables.push(
+    // Los oyentes son de este panel: se desechan con el (antes se juntaban con cada panel nuevo).
+    const listeners: vscode.Disposable[] = [];
+    listeners.push(
       panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message)),
       panel.onDidChangeViewState((event) => {
         if (event.webviewPanel.visible) {
@@ -118,6 +76,7 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
         }
       }),
       panel.onDidDispose(() => {
+        listeners.splice(0).forEach((item) => item.dispose());
         if (this.panel === panel) {
           this.panel = null;
           this.ready = false;
@@ -138,14 +97,17 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
   }
 
   dispose() {
+    // Cerrar el panel desecha sus oyentes (onDidDispose).
     this.panel?.dispose();
     this.panel = null;
-    this.disposables.splice(0).forEach((item) => item.dispose());
   }
 
-  private handleMessage(message: unknown) {
-    const data = message && typeof message === 'object' ? message as Record<string, unknown> : {};
-    switch (data.type) {
+  private handleMessage(raw: unknown) {
+    const message = parseDiagramPanelInboundMessage(raw);
+    if (!message) {
+      return;
+    }
+    switch (message.type) {
       case 'ready':
         // Lo leido mientras el panel cargaba (quien lo abre ya pidio leer el proyecto).
         this.ready = true;
@@ -158,13 +120,10 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
         this.handlers.refresh();
         return;
       case 'open':
-        if (typeof data.path === 'string' && data.path && data.path.length <= 1000) {
-          const line = Number.isInteger(data.line) && Number(data.line) > 0 ? Number(data.line) : 0;
-          this.handlers.open(data.path, line);
-        }
+        this.handlers.open(message.path, message.line);
         return;
       default:
-        return;
+        assertNeverMessage(message);
     }
   }
 

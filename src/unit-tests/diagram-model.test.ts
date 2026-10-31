@@ -4,7 +4,7 @@ import { parsePlantUmlClassDiagram } from '../class-diagram';
 import { buildDependencyGraphView, compareDiagram, diagramTelemetryMetadata, hasDiagramMember } from '../diagram-model';
 import { clipToBox, layeredLayout } from '../diagram-layout';
 import { escapeXml, renderClassDiagramSvg, renderDependencyGraphSvg } from '../diagram-svg';
-import { dependencyFamily, parseImports, resolveProjectDependencyGraph } from '../file-dependencies';
+import { dependencyFamily, dependencyIndexFields, parseImports, resolveFileDependencies, resolveProjectDependencyGraph } from '../file-dependencies';
 import { extractSourceClasses, mergeSourceClasses } from '../source-classes';
 import { BANCO_PUML } from './diagram-fixtures';
 
@@ -236,6 +236,55 @@ describe('grafo de archivos del proyecto (0.0.38)', () => {
     assert.equal(small.nodes.length, 2);
     assert.equal(small.hidden, 2);
     assert.ok(small.nodes.some((node) => node.path === 'src/Cuenta.h'), 'el activo siempre entra');
+  });
+});
+
+describe('grafo de archivos Java y C#: clases sin import (0.0.38)', () => {
+  function javaFile(path: string, text: string) {
+    return { path, language: 'java', ...dependencyIndexFields(text, 'java') };
+  }
+
+  it('Java de un solo paquete: las clases que se usan sin import tambien son flechas', () => {
+    const graph = resolveProjectDependencyGraph({
+      files: [
+        javaFile('src/banco/Main.java', 'package banco;\npublic class Main { public static void main(String[] a) { Banco b = new Banco(); } }'),
+        javaFile('src/banco/Banco.java', 'package banco;\nimport java.util.List;\npublic class Banco { private List<Cuenta> cuentas; private Cliente titular; }'),
+        javaFile('src/banco/Cuenta.java', 'package banco;\npublic class Cuenta { private long saldo; }'),
+        javaFile('src/banco/Cliente.java', 'package banco;\npublic class Cliente { }'),
+        javaFile('src/otro/Cuenta.java', 'package otro;\npublic class Cuenta { }'),
+        javaFile('src/reportes/Reporte.java', 'package reportes;\nimport otro.Cuenta;\npublic class Reporte { Cuenta c; Banco b; }'),
+      ],
+    });
+    assert.deepEqual(graph.edges.map((edge) => `${edge.from} -> ${edge.to}`).sort(), [
+      'src/banco/Banco.java -> src/banco/Cliente.java',
+      'src/banco/Banco.java -> src/banco/Cuenta.java',
+      'src/banco/Main.java -> src/banco/Banco.java',
+      'src/reportes/Reporte.java -> src/otro/Cuenta.java',
+    ], 'Reporte importa otro.Cuenta (el import manda) y Banco es de otro paquete sin import');
+    assert.deepEqual(graph.libraries.map((item) => item.label), ['java.util.List']);
+  });
+
+  it('el cuadro «Dependencias» y el grafo dicen lo mismo', () => {
+    const files = [
+      javaFile('src/banco/Banco.java', 'package banco;\npublic class Banco { private Cuenta cuenta; }'),
+      javaFile('src/banco/Cuenta.java', 'package banco;\npublic class Cuenta { }'),
+    ];
+    const deps = resolveFileDependencies({ activePath: 'src/banco/Banco.java', language: 'java', text: 'package banco;\npublic class Banco { private Cuenta cuenta; }', files });
+    assert.deepEqual(deps.local.map((item) => item.path), ['src/banco/Cuenta.java']);
+    const dependents = resolveFileDependencies({ activePath: 'src/banco/Cuenta.java', language: 'java', text: 'package banco;\npublic class Cuenta { }', files });
+    assert.deepEqual(dependents.dependents.map((item) => item.path), ['src/banco/Banco.java']);
+    assert.deepEqual(resolveProjectDependencyGraph({ files }).edges, [{ from: 'src/banco/Banco.java', to: 'src/banco/Cuenta.java' }]);
+  });
+
+  it('C#: las clases del proyecto, sin using', () => {
+    const csFile = (path: string, text: string) => ({ path, language: 'csharp', ...dependencyIndexFields(text, 'csharp') });
+    const graph = resolveProjectDependencyGraph({
+      files: [
+        csFile('Banco.cs', 'namespace Taller { public class Banco { private List<Cuenta> cuentas; } }'),
+        csFile('Modelo/Cuenta.cs', 'namespace Taller.Modelo { public class Cuenta { } }'),
+      ],
+    });
+    assert.deepEqual(graph.edges, [{ from: 'Banco.cs', to: 'Modelo/Cuenta.cs' }]);
   });
 });
 
