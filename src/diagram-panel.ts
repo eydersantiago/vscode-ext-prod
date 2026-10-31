@@ -7,18 +7,18 @@
 // CSP estricta (nonce): funciona igual en vscode.dev. Los colores salen del tema de VS Code.
 import * as vscode from 'vscode';
 import type { DiagramViewState } from './diagram-model';
-import { buildDiagramPanelMessage, parseDiagramPanelInboundMessage } from './diagram-panel-messages';
-import type { DiagramPanelMessage } from './diagram-panel-messages';
+import { buildDiagramPanelStateMessage, parseDiagramPanelInboundMessage } from './diagram-panel-messages';
+import type { DiagramPanelStateMessage } from './diagram-panel-messages';
 
 export type DiagramPanelHandlers = {
   /** «Actualizar»: volver a leer el proyecto. */
   refresh: () => void;
   /** Clic en una clase o un archivo: abrir esa ruta relativa (solo las que mando la extension). */
-  open: (path: string, line: number) => void;
+  open: (path: string, line: number | null) => void;
   /** El panel se cerro. */
   onDispose: () => void;
-  /** El panel volvio a verse (estaba detras de otra pestaña). */
-  onVisible: () => void;
+  /** El panel volvio a verse (true, estaba detras de otra pestaña) o quedo detras de otra (false). */
+  onVisibilityChanged: (visible: boolean) => void;
 };
 
 function assertNeverMessage(message: never): never {
@@ -39,7 +39,7 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
 
   private panel: vscode.WebviewPanel | null = null;
   private ready = false;
-  private pending: DiagramPanelMessage | null = null;
+  private pending: DiagramPanelStateMessage | null = null;
 
   constructor(private readonly handlers: DiagramPanelHandlers) {}
 
@@ -70,11 +70,7 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
     const listeners: vscode.Disposable[] = [];
     listeners.push(
       panel.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message)),
-      panel.onDidChangeViewState((event) => {
-        if (event.webviewPanel.visible) {
-          this.handlers.onVisible();
-        }
-      }),
+      panel.onDidChangeViewState((event) => this.handlers.onVisibilityChanged(event.webviewPanel.visible)),
       panel.onDidDispose(() => {
         listeners.splice(0).forEach((item) => item.dispose());
         if (this.panel === panel) {
@@ -88,7 +84,7 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
   }
 
   update(state: DiagramViewState) {
-    const message = buildDiagramPanelMessage(state);
+    const message = buildDiagramPanelStateMessage(state);
     if (this.panel && this.ready) {
       void this.panel.webview.postMessage(message);
       return;
@@ -165,7 +161,9 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
     .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
     .dot.done { background: var(--done); } .dot.partial { background: var(--partial); } .dot.missing { background: var(--missing); }
     .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; font-size: 11px; color: var(--muted); }
-    .legend svg { vertical-align: middle; margin-right: 4px; }
+    .legend-relations { flex-basis: 100%; }
+    svg.diagram.legend { display: block; margin: 4px 0 0; }
+    svg .legend-text { fill: var(--muted); font-size: 11px; }
     .canvas { overflow: auto; max-width: 100%; padding: 4px 0; }
     .empty { margin: 0; color: var(--muted); }
     ul.plain { margin: 6px 0 0; padding-left: 18px; }
@@ -251,32 +249,15 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
         });
         return document.importNode(svg, true);
       }
-      function legendShape(kind) {
-        var ns = 'http://www.w3.org/2000/svg';
-        var svg = document.createElementNS(ns, 'svg');
-        svg.setAttribute('width', '28'); svg.setAttribute('height', '12'); svg.setAttribute('aria-hidden', 'true');
-        var line = document.createElementNS(ns, 'line');
-        line.setAttribute('x1', '1'); line.setAttribute('y1', '6'); line.setAttribute('x2', kind === 'arrow' ? '26' : '18'); line.setAttribute('y2', '6');
-        line.setAttribute('stroke', 'currentColor'); line.setAttribute('stroke-width', '1.3');
-        if (kind === 'dashed') line.setAttribute('stroke-dasharray', '4 3');
-        svg.appendChild(line);
-        var path = document.createElementNS(ns, 'path');
-        var shapes = { tri: 'M18 1 L27 6 L18 11 Z', fill: 'M14 6 L20 2 L27 6 L20 10 Z', dia: 'M14 6 L20 2 L27 6 L20 10 Z', arrow: 'M20 2 L26 6 L20 10', dashed: 'M18 1 L27 6 L18 11 Z' };
-        path.setAttribute('d', shapes[kind]);
-        path.setAttribute('stroke', 'currentColor');
-        path.setAttribute('fill', kind === 'fill' ? 'currentColor' : 'none');
-        svg.appendChild(path);
-        return svg;
-      }
-      function legend() {
+      // Estado de las clases en HTML; las relaciones, con el SVG que dibuja la extension
+      // (renderRelationLegendSvg: el mismo trazo que en el diagrama).
+      function legend(target) {
+        var relations = svgNode(target.legendSvg);
         return el('div', { class: 'legend' }, [
           el('span', {}, [el('span', { class: 'dot done' }), ' hecha']),
           el('span', {}, [el('span', { class: 'dot partial' }), ' a medias (le falta lo de la lista)']),
           el('span', {}, [el('span', { class: 'dot missing' }), ' falta']),
-          el('span', {}, [legendShape('tri'), 'hereda de']),
-          el('span', {}, [legendShape('fill'), 'se compone de']),
-          el('span', {}, [legendShape('dia'), 'agrupa a']),
-          el('span', {}, [legendShape('arrow'), 'usa a']),
+          relations ? el('span', { class: 'legend-relations' }, [relations]) : null,
           el('span', {}, ['Verde: la relación ya está en tu código. Clic en una clase: abre su archivo.']),
         ]);
       }
@@ -301,7 +282,7 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
             target.relationsTotal ? el('span', { class: 'stat', text: target.relationsDone + ' de ' + target.relationsTotal + ' relaciones en tu código' }) : null,
           ]),
           svg ? el('div', { class: 'canvas' }, [svg]) : el('p', { class: 'empty', text: 'No se pudo dibujar el diagrama.' }),
-          legend(),
+          legend(target),
         ].filter(Boolean));
       }
       function renderFiles(message) {
@@ -341,7 +322,7 @@ export class AdaceenDiagramPanel implements vscode.Disposable {
       function openFrom(target) {
         var node = target && target.closest ? target.closest('[data-open]') : null;
         if (!node) return;
-        vscode.postMessage({ type: 'open', path: node.getAttribute('data-open'), line: Number(node.getAttribute('data-line')) || 0 });
+        vscode.postMessage({ type: 'open', path: node.getAttribute('data-open'), line: Number(node.getAttribute('data-line')) || null });
       }
       document.addEventListener('click', function (event) { openFrom(event.target); });
       document.addEventListener('keydown', function (event) {

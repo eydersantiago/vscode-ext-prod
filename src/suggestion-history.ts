@@ -1,52 +1,12 @@
 // ADACEEN (VS Code): historial de sugerencias (modelo del widget, guardar y mostrar).
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
+import { primarySuggestionText } from './selection-widget-model';
 import { ACTIVE_SUGGESTION_HISTORY_LIMIT, ACTIVE_SUGGESTION_HISTORY_STORAGE_KEY } from './constants';
-import type { SelectionWidgetModel } from './selection-widget-text';
-import { producedMode } from './suggestion-code';
 import { toOptionalString } from './settings';
 import { firstPositiveNumber, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveSuggestionHistoryEntry, ActiveSuggestionHistoryKind, ActiveSuggestionModel } from './types';
 import { stableStringHash } from './workspace-index';
-
-/**
- * Lo que el widget flotante necesita del modelo activo. Solo tiene sentido
- * cuando hay seleccion: sin seleccion no hay a que anclarlo.
- */
-export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): SelectionWidgetModel | null {
-  if (!model || model.selectionLineCount <= 0) {
-    return null;
-  }
-  const startLine = Math.max(1, Number(model.line) || 1);
-  const endLine = startLine + Math.max(0, model.selectionLineCount - 1);
-  return {
-    uriString: model.uriString,
-    startLine,
-    endLine,
-    headline: model.lineSummary || primarySuggestionText(model) || '',
-    completionText: model.completionText || '',
-    completionMode: producedMode(model),
-    language: model.language || '',
-    recommendedMode: model.applyMode || 'insert',
-    source: model.source,
-    ragCourseCode: model.ragCourseCode || '',
-    loading: !!model.loading,
-    applied: !!model.applied,
-    blocked: !!model.blocked,
-    tutorMessage: model.tutorMessage || '',
-    // Solo la politica: lo que descarta la respuesta lo deriva la ventana de las otras banderas.
-    codeApplicationAllowed: model.codeApplication?.allowed !== false,
-    applicationNote: suggestionApplicationNote(model),
-    pendingMode: model.pendingMode || '',
-    slow: !!model.slow,
-    codeRequestNote: model.codeRequestNote || '',
-    requestedAction: model.requestedAction || '',
-    proposalWarning: model.proposalWarning || '',
-    tutorUnavailable: !!model.tutorUnavailable,
-    guide: model.guide || null,
-  };
-}
 
 export function normalizeHistoryText(value: string, max = 360) {
   return truncateInline(value.replace(/\s+/g, ' ').trim(), max);

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { parseFileViewInboundMessage } from './file-view-messages';
 import type { FileViewDependencyGroup, FileViewState } from './file-view-model';
 
 /**
@@ -20,7 +21,9 @@ import type { FileViewDependencyGroup, FileViewState } from './file-view-model';
  * quien lo usa. El clic manda (grupo, posicion); extension.ts busca el elemento.
  */
 
-const DEPENDENCY_GROUPS: readonly FileViewDependencyGroup[] = ['local', 'libraries', 'missing', 'dependents'];
+function assertNeverMessage(message: never): never {
+  throw new Error(`Mensaje de la vista sin manejar: ${JSON.stringify(message)}`);
+}
 
 export type FileViewHandlers = {
   /**
@@ -54,7 +57,8 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
 
   private view: vscode.WebviewView | null = null;
   private readonly nonce = randomId(32);
-  private readonly disposables: vscode.Disposable[] = [];
+  /** Los oyentes de la vista que esta abierta (VS Code puede cerrarla y crear otra). */
+  private viewListeners: vscode.Disposable[] = [];
   private state: FileViewState | null = null;
   /** Lo ultimo que se mando: el mismo estado otra vez no se manda (volver a pintar quita el foco). */
   private posted = '';
@@ -87,8 +91,9 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
    */
   private applyDescription() {
     if (this.view) {
+      // Una pastilla apagada (falta vincular GitHub o abrir la carpeta) se queda adentro: discreta.
       const pill = this.state?.progress;
-      this.view.description = pill ? `${pill.text}${pill.stale ? ' · desactualizado' : ''}` : undefined;
+      this.view.description = pill && pill.level !== 'muted' ? `${pill.text}${pill.stale ? ' · desactualizado' : ''}` : undefined;
     }
   }
 
@@ -123,10 +128,15 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this.renderShell();
     this.applyDescription();
-    this.disposables.push(
+    // Los oyentes son de esta vista: se desechan cuando VS Code la cierra (y la vuelve a crear al
+    // mostrarla otra vez); antes se juntaban en el proveedor con cada vista nueva.
+    this.viewListeners.forEach((item) => item.dispose());
+    const listeners: vscode.Disposable[] = [];
+    listeners.push(
       webviewView.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message)),
       webviewView.onDidChangeVisibility(() => this.handlers.onVisibilityChanged(webviewView.visible)),
       webviewView.onDidDispose(() => {
+        listeners.splice(0).forEach((item) => item.dispose());
         if (this.view === webviewView) {
           this.view = null;
           this.ready = false;
@@ -134,16 +144,20 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         this.handlers.onVisibilityChanged(false);
       }),
     );
+    this.viewListeners = listeners;
     this.handlers.onVisibilityChanged(true);
   }
 
   dispose() {
-    this.disposables.forEach((item) => item.dispose());
+    this.viewListeners.splice(0).forEach((item) => item.dispose());
   }
 
-  private handleMessage(message: unknown) {
-    const data = message && typeof message === 'object' ? message as Record<string, unknown> : {};
-    switch (data.type) {
+  private handleMessage(raw: unknown) {
+    const message = parseFileViewInboundMessage(raw);
+    if (!message) {
+      return;
+    }
+    switch (message.type) {
       case 'ready':
         this.ready = true;
         if (this.state && this.view) {
@@ -156,14 +170,10 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         }
         return;
       case 'openSource':
-        if (Number.isInteger(data.index)) {
-          this.handlers.openSource(Number(data.index));
-        }
+        this.handlers.openSource(message.index);
         return;
       case 'openMaterial':
-        if (typeof data.id === 'string' && data.id) {
-          this.handlers.openMaterial(data.id);
-        }
+        this.handlers.openMaterial(message.id);
         return;
       case 'loadMaterial':
         this.handlers.loadMaterial();
@@ -178,17 +188,10 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         this.handlers.openDiagram();
         return;
       case 'openDependency':
-        if (typeof data.group === 'string' && (DEPENDENCY_GROUPS as readonly string[]).includes(data.group) && Number.isInteger(data.index) && Number(data.index) >= 0) {
-          this.handlers.openDependency(
-            data.group as FileViewDependencyGroup,
-            Number(data.index),
-            typeof data.key === 'string' ? data.key : '',
-            typeof data.id === 'string' ? data.id.slice(0, 2000) : '',
-          );
-        }
+        this.handlers.openDependency(message.group, message.index, message.key, message.id);
         return;
       default:
-        return;
+        assertNeverMessage(message);
     }
   }
 
@@ -218,6 +221,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     .pill.mid { box-shadow: inset 3px 0 0 var(--vscode-charts-yellow, #cca700); }
     .pill.high { box-shadow: inset 3px 0 0 var(--vscode-charts-green, #89d185); }
     .pill.stale { opacity: .75; border-style: dashed; border-color: var(--vscode-descriptionForeground); }
+    .pill.muted { font-weight: 500; color: var(--vscode-descriptionForeground); background: transparent; border-color: var(--line); border-style: dashed; }
     .pill .stale-tag { font-weight: 500; color: inherit; opacity: .9; }
     .file { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; margin-bottom: var(--gap); }
     .file-tag { grid-row: span 2; min-width: 34px; height: 34px; padding: 0 6px; box-sizing: border-box; display: grid; place-items: center;

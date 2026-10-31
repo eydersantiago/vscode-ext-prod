@@ -4,7 +4,8 @@ import * as vscode from 'vscode';
 import type { BackendUrlSource } from './backend-url';
 import type { DiagnosticsSummary } from './error-signals';
 import type { ParsedImport } from './file-dependencies';
-import type { CodeCutSummary, CodeTruncation, SuggestionGuide } from './suggestion-code';
+import type { SuggestionCodeApplication } from './code-application';
+import type { SuggestionGuide } from './suggestion-guide';
 
 export type ScanMode = 'auto' | 'local' | 'codespace' | 'all';
 
@@ -136,21 +137,8 @@ export type SuggestionPolicyApplied = {
   reasonCode: string;
 };
 
-/** code_application de /suggest-tab. */
-export type SuggestionCodeApplication = {
-  allowed: boolean;
-  maxLines: number | null;
-  remaining: number | null;
-  requireConfirmation: boolean;
-  countsAsHint: boolean;
-  reason: string;
-  /** Codigo de la politica (CODE_APPLICATION_REASON_CODES); '' con un backend que no lo manda. */
-  reasonCode: string;
-  /** El guardarrail recorto el codigo (0.0.38): applicable, guide o '' (sin recorte). */
-  truncation: CodeTruncation;
-  /** Cuanto del codigo quedo, si se recorto (0.0.38). */
-  cut?: CodeCutSummary;
-};
+/** code_application de /suggest-tab: el contrato y su lectura estan en code-application.ts (0.0.38). */
+export type { SuggestionCodeApplication } from './code-application';
 
 export type ActiveSuggestionRagSource = {
   id: string;

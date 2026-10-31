@@ -48,9 +48,18 @@ export function selectFolders(
   return { mode: resolvedMode, folders, notes };
 }
 
+/** Tope de la busqueda cuando hay que filtrar antes de contar (accept): solo para no traer un disco entero. */
+const FILTERED_SEARCH_CEILING = 20_000;
+
+/**
+ * Los archivos de las carpetas que cumplen los globs del escaneo, a lo sumo options.maxFiles. Con
+ * `accept` (0.0.38), el filtro va antes del tope: los archivos que no cumplen no le quitan lugar a
+ * los que si (p. ej. los de una carpeta del proyecto abierta adentro de otra).
+ */
 export async function findWorkspaceFiles(
   folders: readonly vscode.WorkspaceFolder[],
   options: ScanOptions,
+  accept?: (uri: vscode.Uri, folder: vscode.WorkspaceFolder) => boolean,
 ): Promise<vscode.Uri[]> {
   const found = new Map<string, vscode.Uri>();
 
@@ -65,13 +74,18 @@ export async function findWorkspaceFiles(
     const files = await vscode.workspace.findFiles(
       includePattern,
       excludePattern,
-      remaining,
+      accept ? FILTERED_SEARCH_CEILING : remaining,
     );
 
+    let added = 0;
     for (const fileUri of files) {
+      if (added >= remaining) {
+        break;
+      }
       const key = fileUri.toString();
-      if (!found.has(key)) {
+      if (!found.has(key) && (!accept || accept(fileUri, folder))) {
         found.set(key, fileUri);
+        added += 1;
       }
     }
   }

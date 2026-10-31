@@ -2,23 +2,17 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_INDEX_MAX_FILES, ACTIVE_SUGGESTION_INDEX_MAX_FILE_KB, ACTIVE_SUGGESTION_INDEX_OUTLINE_CHARS, ACTIVE_SUGGESTION_INDEX_PREVIEW_CHARS, ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES, ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS } from './constants';
-import { dependencyFamily, dependencyIndexFields } from './file-dependencies';
+import { readIndexedSource, workspaceRelativePath } from './dependency-scan';
 import { buildCodeOutline } from './prompt-context';
-import { readWorkspaceText } from './source-text';
 import { isSecretPath, scrubOutline } from './scan-privacy';
 import { resolveScanOptions } from './settings';
-import { inferActiveLanguage, pathExtension, truncateInline } from './suggestion-results';
+import { pathExtension, truncateInline } from './suggestion-results';
 import type { ActiveEditorSnapshot, WorkspaceProjectIndex, WorkspaceProjectIndexEntry } from './types';
+import { stableStringHash } from './values';
 import { findWorkspaceFiles, selectFolders } from './workspace-scan';
 
-export function stableStringHash(value: string) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16);
-}
+// 0.0.38: vive en values.ts (sin vscode); se re-exporta para quien ya lo importaba de aqui.
+export { stableStringHash };
 
 export function getWorkspaceProjectIndexIdentity() {
   const folders = vscode.workspace.workspaceFolders || [];
@@ -76,18 +70,16 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
 
   for (const uri of files) {
     try {
-      const relativePath = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+      const relativePath = workspaceRelativePath(uri);
       // Archivos de claves y credenciales: tampoco su nombre va en el contexto (como en el escaneo).
       if (isSecretPath(relativePath)) {
         continue;
       }
-      const read = await readWorkspaceText(uri, openDocuments, vscode.workspace.fs, options.maxFileBytes);
+      const read = await readIndexedSource(uri, openDocuments, options.maxFileBytes);
       if (!read) {
         continue;
       }
-      const { text } = read;
-      const language = inferActiveLanguage(relativePath, read.languageId);
-      const family = dependencyFamily(language, relativePath);
+      const { text, language } = read;
       entries.push({
         path: relativePath,
         uri: uri.toString(),
@@ -102,10 +94,10 @@ export async function buildWorkspaceProjectIndexForSuggestions(output: vscode.Ou
           members: /\.(?:h|hh|hpp|hxx)$/i.test(relativePath),
         }), relativePath),
         // Para «La usan» en el cuadro «Dependencias» (0.0.36).
-        ...dependencyIndexFields(text, family),
+        ...read.fields,
       });
     } catch (error) {
-      output.appendLine(`[Suggestions] No se pudo indexar ${vscode.workspace.asRelativePath(uri, false)}: ${String(error)}`);
+      output.appendLine(`[Suggestions] No se pudo indexar ${workspaceRelativePath(uri)}: ${String(error)}`);
     }
   }
 

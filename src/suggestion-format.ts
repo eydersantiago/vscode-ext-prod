@@ -1,13 +1,43 @@
 // ADACEEN (VS Code): secciones de la respuesta, fuentes RAG en Markdown y URIs de comando.
-// Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
+// Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports). Desde la
+// 0.0.38 sin importar vscode (la URL del backend la pasa quien llama), para probarlo con node:test.
 import { ragViewerUrl } from './rag-viewer-url';
-import { unwrapEmphasisLine } from './suggestion-code';
-import { resolveCurrentBackendBaseUrl, toOptionalString } from './settings';
 import { uniqueCompactStrings } from './suggestion-results';
+import { toOptionalString } from './values';
 import type { ActiveSuggestionRagSource, BackendSuggestionScope, BackendSuggestionSections } from './types';
 
 export function getBackendSuggestionScopeLabel(scope: BackendSuggestionScope) {
   return scope === 'cursor' ? 'cursor' : 'archivo';
+}
+
+// --- Notas del backend fuera del bloque (0.0.38) ---------------------------------------------
+
+/**
+ * Sin la nota que el backend pone justo despues de un bloque recortado («```» y despues una
+ * linea en cursiva, renderCutFence): la extension dice lo mismo con code_application.cut
+ * (codeCutNote, policyCutReason) y, si no, la nota salia otra vez como texto de la sugerencia.
+ * Solo se llama cuando cut viene; solo quita una linea en cursiva sola, la primera despues del
+ * primer bloque.
+ */
+export function stripCutNoteAfterFence(output: string) {
+  const text = String(output || '').replace(/\r\n?/g, '\n');
+  const fence = /```[^\n]*\n[\s\S]*?\n```[^\n]*(?:\n|$)/.exec(text);
+  if (!fence) {
+    return text;
+  }
+  const after = fence.index + fence[0].length;
+  const note = /^[ \t]*\n?[ \t]*(?:_[^_\n][^\n]*_|\*[^*\n][^\n]*\*)[ \t]*(?:\n|$)/.exec(text.slice(after));
+  return note ? text.slice(0, after) + text.slice(after + note[0].length) : text;
+}
+
+/**
+ * Una linea entera en cursiva de Markdown (`_texto_` o `*texto*`) como texto: el backend pone sus
+ * notas asi fuera del bloque, y la ventana escapa el Markdown (se veian los guiones bajos).
+ */
+export function unwrapEmphasisLine(line: string) {
+  const text = String(line || '').trim();
+  const match = /^_([^_].*[^_]|[^_])_$/.exec(text) || /^\*([^*].*[^*]|[^*])\*$/.exec(text);
+  return match ? match[1].trim() : text;
 }
 
 export function cleanBackendSuggestionLine(value: string) {
@@ -100,9 +130,10 @@ export function buildCommandUri(command: string, args: unknown[] = []) {
   return `command:${command}?${encodeURIComponent(JSON.stringify(args))}`;
 }
 
-export function buildRagSourceTargetUrl(source: ActiveSuggestionRagSource) {
+/** La URL de una fuente RAG para el navegador; `backendBaseUrl` completa una ruta relativa del visor. */
+export function buildRagSourceTargetUrl(source: ActiveSuggestionRagSource, backendBaseUrl: string) {
   // Sin sessionId: el visor no la usa y la URL queda en el historial y en la telemetria.
-  const rawUrl = ragViewerUrl(toOptionalString(source.url) || '', resolveCurrentBackendBaseUrl().baseUrl);
+  const rawUrl = ragViewerUrl(toOptionalString(source.url) || '', backendBaseUrl);
   if (!rawUrl || !/^[a-z][a-z0-9+.-]*:/i.test(rawUrl)) {
     return '';
   }
@@ -115,8 +146,8 @@ export function buildRagSourceTargetUrl(source: ActiveSuggestionRagSource) {
   return `${rawUrl}#page=${source.pageStart}`;
 }
 
-export function buildRagSourceMarkdown(source: ActiveSuggestionRagSource) {
-  const targetUrl = buildRagSourceTargetUrl(source);
+export function buildRagSourceMarkdown(source: ActiveSuggestionRagSource, backendBaseUrl: string) {
+  const targetUrl = buildRagSourceTargetUrl(source, backendBaseUrl);
   const pageText = source.pageStart
     ? (source.pageEnd && source.pageEnd !== source.pageStart
       ? `Paginas ${source.pageStart}-${source.pageEnd}`

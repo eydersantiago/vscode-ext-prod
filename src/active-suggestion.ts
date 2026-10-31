@@ -7,10 +7,10 @@ import type { SuggestDiagnostic } from './error-signals';
 import { indexFilesInFolderOf } from './dependency-scan';
 import { formatDependenciesForPrompt, isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
-import { DROPS_MOST_WARNING, extractSuggestionCode, guideForPolicy, policyTruncation, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, stripCutNoteAfterFence, toSuggestionCodeFields } from './suggestion-code';
+import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, toSuggestionCodeFields } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { countMatches, inferSuggestionApplyMode } from './suggestion-edit';
-import { parseBackendSuggestionSections } from './suggestion-format';
+import { parseBackendSuggestionSections, stripCutNoteAfterFence } from './suggestion-format';
 import { responseAllowsApply } from './suggestion-phase';
 import { createEmptyBackendSuggestionResult, normalizeBackendSuggestionResult, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, BackendSuggestionSections, SuggestionTrigger, WorkspaceProjectIndex } from './types';
@@ -529,13 +529,11 @@ export function buildBackendActiveSuggestionModel(
     selection: snapshot.selectionText,
     mode: resolvedModes.completionMode,
     language: snapshot.language,
-    truncation: policyTruncation(primaryResult.codeApplication),
-    cut: primaryResult.codeApplication?.cut,
+    policy: primaryResult.codeApplication,
   });
   // El codigo que no se puede aplicar tal cual se muestra como guia en vez de borrarse: la accion
   // queda sin codigo y nada lo aplica por error.
-  const codeFields = toSuggestionCodeFields(prepared, resolvedModes.completionMode);
-  const modes = { ...resolvedModes, ...codeFields, guide: guideForPolicy(codeFields.guide, primaryResult.codeApplication) };
+  const modes = { ...resolvedModes, ...toSuggestionCodeFields(prepared, resolvedModes.completionMode) };
   // Una respuesta que es solo la linea "Aplicar:" y el bloque de codigo tambien vale
   // (antes se descartaba por no traer texto fuera del bloque).
   const codeOnlyHeadline = modes.completionText
@@ -636,35 +634,10 @@ export function isSuggestionApplyOffered(model: ActiveSuggestionModel) {
   return responseAllowsApply(model) && model.codeApplication?.allowed !== false;
 }
 
-/** Nota discreta sobre la aplicacion de codigo para mostrar junto a la sugerencia. */
-export function suggestionApplicationNote(model: ActiveSuggestionModel) {
-  const codeApplication = model.codeApplication;
-  if (!codeApplication || model.blocked) {
-    return '';
-  }
-  if (codeApplication.allowed === false) {
-    return codeApplication.reason || 'Tu docente no permite aplicar código aquí; úsalo como guía y escríbelo tú.';
-  }
-  if (codeApplication.remaining !== null) {
-    return codeApplication.remaining === 1
-      ? 'Te queda 1 aplicación en este archivo.'
-      : `Te quedan ${codeApplication.remaining} aplicaciones en este archivo.`;
-  }
-  return '';
-}
-
 export function summarizeActiveSuggestion(model: ActiveSuggestionModel) {
   return uniqueCompactStrings([
     model.lineSummary,
     ...model.lineSuggestions,
     ...model.fileSuggestions,
   ], 5).join('\n');
-}
-
-export function primarySuggestionText(model: ActiveSuggestionModel) {
-  return model.lineSuggestions[0] ||
-    model.fileSuggestions[0] ||
-    model.suggestions[0] ||
-    model.summary ||
-    model.fileOverview;
 }

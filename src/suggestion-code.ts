@@ -10,7 +10,10 @@
 //     (completionMode). Las demas acciones piden su propio codigo al tutor
 //     antes de aplicar nada (extension.ts, requestCodeForMode).
 // Sin importar vscode: se prueba con node:test.
+import { CODE_APPLICATION_REASON_CODES, policyTruncation } from './code-application';
+import type { CodeCutPolicy, CodeCutSummary } from './code-application';
 import { indentColumns, relativeIndentUnit, stripLineGutters } from './code-reindent';
+import type { GuideCause, GuideReason, SuggestionGuide } from './suggestion-guide';
 import type { SuggestionApplyMode } from './types';
 
 export type EditorCodeAction = 'insert' | 'replace';
@@ -281,7 +284,7 @@ const COMMENT_START = /^(?:\/\/+|#(?!\s*(?:include|define|undef|if|ifdef|ifndef|
  * COMPATIBILIDAD (quitar en la 0.0.40): marca con la que el backend anterior al 30/10/2026 cortaba
  * un bloque largo, «// ... recortado por la politica del docente: completa el resto tu»
  * (limitCodeBlocks). El backend nuevo ya no la escribe en el codigo (la nota va fuera del bloque) y
- * avisa el recorte con code_application.truncation y .cut (policyTruncation): esto solo queda para
+ * avisa el recorte con code_application.truncation (policyTruncation en code-application.ts): esto solo queda para
  * un backend sin actualizar y para las respuestas que la cache de /suggest-tab guardo antes.
  * No es un resumen del modelo: las lineas que faltan no estan en el bloque del estudiante, asi que
  * no se pueden completar con las suyas. Con o sin tildes, y con cualquier comentario o "..." delante.
@@ -518,78 +521,9 @@ function isBalanced(balance: BracketBalance) {
 }
 
 // --- Codigo de guia (0.0.38) ---------------------------------------------------------------
-
-/**
- * Por que un codigo del tutor se muestra solo como guia (de solo lectura, sin aplicar):
- *   policy_cut      el backend lo recorto por el tope de lineas del docente;
- *   elision         resumio con «...» lineas del bloque que no se pudieron completar;
- *   unbalanced      deja llaves o parentesis sin cerrar en una version del bloque;
- *   policy_blocked  el docente no deja aplicar codigo en este archivo.
- */
-export type GuideCause = 'policy_cut' | 'elision' | 'unbalanced' | 'policy_blocked';
-export type GuideReason = { reason: string; cause: GuideCause };
-/** Codigo del tutor que se ve como guia, con el motivo. */
-export type SuggestionGuide = GuideReason & { code: string };
-
-/**
- * code_application.truncation de /suggest-tab (backend del 30/10/2026): si el guardarrail recorto
- * el codigo del tutor por el tope de lineas del docente.
- *   applicable  el trozo quedo cerrado (o es un reemplazo parcial): se puede aplicar;
- *   guide       solo sirve de guia (el backend pone allowed=false y reasonCode tooLarge);
- *   ''          sin recorte, o un backend anterior que no lo dice.
- */
-export type CodeTruncation = 'applicable' | 'guide' | '';
-
-/**
- * code_application.cut: cuanto del codigo del tutor quedo. prefix: las primeras `shown` de `total`
- * lineas del bloque (clean: el corte quedo cerrado). partial: un reemplazo con `shown` de los
- * `total` cambios que traia la propuesta (las demas lineas del estudiante quedan como estan).
- */
-export type CodeCutSummary = { kind: 'prefix' | 'partial'; shown: number; total: number; clean: boolean };
-
-/** Los reasonCode de code_application (/suggest-tab y apply-check) que la extension mira, en un solo sitio. */
-export const CODE_APPLICATION_REASON_CODES = {
-  /** El docente desactivo la aplicacion de codigo. */
-  disabled: 'code_application_disabled',
-  /** El codigo pasaba del tope de lineas del docente (en /suggest-tab: se recorto y solo sirve de guia). */
-  tooLarge: 'code_application_too_large',
-  /** Ya se usaron las aplicaciones permitidas en el archivo. */
-  limitReached: 'code_application_limit_reached',
-} as const;
-
-/** truncation del backend, o '' si no viene o no es uno de los valores del contrato. */
-export function normalizeCodeTruncation(value: unknown): CodeTruncation {
-  return value === 'applicable' || value === 'guide' ? value : '';
-}
-
-/** cut del backend, o null si no viene o no tiene la forma del contrato. */
-export function normalizeCodeCutSummary(value: unknown): CodeCutSummary | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  const data = value as Record<string, unknown>;
-  const count = (item: unknown) => (typeof item === 'number' && Number.isFinite(item) ? Math.max(0, Math.floor(item)) : -1);
-  const shown = count(data.shown);
-  const total = count(data.total);
-  if (shown < 0 || total < 0) {
-    return null;
-  }
-  return { kind: data.kind === 'partial' ? 'partial' : 'prefix', shown, total, clean: data.clean === true };
-}
-
-/**
- * El recorte que dice la politica. Tambien 'guide' con reasonCode tooLarge sin truncation (el
- * backend de antes del 30/10 ya marcaba asi el codigo recortado).
- */
-export function policyTruncation(codeApplication: { truncation?: CodeTruncation; reasonCode?: string } | null | undefined): CodeTruncation {
-  if (!codeApplication) {
-    return '';
-  }
-  if (codeApplication.truncation === 'guide' || codeApplication.reasonCode === CODE_APPLICATION_REASON_CODES.tooLarge) {
-    return 'guide';
-  }
-  return codeApplication.truncation || '';
-}
+// Lo que no se puede aplicar tal cual queda como guia (suggestion-guide.ts) con su causa. El
+// recorte del docente llega en code_application (code-application.ts): truncation decide, cut es
+// solo para las notas.
 
 export type PreparedSuggestionCode = {
   code: string;
@@ -599,8 +533,6 @@ export type PreparedSuggestionCode = {
   guideOnly: GuideReason | null;
 };
 
-/** Rotulo del codigo que se muestra solo como guia (ventana flotante y vista «Este archivo»). */
-export const GUIDE_CODE_LABEL = 'Código de guía (no se aplica con un clic):';
 export const ELISION_EXPANDED_NOTE = 'El tutor resumió con «...» líneas que no cambian: se completaron con las de tu bloque. Revísalo con «Ver cambios».';
 export const ELISION_GUIDE_REASON = 'El tutor resumió parte de tu bloque con «...»: aplicarlo así borraría líneas. Úsalo como guía o pide la versión completa con «Proponer una mejora».';
 export const ELISION_INSERT_NOTE = 'El código propuesto deja partes sin escribir («...»): complétalas tú antes de compilar.';
@@ -608,16 +540,17 @@ export const UNBALANCED_REASON = 'La versión propuesta deja llaves o paréntesi
 export const UNBALANCED_INSERT_NOTE = 'Ojo: el código para insertar no cierra todas sus llaves o paréntesis; revisa dónde termina.';
 export const POLICY_CUT_REASON = 'Tu docente limita cuántas líneas escribe el tutor: esto es solo el comienzo. Úsalo como guía y completa tú el resto.';
 export const POLICY_CUT_NOTE = 'Tu docente limita cuántas líneas escribe el tutor: el código quedó corto, revisa que haga todo lo que necesitas.';
-export const POLICY_BLOCKED_REASON = 'Tu docente no permite aplicar código aquí: úsalo como guía y escríbelo tú.';
+export const INCOMPLETE_REPLY_REASON = 'La respuesta del tutor llegó cortada: úsala como guía o pide «Otra sugerencia».';
 
 /** El motivo de una guia recortada, con cuanto se muestra si el backend lo dice (code_application.cut). */
 export function policyCutReason(cut: CodeCutSummary | null | undefined) {
-  if (!cut || cut.total <= cut.shown) {
-    return POLICY_CUT_REASON;
+  if (cut?.kind === 'prefix' && cut.linesTotal > cut.linesShown) {
+    return `El tutor muestra ${cut.linesShown} de ${cut.linesTotal} líneas: tu docente limita cuántas escribe. Úsalo como guía y completa tú el resto.`;
   }
-  return cut.kind === 'partial'
-    ? `El tutor propone ${cut.shown} de ${cut.total} cambios para tu bloque: tu docente limita cuántos hace. Úsalo como guía y completa tú el resto.`
-    : `El tutor muestra ${cut.shown} de ${cut.total} líneas: tu docente limita cuántas escribe. Úsalo como guía y completa tú el resto.`;
+  if (cut?.kind === 'partial' && cut.changesTotal > cut.changesShown) {
+    return `El tutor propone ${cut.changesShown} de ${cut.changesTotal} cambios para tu bloque: tu docente limita cuántos hace. Úsalo como guía y completa tú el resto.`;
+  }
+  return POLICY_CUT_REASON;
 }
 
 /**
@@ -625,61 +558,13 @@ export function policyCutReason(cut: CodeCutSummary | null | undefined) {
  * prefix, las primeras lineas del bloque; partial, un reemplazo con solo algunos de los cambios.
  */
 export function codeCutNote(cut: CodeCutSummary | null | undefined) {
-  if (!cut || cut.total <= cut.shown) {
-    return POLICY_CUT_NOTE;
+  if (cut?.kind === 'prefix' && cut.linesTotal > cut.linesShown) {
+    return `El tutor muestra ${cut.linesShown} de ${cut.linesTotal} líneas: revisa qué falta y complétalo tú.`;
   }
-  return cut.kind === 'partial'
-    ? `Se aplican ${cut.shown} de ${cut.total} cambios; el resto de tus líneas queda igual.`
-    : `El tutor muestra ${cut.shown} de ${cut.total} líneas: revisa qué falta y complétalo tú.`;
-}
-
-/**
- * Un recorte de guia cuando ademas el docente no deja aplicar por otra razon (desactivado, sin
- * aplicaciones): manda la politica. El backend solo pone reasonCode tooLarge si antes se podia
- * aplicar; si no, deja el suyo, y la guia tiene que decir ese motivo y no solo el tope de lineas.
- */
-export function guideForPolicy(
-  guide: SuggestionGuide | null,
-  codeApplication: { allowed?: boolean; reason?: string; reasonCode?: string } | null | undefined,
-): SuggestionGuide | null {
-  if (!guide || guide.cause !== 'policy_cut' || codeApplication?.allowed !== false) {
-    return guide;
+  if (cut?.kind === 'partial' && cut.changesTotal > cut.changesShown) {
+    return `Se aplican ${cut.changesShown} de ${cut.changesTotal} cambios; el resto de tus líneas queda igual.`;
   }
-  const reasonCode = codeApplication.reasonCode || '';
-  if (!reasonCode || reasonCode === CODE_APPLICATION_REASON_CODES.tooLarge) {
-    return guide;
-  }
-  return { ...guide, cause: 'policy_blocked', reason: codeApplication.reason || POLICY_BLOCKED_REASON };
-}
-
-// --- Notas del backend fuera del bloque (0.0.38) ---------------------------------------------
-
-/**
- * Sin la nota que el backend pone justo despues de un bloque recortado («```» y despues una
- * linea en cursiva, renderCutFence): la extension dice lo mismo con code_application.cut
- * (codeCutNote, policyCutReason) y, si no, la nota salia otra vez como texto de la sugerencia.
- * Solo se llama cuando cut viene; solo quita una linea en cursiva sola, la primera despues del
- * primer bloque.
- */
-export function stripCutNoteAfterFence(output: string) {
-  const text = String(output || '').replace(/\r\n?/g, '\n');
-  const fence = /```[^\n]*\n[\s\S]*?\n```[^\n]*(?:\n|$)/.exec(text);
-  if (!fence) {
-    return text;
-  }
-  const after = fence.index + fence[0].length;
-  const note = /^[ \t]*\n?[ \t]*(?:_[^_\n][^\n]*_|\*[^*\n][^\n]*\*)[ \t]*(?:\n|$)/.exec(text.slice(after));
-  return note ? text.slice(0, after) + text.slice(after + note[0].length) : text;
-}
-
-/**
- * Una linea entera en cursiva de Markdown (`_texto_` o `*texto*`) como texto: el backend pone sus
- * notas asi fuera del bloque, y la ventana escapa el Markdown (se veian los guiones bajos).
- */
-export function unwrapEmphasisLine(line: string) {
-  const text = String(line || '').trim();
-  const match = /^_([^_].*[^_]|[^_])_$/.exec(text) || /^\*([^*].*[^*]|[^*])\*$/.exec(text);
-  return match ? match[1].trim() : text;
+  return POLICY_CUT_NOTE;
 }
 
 /**
@@ -699,8 +584,11 @@ export function prepareSuggestionCode(
     selection?: string;
     mode?: SuggestionApplyMode | '';
     language?: string;
-    truncation?: CodeTruncation;
-    cut?: CodeCutSummary | null;
+    /**
+     * Lo que dice code_application del recorte (truncation, reasonCode y cut). null o sin el
+     * campo: el backend no lo dijo (anterior al 30/10/2026): se mira la marca vieja en el codigo.
+     */
+    policy?: CodeCutPolicy | null;
   },
 ): PreparedSuggestionCode {
   const notes: string[] = [];
@@ -712,14 +600,18 @@ export function prepareSuggestionCode(
   const selection = String(options.selection || '');
   const language = String(options.language || '');
   const guideOnly = (cause: GuideCause, reason: string): PreparedSuggestionCode => ({ code: text, notes, guideOnly: { cause, reason } });
-  const truncation = options.truncation || '';
+  const truncation = policyTruncation(options.policy);
+  const cut = options.policy?.cut ?? null;
   if (truncation === 'guide') {
-    return guideOnly('policy_cut', policyCutReason(options.cut));
+    // La respuesta del modelo llego cortada (no es un limite del docente) o el tope de lineas.
+    return options.policy?.reasonCode === CODE_APPLICATION_REASON_CODES.incompleteReply
+      ? guideOnly('incomplete_reply', INCOMPLETE_REPLY_REASON)
+      : guideOnly('policy_cut', policyCutReason(cut));
   }
   if (truncation === 'applicable') {
-    notes.push(codeCutNote(options.cut));
-  } else if (legacy.cut) {
-    // COMPATIBILIDAD (quitar en la 0.0.40): backend sin truncation, con la marca en el codigo.
+    notes.push(codeCutNote(cut));
+  } else if (truncation === null && legacy.cut) {
+    // COMPATIBILIDAD (quitar en la 0.0.40): backend sin truncation (o su cache), con la marca vieja.
     const balance = bracketBalance(text, language);
     if (options.mode === 'replace' || (balance.reliable && !isBalanced(balance))) {
       return guideOnly('policy_cut', POLICY_CUT_REASON);

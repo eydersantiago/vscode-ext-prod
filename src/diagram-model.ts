@@ -228,12 +228,18 @@ export function buildDependencyGraphView(graph: ProjectDependencyGraph, activePa
 export type DiagramOpenOrigin = 'file_view' | 'command';
 
 /**
- * Metadata de vscode_diagram_opened: solo cuentas de clases del diagrama (ni codigo, ni nombres
- * de archivos o de clases). Sin diagrama, todo en 0.
+ * Metadata de vscode_diagram_opened: solo cuentas de clases del diagrama (enteros no negativos; ni
+ * codigo, ni nombres de archivos o de clases). Sin diagrama, todo en 0. Las claves son las que el
+ * backend acepta para este evento (telemetry.ts del backend, 30/10/2026).
  */
 export function diagramTelemetryMetadata(target: DiagramTargetView | null) {
   const counts = target?.counts || { classes: 0, done: 0, partial: 0, missing: 0 };
-  return { classes: counts.classes, done: counts.done, partial: counts.partial, missing: counts.missing };
+  return {
+    diagramClasses: counts.classes,
+    classesDone: counts.done,
+    classesPartial: counts.partial,
+    classesMissing: counts.missing,
+  };
 }
 
 export const NO_DIAGRAM_NOTE = 'Este taller no trae un diagrama de clases (un archivo .puml en docs/, como docs/diagrama-clases.puml). Cuando tu docente lo agregue, aquí verás cómo debe quedar tu proyecto.';

@@ -4,8 +4,10 @@
 // indice no tiene (tope de 90 archivos y solo algunas extensiones: un .tpp o un .hh no estan).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_INDEX_MAX_FILES } from './constants';
-import { isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
-import type { FileDependencies } from './file-dependencies';
+import { dependencyFamily, dependencyIndexFields, isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
+import type { DependencyFamily, DependencyIndexFile, FileDependencies } from './file-dependencies';
+import { readWorkspaceText } from './source-text';
+import type { OpenTextDocumentLike } from './source-text';
 import { resolveScanOptions } from './settings';
 import { inferActiveLanguage } from './suggestion-results';
 import type { WorkspaceProjectIndex, WorkspaceProjectIndexEntry } from './types';
@@ -41,7 +43,7 @@ const DISK_CACHE_TTL_MS = 10 * 60_000;
 const PROBE_NAME = /^[\p{L}\p{N}_.+@-]+(?:\.\*)?$/u;
 
 /** ¿El archivo es de esa carpeta del proyecto y no de otra abierta adentro de ella? */
-function inFolder(uri: vscode.Uri, folder: vscode.WorkspaceFolder) {
+export function isInWorkspaceFolder(uri: vscode.Uri, folder: vscode.WorkspaceFolder) {
   return vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() === folder.uri.toString();
 }
 
@@ -79,7 +81,7 @@ export class DependencyProbeCache {
         new vscode.RelativePattern(folder, resolveScanOptions(undefined).excludeGlob),
         20,
       );
-      uris = uris.filter((uri) => inFolder(uri, folder));
+      uris = uris.filter((uri) => isInWorkspaceFolder(uri, folder));
     } catch {
       uris = [];
     }
@@ -140,7 +142,7 @@ export class BuildFileCache {
         new vscode.RelativePattern(folder, resolveScanOptions(undefined).excludeGlob),
         60,
       );
-      paths = uris.filter((uri) => inFolder(uri, folder)).map((uri) => workspaceRelativePath(uri));
+      paths = uris.filter((uri) => isInWorkspaceFolder(uri, folder)).map((uri) => workspaceRelativePath(uri));
     } catch {
       paths = [];
     }
@@ -179,7 +181,7 @@ export function indexFilesInFolderOf(index: WorkspaceProjectIndex | null, uri: v
       return false;
     }
     try {
-      return inFolder(vscode.Uri.parse(entry.uri), folder);
+      return isInWorkspaceFolder(vscode.Uri.parse(entry.uri), folder);
     } catch {
       return false;
     }
@@ -231,7 +233,7 @@ export async function computeActiveFileDependencies(
   if (inWorkspace && folder && (deps.probes.length || deps.expectedPaths.length) && isCurrent()) {
     const extraPaths: string[] = [];
     const remember = (uri: vscode.Uri) => {
-      if (!inFolder(uri, folder)) {
+      if (!isInWorkspaceFolder(uri, folder)) {
         return; // de una carpeta abierta dentro de esta: su ruta relativa es de la otra
       }
       const path = workspaceRelativePath(uri);
@@ -287,4 +289,37 @@ export async function computeActiveFileDependencies(
     outside: !inWorkspace,
     packageCode,
   };
+}
+
+/** Un archivo del proyecto leido como lo guarda el indice (0.0.38). */
+export type IndexedSource = {
+  /** Ruta relativa (workspaceRelativePath). */
+  path: string;
+  text: string;
+  language: string;
+  family: DependencyFamily;
+  /** Tamaño en el disco. */
+  bytes: number;
+  /** Sus imports y, en Java y C#, las clases que nombra, su paquete o espacios de nombres. */
+  fields: Pick<DependencyIndexFile, 'imports' | 'typeRefs' | 'namespaces' | 'javaPackage'>;
+};
+
+/**
+ * Lee un archivo del proyecto como lo hacen el indice del tutor y «Ver diagrama»: del editor si
+ * esta abierto, si no de sus bytes (readWorkspaceText), con su lenguaje y lo que el cuadro
+ * «Dependencias» necesita (dependencyIndexFields). null si pasa de `maxBytes`.
+ */
+export async function readIndexedSource(
+  uri: vscode.Uri,
+  openDocuments: ReadonlyMap<string, OpenTextDocumentLike>,
+  maxBytes: number,
+): Promise<IndexedSource | null> {
+  const read = await readWorkspaceText(uri, openDocuments, vscode.workspace.fs, maxBytes);
+  if (!read) {
+    return null;
+  }
+  const path = workspaceRelativePath(uri);
+  const language = inferActiveLanguage(path, read.languageId);
+  const family = dependencyFamily(language, path);
+  return { path, text: read.text, language, family, bytes: read.bytes, fields: dependencyIndexFields(read.text, family) };
 }

@@ -8,8 +8,8 @@
 import type { CourseMaterialItem } from './course-material';
 import type { ProgressPill } from './workshop-progress';
 import type { DependencyFamily, FileDependencies, FileDependencyItem } from './file-dependencies';
-import { GUIDE_CODE_LABEL } from './suggestion-code';
-import type { SuggestionGuide } from './suggestion-code';
+import { GUIDE_CODE_LABEL } from './suggestion-guide';
+import type { SuggestionGuide } from './suggestion-guide';
 import { assertNeverPhase, resolveDisplayedCode, suggestionPhase } from './suggestion-phase';
 import type { ActiveSuggestionModel, ActiveSuggestionRagSource } from './types';
 

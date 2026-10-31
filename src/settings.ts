@@ -6,6 +6,10 @@ import { DEFAULT_OFFLINE_MAX_LINES } from './code-application-guard';
 import { editorConnection } from './connection-state';
 import { DEFAULT_ACTIVE_SUGGESTION_DEBOUNCE_MS, DEFAULT_ACTIVE_SUGGESTION_MAX_CODE_CHARS, DEFAULT_ACTIVE_SUGGESTION_TIMEOUT_MS, DEFAULT_BLOCKING_SECONDS, DEFAULT_DOCUMENT_INCLUDE_GLOB, DEFAULT_EXCLUDE_GLOB, DEFAULT_INCLUDE_GLOB, DEFAULT_MAX_DOCUMENTS, DEFAULT_MAX_DOCUMENT_BYTES, DEFAULT_MAX_FILES, DEFAULT_MAX_FILE_BYTES, DEFAULT_WORKER_POLL_MS } from './constants';
 import type { ActiveSuggestionSettings, BackendSettings, CodeApplicationSettings, ScanCommandArgs, ScanMode, ScanOptions, TriggerSettings } from './types';
+import { asRecord, toOptionalString } from './values';
+
+// 0.0.38: viven en values.ts (sin vscode); se re-exportan para quien ya los importaba de aqui.
+export { asRecord, toOptionalString };
 
 // Backend: local si esta corriendo en esta maquina, si no produccion (src/backend-url.ts).
 export let localBackendDetected: boolean | null = null;
@@ -14,14 +18,6 @@ export function getEnv(name: string): string | undefined {
   const processLike = (globalThis as { process?: { env?: Record<string, string | undefined> } })
     .process;
   return processLike?.env?.[name];
-}
-
-export function toOptionalString(value: unknown): string | undefined {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 export function toPositiveInt(value: unknown): number | undefined {
@@ -89,13 +85,6 @@ export function parseMode(value: unknown): ScanMode | undefined {
     default:
       return undefined;
   }
-}
-
-export function asRecord(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-  return value as Record<string, unknown>;
 }
 
 export function getConfiguredString(config: vscode.WorkspaceConfiguration, key: string): string | undefined {

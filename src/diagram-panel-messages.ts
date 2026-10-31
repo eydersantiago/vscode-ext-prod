@@ -3,10 +3,10 @@
 // escapado); desde el panel solo llegan tres mensajes, que se revisan antes de usarlos (el script
 // del panel corre en un webview: lo que manda no se toma tal cual).
 import type { DiagramViewState } from './diagram-model';
-import { renderClassDiagramSvg, renderDependencyGraphSvg } from './diagram-svg';
+import { renderClassDiagramSvg, renderDependencyGraphSvg, renderRelationLegendSvg } from './diagram-svg';
 
 /** Lo que viaja al script del panel: los SVG ya armados y los textos. */
-export type DiagramPanelMessage = {
+export type DiagramPanelStateMessage = {
   type: 'state';
   status: DiagramViewState['status'];
   updatedLabel: string;
@@ -17,6 +17,8 @@ export type DiagramPanelMessage = {
     relationsDone: number;
     relationsTotal: number;
     svg: string;
+    /** La leyenda de las relaciones, con el mismo dibujo que el diagrama (RELATION_STYLE). */
+    legendSvg: string;
   };
   targetNote: string;
   files: {
@@ -27,7 +29,7 @@ export type DiagramPanelMessage = {
   };
 };
 
-export function buildDiagramPanelMessage(state: DiagramViewState): DiagramPanelMessage {
+export function buildDiagramPanelStateMessage(state: DiagramViewState): DiagramPanelStateMessage {
   const target = state.target;
   return {
     type: 'state',
@@ -41,6 +43,7 @@ export function buildDiagramPanelMessage(state: DiagramViewState): DiagramPanelM
         relationsDone: target.relations.filter((item) => item.done).length,
         relationsTotal: target.relations.length,
         svg: renderClassDiagramSvg(target),
+        legendSvg: renderRelationLegendSvg(),
       }
       : null,
     targetNote: state.targetNote,
@@ -60,7 +63,8 @@ export function buildDiagramPanelMessage(state: DiagramViewState): DiagramPanelM
 export type DiagramPanelInboundMessage =
   | { type: 'ready' }
   | { type: 'refresh' }
-  | { type: 'open'; path: string; line: number };
+  /** line: la linea donde esta la clase (1 en adelante), o null si no se sabe (un archivo). */
+  | { type: 'open'; path: string; line: number | null };
 
 const MAX_OPEN_PATH = 1000;
 
@@ -79,7 +83,7 @@ export function parseDiagramPanelInboundMessage(raw: unknown): DiagramPanelInbou
       if (typeof data.path !== 'string' || !data.path || data.path.length > MAX_OPEN_PATH) {
         return null;
       }
-      const line = typeof data.line === 'number' && Number.isInteger(data.line) && data.line > 0 ? data.line : 0;
+      const line = typeof data.line === 'number' && Number.isInteger(data.line) && data.line > 0 ? data.line : null;
       return { type: 'open', path: data.path, line };
     }
     default:

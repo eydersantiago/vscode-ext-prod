@@ -7,8 +7,11 @@
 // orden: una sugerencia sin modelo podia revelar acciones y contar
 // vscode_suggestion_actions_revealed mientras la ventana decia «El tutor no esta disponible».
 // Ahora todas preguntan aqui.
-import { POLICY_BLOCKED_REASON, suggestionReadyForMode } from './suggestion-code';
-import type { CodeReadiness, SuggestionGuide } from './suggestion-code';
+import { CODE_APPLICATION_REASON_CODES, POLICY_BLOCKED_REASON } from './code-application';
+import type { CodeApplicationPolicy } from './code-application';
+import { producedMode, suggestionReadyForMode } from './suggestion-code';
+import type { CodeReadiness } from './suggestion-code';
+import type { SuggestionGuide } from './suggestion-guide';
 import type { SuggestionApplyMode, SuggestionSource } from './types';
 
 /**
@@ -87,13 +90,11 @@ export type DisplayedCode =
   | { kind: 'none' };
 
 /** Lo que necesita resolveDisplayedCode (lo tienen el modelo de la sugerencia y el de la ventana). */
-export type DisplayedCodeInput = SuggestionPhaseInput & {
+export type DisplayedCodeInput = SuggestionPhaseInput & CodeReadiness & {
   applied?: boolean;
-  completionText?: string;
-  completionMode?: SuggestionApplyMode | '';
   guide?: SuggestionGuide | null;
   /** Lo que dice la politica del docente para aplicar en este archivo (allowed false: no deja). */
-  codeApplication?: { allowed?: boolean; reason?: string } | null;
+  codeApplication?: Partial<CodeApplicationPolicy> | null;
 };
 
 function cleanCode(text: string | undefined) {
@@ -101,26 +102,51 @@ function cleanCode(text: string | undefined) {
   return value.trim() ? value.replace(/\r\n?/g, '\n').replace(/\n+$/, '') : '';
 }
 
+/** Los reasonCode con que el backend manda un codigo recortado como guia (no niegan aplicar por si mismos). */
+const CUT_REASON_CODES: readonly string[] = [CODE_APPLICATION_REASON_CODES.tooLarge, CODE_APPLICATION_REASON_CODES.incompleteReply];
+
 /**
- * El codigo que se ve (0.0.38), decidido en un solo sitio: el de la accion si se puede aplicar;
- * el mismo como guia si el docente no deja aplicar (policy_blocked); la guia que dejo
- * prepareSuggestionCode (recortado, resumen «...» o llaves sin cerrar); o nada. Nunca se esconde
- * un codigo que el tutor escribio, y una guia nunca se ofrece para aplicar. Solo con la sugerencia
- * lista y sin aplicar (en las demas fases no se muestra codigo).
+ * ¿El docente no deja aplicar por una razon que no es el recorte (desactivado, sin aplicaciones,
+ * piloto sin tutor)? El backend solo pone el reasonCode del recorte si antes se podia aplicar; si
+ * no, deja el suyo, y la guia tiene que decir ese motivo.
+ */
+function blockedBeyondCut(policy: DisplayedCodeInput['codeApplication']) {
+  const reasonCode = policy?.reasonCode || '';
+  return policy?.allowed === false && !!reasonCode && !CUT_REASON_CODES.includes(reasonCode);
+}
+
+/**
+ * El codigo que se ve (0.0.38), decidido en un solo sitio para la ventana flotante y la vista
+ * «Este archivo»:
+ *   - el de la accion (producedMode) si se puede aplicar;
+ *   - el mismo como guia si el docente no deja aplicar (policy_blocked, con su motivo);
+ *   - la guia que dejo prepareSuggestionCode (recortado, resumen «...» o llaves sin cerrar); un
+ *     recorte con la aplicacion ya negada por otra razon muestra esa razon (policy_blocked);
+ *   - o nada.
+ * Nunca se esconde un codigo que el tutor escribio, y una guia nunca se ofrece para aplicar. Solo
+ * con la sugerencia lista y sin aplicar (en las demas fases no se muestra codigo).
  */
 export function resolveDisplayedCode(model: DisplayedCodeInput): DisplayedCode {
   if (model.applied || suggestionPhase(model) !== 'ready') {
     return { kind: 'none' };
   }
+  const policy = model.codeApplication;
+  const policyReason = policy?.reason || POLICY_BLOCKED_REASON;
   const code = cleanCode(model.completionText);
-  if (code && model.completionMode) {
+  const mode = producedMode(model);
+  if (code && mode) {
     // En la fase lista la respuesta deja aplicar (responseAllowsApply); falta la politica.
-    return model.codeApplication?.allowed === false
-      ? { kind: 'guide', code, reason: model.codeApplication.reason || POLICY_BLOCKED_REASON, cause: 'policy_blocked' }
-      : { kind: 'apply', code, mode: model.completionMode };
+    return policy?.allowed === false
+      ? { kind: 'guide', code, reason: policyReason, cause: 'policy_blocked' }
+      : { kind: 'apply', code, mode };
   }
   const guide = model.guide ? cleanCode(model.guide.code) : '';
-  return guide && model.guide ? { kind: 'guide', code: guide, reason: model.guide.reason, cause: model.guide.cause } : { kind: 'none' };
+  if (!guide || !model.guide) {
+    return { kind: 'none' };
+  }
+  return model.guide.cause === 'policy_cut' && blockedBeyondCut(policy)
+    ? { kind: 'guide', code: guide, reason: policyReason, cause: 'policy_blocked' }
+    : { kind: 'guide', code: guide, reason: model.guide.reason, cause: model.guide.cause };
 }
 
 /** Para los switch sobre la fase: si aparece una fase nueva, tsc obliga a decidir que mostrar. */

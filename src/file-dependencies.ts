@@ -2491,6 +2491,17 @@ function firstUseLine(code: string, starts: number[], name: string, skip = -1) {
 // ---------------------------------------------------------------------------------------------
 // Java y C#: clases que se usan sin import
 
+/** Java y C#: las clases del mismo paquete (o del proyecto) se usan sin import. */
+function usesTypesWithoutImport(family: DependencyFamily) {
+  return family === 'java' || family === 'csharp';
+}
+
+/**
+ * A lo sumo cuantos imports de cada archivo del indice se resuelven para «La usan» y para el grafo:
+ * 90 archivos con miles de #include tardaban segundos.
+ */
+const MAX_IMPORTS_PER_INDEXED_FILE = 300;
+
 /** Un archivo que puede usar clases sin importarlas: lo que nombra, sus imports y su paquete. */
 type ImplicitUser = {
   path: string;
@@ -2502,6 +2513,11 @@ type ImplicitUser = {
   javaPackage: string;
 };
 
+/** Un archivo del indice como ImplicitUser: lo que nombra son sus typeRefs. */
+function implicitUserOf(file: DependencyIndexFile, path: string, family: DependencyFamily): ImplicitUser {
+  return { path, family, names: new Set(file.typeRefs || []), imports: file.imports || [], javaPackage: file.javaPackage || '' };
+}
+
 /**
  * Java y C#: ¿`user` usa sin import la clase que declara `targetPath`? Java: del mismo paquete
  * (en cualquier carpeta de fuentes: src/main/java y src/test/java) o de la misma carpeta si no se
@@ -2509,7 +2525,7 @@ type ImplicitUser = {
  * nombre no cuenta (el import manda).
  */
 function usesImplicitly(user: ImplicitUser, targetPath: string, targetPackage: string) {
-  if ((user.family !== 'java' && user.family !== 'csharp') || targetPath === user.path) {
+  if (!usesTypesWithoutImport(user.family) || targetPath === user.path) {
     return false;
   }
   const name = stemOf(targetPath);
@@ -2530,7 +2546,7 @@ function usesImplicitly(user: ImplicitUser, targetPath: string, targetPackage: s
  * grafo no las tenia y un proyecto Java de un solo paquete salia casi sin flechas).
  */
 function implicitLocalDependencies(user: ImplicitUser, project: ProjectFiles): string[] {
-  if (user.family !== 'java' && user.family !== 'csharp') {
+  if (!usesTypesWithoutImport(user.family)) {
     return [];
   }
   const candidates = user.family === 'java'
@@ -2551,7 +2567,7 @@ export function dependencyIndexFields(text: string, family: DependencyFamily): P
   const javaPackage = family === 'java' ? collectJavaPackage(text, family) : '';
   return {
     imports: parseImports(text, family),
-    ...(family === 'java' || family === 'csharp' ? { typeRefs: collectTypeReferences(text, family) } : {}),
+    ...(usesTypesWithoutImport(family) ? { typeRefs: collectTypeReferences(text, family) } : {}),
     ...(family === 'csharp' ? { namespaces: collectNamespaces(text, family) } : {}),
     ...(javaPackage ? { javaPackage } : {}),
   };
@@ -2666,7 +2682,7 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
 
     // Java y C#: clases del mismo paquete (o del proyecto) que se usan sin import
     // (implicitLocalDependencies, la misma regla que el grafo de «Ver diagrama»).
-    if (family === 'java' || family === 'csharp') {
+    if (usesTypesWithoutImport(family)) {
       const code = codeOnly(text, family);
       const starts = lineStartsOf(code);
       const already = new Set(result.local.map((item) => item.path));
@@ -2693,14 +2709,14 @@ export function resolveFileDependencies(input: DependencyInput): FileDependencie
     const options: ResolveOptions = { uses: (name) => refs.has(name), hints: false };
     let line = -1;
     // A lo sumo 300 imports por archivo: 90 archivos con miles de #include tardaban segundos.
-    for (const imp of (file.imports || []).slice(0, 300)) {
+    for (const imp of (file.imports || []).slice(0, MAX_IMPORTS_PER_INDEXED_FILE)) {
       if (resolveImport(imp, path, fileFamily, project, options).some((item) => item.type === 'local' && item.path === activePath)) {
         line = imp.line;
         break;
       }
     }
     if (line < 0 && fileFamily === family
-      && usesImplicitly({ path, family: fileFamily, names: refs, imports: file.imports || [], javaPackage: file.javaPackage || '' }, activePath, activePackage)) {
+      && usesImplicitly(implicitUserOf(file, path, fileFamily), activePath, activePackage)) {
       line = 0;
     }
     if (line >= 0) {
@@ -2792,7 +2808,7 @@ export function resolveProjectDependencyGraph(input: { files: DependencyIndexFil
         graph.edges.push({ from: path, to });
       }
     };
-    for (const imp of (file.imports || []).slice(0, 300)) {
+    for (const imp of (file.imports || []).slice(0, MAX_IMPORTS_PER_INDEXED_FILE)) {
       for (const item of resolveImport(imp, path, family, project, options)) {
         if (item.type === 'local' && item.path && item.path !== path) {
           addEdge(item.path);
@@ -2807,8 +2823,7 @@ export function resolveProjectDependencyGraph(input: { files: DependencyIndexFil
       }
     }
     // Java y C#: las clases del mismo paquete (o del proyecto) que usa sin import.
-    const user: ImplicitUser = { path, family, names: refs, imports: file.imports || [], javaPackage: file.javaPackage || '' };
-    implicitLocalDependencies(user, project).forEach(addEdge);
+    implicitLocalDependencies(implicitUserOf(file, path, family), project).forEach(addEdge);
   }
   graph.libraries = [...libraries.values()]
     .map((entry) => ({ label: entry.label, description: entry.description, count: entry.users.size }))

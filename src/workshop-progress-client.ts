@@ -1,6 +1,6 @@
 // ADACEEN (VS Code): el avance del taller con la API de vscode (0.0.38).
 //
-// La consulta al backend: GET /api/workspaces/my-progress con las mismas cabeceras que
+// La consulta al backend: GET /api/workshop-progress/me con las mismas cabeceras que
 // /suggest-tab (sesion, cliente, version y editor: buildSessionHeaders). Sin sesion no se
 // pregunta (el avance es por estudiante). El repositorio va en ?repoFullName= si se reconoce la
 // carpeta abierta (owner/name).
@@ -17,8 +17,12 @@ import type { WorkshopProgressPoller } from './workshop-progress-poller';
 
 const PROGRESS_TIMEOUT_MS = 10_000;
 
-/** El avance del estudiante (JSON del backend), o null sin backend o sin sesion. Lanza ante un error. */
-export async function fetchMyWorkshopProgress(): Promise<unknown | null> {
+/**
+ * Lo que responde el backend sobre el avance del estudiante, sin revisar (lo revisa
+ * normalizeWorkshopProgressReply); sin backend o sin sesion no se pregunta y no hay respuesta
+ * (null). Lanza ante un error HTTP o de red.
+ */
+export async function fetchMyWorkshopProgress(): Promise<unknown> {
   const settings = resolveBackendSettings();
   if (!settings.baseUrl || !settings.sessionId) {
     return null;
@@ -40,12 +44,15 @@ export async function fetchMyWorkshopProgress(): Promise<unknown | null> {
 export function registerWorkshopProgressTriggers(
   poller: WorkshopProgressPoller,
   options: {
-    /** Cambio de sesion (idChanged: otra cuenta, se conecto o se cerro la sesion). */
-    onDidChangeSession: (listener: (idChanged: boolean) => void) => void;
+    /** Otra sesion (otra cuenta, se conecto o se cerro la sesion): devuelve como dejar de escuchar. */
+    onDidChangeSessionId: (listener: () => void) => vscode.Disposable;
   },
 ): vscode.Disposable[] {
   const disposables: vscode.Disposable[] = [
     vscode.workspace.onDidSaveTextDocument(() => poller.refreshAfterWork()),
+    options.onDidChangeSessionId(() => {
+      void poller.refetchForNewSession();
+    }),
   ];
   // Una tarea de VS Code (Ctrl+Shift+B) o una orden de compilar en la terminal con integracion de
   // shell. La extension web puede no tener estas API.
@@ -59,11 +66,6 @@ export function registerWorkshopProgressTriggers(
       }
     }));
   }
-  options.onDidChangeSession((idChanged) => {
-    if (idChanged) {
-      void poller.refetchForNewSession();
-    }
-  });
   void poller.refresh();
   return disposables;
 }

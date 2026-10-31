@@ -1,7 +1,8 @@
 // ADACEEN (VS Code): barra de estado de la sugerencia, hover y decoraciones en el editor.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { primarySuggestionText, suggestionApplicationNote } from './active-suggestion';
+import { codeApplicationNote } from './code-application';
+import { primarySuggestionText } from './selection-widget-model';
 import { ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import { buildSelectionRangeKey } from './editor-snapshot';
 import { sanitizeTutorMarkdown, UNAVAILABLE_TEXT } from './selection-widget-text';
@@ -117,7 +118,7 @@ export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
     markdown.appendMarkdown(`**Accion:** ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}\n\n`);
 
     const applyUri = buildCommandUri('adaceen.applySuggestionCompletion', [model.applyMode, 'hover']);
-    const applicationNote = suggestionApplicationNote(model);
+    const applicationNote = codeApplicationNote(model);
     markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
     if (canOfferRecommendedAction(model)) {
       markdown.appendMarkdown(` · [Aceptar ayuda: ${escapeMarkdown(suggestionApplyModeLabel(model.applyMode))}](${applyUri})`);

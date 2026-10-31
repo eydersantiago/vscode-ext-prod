@@ -3,31 +3,38 @@ import * as assert from 'node:assert/strict';
 import {
   buildProgressPill,
   formatReportTime,
-  normalizeWorkshopProgress,
-  progressUrl,
   isBuildCommandLine,
+  normalizeWorkshopProgressReply,
+  pointsSummary,
+  progressUrl,
   shouldRefreshAfterWork,
 } from '../workshop-progress';
 import { WorkshopProgressPoller } from '../workshop-progress-poller';
 
-// Avance del taller en la esquina de la vista «Este archivo» (0.0.38).
+// Avance del taller en la esquina de la vista «Este archivo» (0.0.38), contra
+// GET /api/workshop-progress/me del backend del 30/10/2026.
 
 const NOW = new Date(2026, 9, 30, 15, 0, 0);
 
+/** Como responde el backend: a lo sumo 8 pendientes en el orden del taller, y cuantos son en total. */
 function response(patch: Record<string, unknown> = {}) {
   return {
     ok: true,
+    status: 'en-curso',
     progress: {
       taller: 'banco',
       titulo: 'Sistema bancario',
       percent: 35,
       compiles: true,
-      done: 4,
-      total: 11,
-      missing: Array.from({ length: 10 }, (_, index) => ({ id: `p${index + 1}`, hu: index < 2 ? 'HU1' : 'HU2', texto: `Punto ${index + 1}` })),
+      done: 2,
+      partial: 3,
+      total: 12,
+      pending: Array.from({ length: 8 }, (_, index) => ({ id: `p${index + 1}`, hu: index < 2 ? 'HU1' : 'HU2', texto: `Punto ${index + 1}`, partial: index < 3 })),
+      pendingCount: 10,
       stale: false,
       receivedAt: new Date(2026, 9, 30, 14, 32).toISOString(),
       lastChangeAt: new Date(2026, 9, 30, 14, 20).toISOString(),
+      matchedBy: 'repo',
       ...patch,
     },
   };
@@ -35,43 +42,71 @@ function response(patch: Record<string, unknown> = {}) {
 
 describe('avance del taller (0.0.38)', () => {
   it('lee la respuesta del contrato y descarta lo que no lo cumple', () => {
-    const progress = normalizeWorkshopProgress(response());
+    const reply = normalizeWorkshopProgressReply(response());
+    assert.equal(reply?.status, 'en-curso');
+    const progress = reply?.status === 'en-curso' ? reply.progress : null;
     assert.equal(progress?.percent, 35);
-    assert.equal(progress?.missing.length, 10);
-    assert.equal(progress?.compiles, true);
-    assert.equal(normalizeWorkshopProgress({ ok: true, progress: null }), null, 'sin informe todavia');
-    assert.equal(normalizeWorkshopProgress({ ok: false, error: 'x' }), null);
-    assert.equal(normalizeWorkshopProgress('<html>'), null);
-    assert.equal(normalizeWorkshopProgress({ ok: true, progress: { percent: 'mucho' } }), null);
-    assert.equal(normalizeWorkshopProgress(response({ percent: 140.4 }))?.percent, 100);
-    assert.equal(normalizeWorkshopProgress(response({ compiles: 'si' }))?.compiles, null);
+    assert.equal(progress?.pending.length, 8);
+    assert.equal(progress?.pendingCount, 10);
+    assert.equal(progress?.pending[0].partial, true);
+    assert.equal(progress?.matchedBy, 'repo');
+    for (const status of ['sin-editor', 'sin-taller', 'sin-carpeta'] as const) {
+      assert.deepEqual(normalizeWorkshopProgressReply({ ok: true, status, progress: null }), { status, progress: null });
+    }
+    assert.equal(normalizeWorkshopProgressReply({ ok: true, status: 'en-curso', progress: null }), null, 'en curso sin avance no vale');
+    assert.equal(normalizeWorkshopProgressReply({ ok: true, status: 'otro', progress: null }), null);
+    assert.equal(normalizeWorkshopProgressReply({ ok: true, progress: response().progress }), null, 'sin status (la ruta vieja) no vale');
+    assert.equal(normalizeWorkshopProgressReply({ ok: false, error: 'x' }), null);
+    assert.equal(normalizeWorkshopProgressReply('<html>'), null);
+    assert.equal(normalizeWorkshopProgressReply(null), null, 'sin sesion no hay respuesta');
+    const capped = normalizeWorkshopProgressReply(response({ percent: 140.4, compiles: 'si', pendingCount: 2 }));
+    const cappedProgress = capped?.status === 'en-curso' ? capped.progress : null;
+    assert.equal(cappedProgress?.percent, 100);
+    assert.equal(cappedProgress?.compiles, null);
+    assert.equal(cappedProgress?.pendingCount, 8, 'nunca menos que los de la lista');
   });
 
-  it('la pastilla: el porcentaje, hasta 8 puntos que faltan y la hora del informe', () => {
-    const pill = buildProgressPill(normalizeWorkshopProgress(response()), NOW);
+  it('la pastilla: porcentaje, cuentas sin contradecirse, lo que falta (a medias marcado) y «y N más» de pendingCount', () => {
+    const pill = buildProgressPill(normalizeWorkshopProgressReply(response()), NOW);
     assert.equal(pill?.text, '35 %');
     assert.equal(pill?.level, 'low');
     assert.equal(pill?.stale, false);
     const title = pill?.title || '';
-    assert.match(title, /^Avance del taller «Sistema bancario»: 35 % \(4 de 11 puntos\)/);
+    assert.match(title, /^Avance del taller «Sistema bancario»: 35 % · 2 hechos y 3 a medias de 12 puntos/);
     assert.match(title, /Tu proyecto compila\./);
-    assert.match(title, /• HU1: Punto 1/);
-    assert.match(title, /• HU2: Punto 8/);
-    assert.doesNotMatch(title, /Punto 9/, 'a lo sumo 8');
-    assert.match(title, /… y 2 puntos más/);
+    assert.match(title, /• HU1: Punto 1 \(a medias\)/);
+    assert.match(title, /• HU2: Punto 8$/m, 'sin «a medias» lo que falta del todo');
+    assert.match(title, /… y 2 puntos más/, 'pendingCount 10 menos los 8 de la lista');
     assert.match(title, /Medido hoy 14:32\./);
   });
 
+  it('cuentas en palabras', () => {
+    assert.equal(pointsSummary({ done: 2, partial: 3, total: 10 }), '2 hechos y 3 a medias de 10 puntos');
+    assert.equal(pointsSummary({ done: 1, partial: 0, total: 1 }), '1 hecho de 1 punto');
+    assert.equal(pointsSummary({ done: 0, partial: 0, total: 0 }), '');
+  });
+
   it('desactualizado, sin compilar y completo', () => {
-    const stale = buildProgressPill(normalizeWorkshopProgress(response({ stale: true, compiles: false, percent: 60 })), NOW);
+    const stale = buildProgressPill(normalizeWorkshopProgressReply(response({ stale: true, compiles: false, percent: 60 })), NOW);
     assert.equal(stale?.stale, true);
     assert.equal(stale?.level, 'mid');
     assert.match(stale?.title || '', /desactualizado/);
     assert.match(stale?.title || '', /no compila/);
-    const full = buildProgressPill(normalizeWorkshopProgress(response({ percent: 100, missing: [], done: 11 })), NOW);
+    const full = buildProgressPill(normalizeWorkshopProgressReply(response({ percent: 100, pending: [], pendingCount: 0, done: 12, partial: 0 })), NOW);
     assert.equal(full?.level, 'high');
     assert.match(full?.title || '', /Todos los puntos están hechos/);
     assert.equal(buildProgressPill(null), null);
+  });
+
+  it('sin avance todavia: pastilla apagada que dice que falta, o nada sin taller', () => {
+    const editor = buildProgressPill({ status: 'sin-editor', progress: null });
+    assert.equal(editor?.level, 'muted');
+    assert.equal(editor?.text, '— %');
+    assert.match(editor?.title || '', /GitHub/);
+    const folder = buildProgressPill({ status: 'sin-carpeta', progress: null });
+    assert.equal(folder?.level, 'muted');
+    assert.match(folder?.title || '', /carpeta del taller/);
+    assert.equal(buildProgressPill({ status: 'sin-taller', progress: null }), null);
   });
 
   it('hora del informe en palabras', () => {
@@ -80,10 +115,10 @@ describe('avance del taller (0.0.38)', () => {
     assert.equal(formatReportTime('no es fecha', NOW), '');
   });
 
-  it('la URL lleva el repositorio (repoFullName, como las demas rutas) solo si tiene forma owner/name', () => {
-    assert.equal(progressUrl('https://api.x/', 'eyder/banco-taller'), 'https://api.x/api/workspaces/my-progress?repoFullName=eyder%2Fbanco-taller');
-    assert.equal(progressUrl('https://api.x', '../../etc'), 'https://api.x/api/workspaces/my-progress');
-    assert.equal(progressUrl('https://api.x', undefined), 'https://api.x/api/workspaces/my-progress');
+  it('la URL lleva el repositorio (repoFullName) solo si tiene forma owner/name', () => {
+    assert.equal(progressUrl('https://api.x/', 'eyder/banco-taller'), 'https://api.x/api/workshop-progress/me?repoFullName=eyder%2Fbanco-taller');
+    assert.equal(progressUrl('https://api.x', '../../etc'), 'https://api.x/api/workshop-progress/me');
+    assert.equal(progressUrl('https://api.x', undefined), 'https://api.x/api/workshop-progress/me');
   });
 
   it('despues de guardar o compilar, a lo sumo una consulta cada 2 minutos', () => {
@@ -103,14 +138,14 @@ describe('avance del taller (0.0.38)', () => {
 });
 
 describe('cuando se pide el avance (0.0.38)', () => {
-  function setup(fetchProgress: () => Promise<unknown | null>) {
+  function setup(fetchProgress: () => Promise<unknown>) {
     let now = 1_000_000;
-    const changes: Array<number | null> = [];
+    const changes: Array<number | string | null> = [];
     const timers: Array<() => void> = [];
     let cleared = 0;
     const poller = new WorkshopProgressPoller({
       fetchProgress,
-      onChange: (progress) => changes.push(progress ? progress.percent : null),
+      onChange: (reply) => changes.push(reply ? (reply.status === 'en-curso' ? reply.progress.percent : reply.status) : null),
       now: () => now,
       setInterval: (callback) => {
         timers.push(callback);
@@ -203,13 +238,13 @@ describe('cuando se pide el avance (0.0.38)', () => {
     pending[1](response({ percent: 35 }));
     await anaFetch;
     assert.deepEqual(changes, [35, null, 80], 'la respuesta de la sesion de Ana se ignora aunque llegue despues');
-    assert.equal(poller.progress?.percent, 80);
+    assert.equal(poller.reply?.status === 'en-curso' && poller.reply.progress.percent, 80);
   });
 
   it('sin sesion no hay avance', async () => {
     const { poller, changes } = setup(async () => null);
     await poller.refresh();
     assert.deepEqual(changes, [], 'ya estaba escondida: no avisa');
-    assert.equal(poller.progress, null);
+    assert.equal(poller.reply, null);
   });
 });

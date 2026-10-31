@@ -6,17 +6,20 @@
 // preguntar en 30 minutos. Al cambiar de sesion se esconde enseguida y se pregunta de nuevo
 // (refetchForNewSession); lo que llegue de la sesion anterior se descarta.
 // Se prueba con node:test (reloj y temporizadores inyectados).
-import { normalizeWorkshopProgress, PROGRESS_POLL_MS, shouldRefreshAfterWork } from './workshop-progress';
-import type { WorkshopProgress } from './workshop-progress';
+import { normalizeWorkshopProgressReply, PROGRESS_POLL_MS, shouldRefreshAfterWork } from './workshop-progress';
+import type { WorkshopProgressReply } from './workshop-progress';
 
 export const PROGRESS_UNSUPPORTED_BACKOFF_MS = 30 * 60_000;
 /** Dos pedidos seguidos (al activar y al mostrarse la vista) no hacen dos consultas. */
 export const PROGRESS_MIN_INTERVAL_MS = 20_000;
 
 export type WorkshopProgressPollerDeps = {
-  /** GET /api/workspaces/my-progress. Lanza ante un error (con `status` si fue HTTP). null: sin sesion. */
-  fetchProgress: () => Promise<unknown | null>;
-  onChange: (progress: WorkshopProgress | null) => void;
+  /**
+   * GET /api/workshop-progress/me: la respuesta sin revisar (null u otra cosa sin la forma del
+   * contrato: no se muestra nada, p. ej. sin sesion). Lanza ante un error (con `status` si fue HTTP).
+   */
+  fetchProgress: () => Promise<unknown>;
+  onChange: (reply: WorkshopProgressReply | null) => void;
   log?: (line: string) => void;
   now?: () => number;
   setInterval?: (callback: () => void, ms: number) => unknown;
@@ -24,7 +27,7 @@ export type WorkshopProgressPollerDeps = {
 };
 
 export class WorkshopProgressPoller {
-  private current: WorkshopProgress | null = null;
+  private current: WorkshopProgressReply | null = null;
   private lastFetchAt = 0;
   private unsupportedUntil = 0;
   /**
@@ -39,7 +42,8 @@ export class WorkshopProgressPoller {
 
   constructor(private readonly deps: WorkshopProgressPollerDeps) {}
 
-  get progress() {
+  /** Lo ultimo que dijo el backend (estado y avance), o null si no hay nada que mostrar. */
+  get reply() {
     return this.current;
   }
 
@@ -96,11 +100,10 @@ export class WorkshopProgressPoller {
   }
 
   private async fetchOnce(generation: number) {
-    let next: WorkshopProgress | null = null;
+    let next: WorkshopProgressReply | null = null;
     let unsupported = false;
     try {
-      const data = await this.deps.fetchProgress();
-      next = data === null ? null : normalizeWorkshopProgress(data);
+      next = normalizeWorkshopProgressReply(await this.deps.fetchProgress());
     } catch (error) {
       const status = (error as { status?: unknown })?.status;
       unsupported = status === 404;

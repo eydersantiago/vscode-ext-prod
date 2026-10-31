@@ -49,9 +49,9 @@ export class DiagramController implements vscode.Disposable {
       onDispose: () => {
         this.clearSaveTimer();
       },
-      onVisible: () => {
+      onVisibilityChanged: (visible) => {
         // Se guardo algo mientras el panel estaba detras de otra pestaña.
-        if (this.stale) {
+        if (visible && this.stale) {
           this.stale = false;
           void this.rescan();
         }
@@ -159,14 +159,14 @@ export class DiagramController implements vscode.Disposable {
   }
 
   /** Abre una ruta del ultimo escaneo (el panel no puede pedir otra cosa). */
-  private async openPath(path: string, line: number) {
+  private async openPath(path: string, line: number | null) {
     const uriString = this.last?.uris.get(path);
     if (!uriString) {
       return;
     }
     try {
       const editor = await vscode.window.showTextDocument(vscode.Uri.parse(uriString), { preview: true, viewColumn: vscode.ViewColumn.One });
-      if (line > 0) {
+      if (line !== null) {
         const target = Math.max(0, Math.min(editor.document.lineCount - 1, line - 1));
         const position = new vscode.Position(target, editor.document.lineAt(target).firstNonWhitespaceCharacterIndex);
         editor.selection = new vscode.Selection(position, position);

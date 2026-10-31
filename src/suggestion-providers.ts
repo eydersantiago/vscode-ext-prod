@@ -1,7 +1,7 @@
 // ADACEEN (VS Code): proveedores de VS Code para la sugerencia (CodeLens, acciones de codigo e inlay hints).
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { suggestionApplicationNote } from './active-suggestion';
+import { codeApplicationNote } from './code-application';
 import { quickFixOrigin } from './code-application-guard';
 import { buildSelectionRangeKey } from './editor-snapshot';
 import { buildSuggestionHoverMarkdown } from './suggestion-decorations';
@@ -66,7 +66,7 @@ export class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvide
       dismissedMetricId: this.dismissedMetricId(),
     })) {
       const recommendedMode = this.model.applyMode || 'insert';
-      const note = suggestionApplicationNote(this.model);
+      const note = codeApplicationNote(this.model);
       lenses.push(new vscode.CodeLens(range, {
         title: `$(check) Aceptar ayuda: ${suggestionApplyModeLabel(recommendedMode)}`,
         command: 'adaceen.applySuggestionCompletion',

@@ -2,7 +2,7 @@
 // Las funciones auxiliares se movieron sin cambios a modulos de src/ (settings, workspace-scan, backend-http,
 // git-repo, editor-snapshot, active-suggestion, suggestion-*, code-actions, status-bar...).
 import * as vscode from 'vscode';
-import { buildBackendActiveSuggestionModel, buildLocalActiveSuggestion, fetchBackendSuggestionText, isSuggestionApplyOffered, primarySuggestionText } from './active-suggestion';
+import { buildBackendActiveSuggestionModel, buildLocalActiveSuggestion, fetchBackendSuggestionText, isSuggestionApplyOffered } from './active-suggestion';
 import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, fetchJsonWithTimeout, sendScanFailure, sendScanResult } from './backend-http';
 import { describeBackendUrlSource, detectEditorHost, pairingEditorHost } from './backend-url';
 import { currentClientId, initClientIdentity } from './client-identity';
@@ -32,7 +32,8 @@ import { extractSuggestionCode, producedMode, suggestionReadyForMode } from './s
 import type { EditorCodeAction } from './suggestion-code';
 import { buildAppliedSuggestionModel, planSuggestionEdit, resolveWorkspaceFileUri } from './suggestion-edit';
 import { buildRagSourceMarkdown, buildRagSourceTargetUrl, getBackendSuggestionScopeLabel, parseBackendSuggestionSections } from './suggestion-format';
-import { formatSuggestionHistoryMarkdown, readSuggestionHistory, rememberSuggestionHistory, toSelectionWidgetModel, writeSuggestionHistory } from './suggestion-history';
+import { formatSuggestionHistoryMarkdown, readSuggestionHistory, rememberSuggestionHistory, writeSuggestionHistory } from './suggestion-history';
+import { primarySuggestionText, toSelectionWidgetModel } from './selection-widget-model';
 import { editorPageContext, publishActiveEditorRack, recordVscodeSuggestionMetric, toQuizHistoryItems } from './suggestion-metrics';
 import type { SuggestionMetricFields } from './suggestion-metrics';
 import { AdaceenSuggestionCodeActionProvider, AdaceenSuggestionCodeLensProvider, AdaceenSuggestionInlayHintProvider, isSuggestionCodeActionRequestFocused } from './suggestion-providers';
@@ -172,8 +173,8 @@ export async function activate(context: vscode.ExtensionContext) {
   let dependencyRun = 0;
   const dependencyProbes = new DependencyProbeCache();
   const dependencyBuildFiles = new BuildFileCache();
-  // 0.0.38: avance del taller en la esquina de la vista (GET /api/workspaces/my-progress). Un
-  // backend anterior o sin sesion: no se muestra nada.
+  // 0.0.38: avance del taller en la esquina de la vista (GET /api/workshop-progress/me). Sin
+  // sesion o sin red: no se muestra nada.
   const workshopProgress = new WorkshopProgressPoller({
     fetchProgress: fetchMyWorkshopProgress,
     onChange: () => refreshFileView(),
@@ -460,7 +461,7 @@ export async function activate(context: vscode.ExtensionContext) {
       materialState,
       {
         activeFile,
-        progress: buildProgressPill(workshopProgress.progress),
+        progress: buildProgressPill(workshopProgress.reply),
         dependencies: deps
           ? buildDependencyViewState(deps.result?.deps || null, deps.result?.filePath || '', deps.loading, {
             partial: deps.result?.partial,
@@ -1952,7 +1953,7 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    const targetUrl = buildRagSourceTargetUrl(sourceItem);
+    const targetUrl = buildRagSourceTargetUrl(sourceItem, resolveCurrentBackendBaseUrl().baseUrl);
     if (targetUrl) {
       await vscode.env.openExternal(vscode.Uri.parse(targetUrl));
       recordSuggestionMetric(activeSuggestionModel, 'vscode_rag_source_opened', sourceItem.citationLabel || sourceItem.title, {
@@ -1970,7 +1971,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const document = await vscode.workspace.openTextDocument({
       language: 'markdown',
-      content: buildRagSourceMarkdown(sourceItem),
+      content: buildRagSourceMarkdown(sourceItem, resolveCurrentBackendBaseUrl().baseUrl),
     });
     await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
     recordSuggestionMetric(activeSuggestionModel, 'vscode_rag_source_opened', sourceItem.citationLabel || sourceItem.title, {
@@ -2525,7 +2526,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // 0.0.38: el avance del taller se vuelve a pedir al guardar, al compilar y al cambiar de sesion.
   context.subscriptions.push(...registerWorkshopProgressTriggers(workshopProgress, {
-    onDidChangeSession: (listener) => connection.onDidChangeSession((_session, idChanged) => listener(idChanged)),
+    onDidChangeSessionId: (listener) => connection.onDidChangeSession((_session, idChanged) => {
+      if (idChanged) {
+        listener();
+      }
+    }),
   }));
 
   scheduleCursorIdleSuggestionRefresh();

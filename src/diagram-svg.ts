@@ -9,7 +9,6 @@
 import { edgeBetween, layeredLayout } from './diagram-layout';
 import type { LayoutBox, LayoutEdge, LayoutNode } from './diagram-layout';
 import type { DependencyGraphView, DiagramClassView, DiagramRelationView, DiagramTargetView } from './diagram-model';
-import { assertNeverRelation } from './class-diagram';
 import type { DiagramRelationKind } from './class-diagram';
 
 const CHAR_WIDTH_NAME = 7.6;
@@ -50,14 +49,31 @@ const KIND_TEXT: Partial<Record<DiagramClassView['kind'], string>> = {
   struct: '«struct»',
 };
 
-const RELATION_TEXT: Record<DiagramRelationKind, string> = {
-  inheritance: 'hereda de',
-  realization: 'implementa',
-  composition: 'se compone de',
-  aggregation: 'agrupa a',
-  association: 'usa a',
-  dependency: 'depende de',
-  link: 'se relaciona con',
+type RelationMarker = 'tri' | 'dia-fill' | 'dia' | 'arrow' | '';
+
+/**
+ * Como se dibuja cada relacion de UML, en un solo sitio (el acomodo, la linea y la leyenda la
+ * leen de aqui):
+ *   label      lo que dice el titulo y la leyenda («hereda de»);
+ *   marker     la marca al final de la linea (triangulo, rombo lleno o vacio, flecha, ninguna);
+ *   dashed     linea punteada (implementa, depende de);
+ *   upper      que extremo va arriba en el acomodo: el padre (to) o el todo (from);
+ *   markerAt   en que extremo va la marca: el padre o la clase usada (to) o el todo (from).
+ */
+export const RELATION_STYLE: Record<DiagramRelationKind, {
+  label: string;
+  marker: RelationMarker;
+  dashed: boolean;
+  upper: 'from' | 'to';
+  markerAt: 'from' | 'to';
+}> = {
+  inheritance: { label: 'hereda de', marker: 'tri', dashed: false, upper: 'to', markerAt: 'to' },
+  realization: { label: 'implementa', marker: 'tri', dashed: true, upper: 'to', markerAt: 'to' },
+  composition: { label: 'se compone de', marker: 'dia-fill', dashed: false, upper: 'from', markerAt: 'from' },
+  aggregation: { label: 'agrupa a', marker: 'dia', dashed: false, upper: 'from', markerAt: 'from' },
+  association: { label: 'usa a', marker: 'arrow', dashed: false, upper: 'from', markerAt: 'to' },
+  dependency: { label: 'depende de', marker: 'arrow', dashed: true, upper: 'from', markerAt: 'to' },
+  link: { label: 'se relaciona con', marker: '', dashed: false, upper: 'from', markerAt: 'to' },
 };
 
 type ClassBoxText = {
@@ -103,27 +119,16 @@ function classBoxSize(text: ClassBoxText) {
   return { width, height };
 }
 
-/** Caja de arriba y de abajo de cada relacion: el padre y el todo arriba. */
+/** Caja de arriba y de abajo de cada relacion: el padre y el todo arriba (RELATION_STYLE.upper). */
 function layoutEdgeOf(relation: DiagramRelationView): LayoutEdge {
-  const kind = relation.kind;
-  switch (kind) {
-    case 'inheritance':
-    case 'realization':
-      return { from: relation.to, to: relation.from };
-    case 'composition':
-    case 'aggregation':
-    case 'association':
-    case 'dependency':
-    case 'link':
-      return { from: relation.from, to: relation.to };
-    default:
-      return assertNeverRelation(kind);
-  }
+  return RELATION_STYLE[relation.kind].upper === 'to'
+    ? { from: relation.to, to: relation.from }
+    : { from: relation.from, to: relation.to };
 }
 
 /**
- * El segmento en el sentido en que va la marca (siempre al final): hacia el padre (triangulo),
- * hacia el todo (rombo) o hacia la clase usada (flecha).
+ * El segmento en el sentido en que va la marca (siempre al final, RELATION_STYLE.markerAt): hacia
+ * el padre (triangulo), hacia el todo (rombo) o hacia la clase usada (flecha).
  */
 function orientedSegment(relation: DiagramRelationView, boxes: Map<string, LayoutBox>) {
   const from = boxes.get(relation.from);
@@ -131,32 +136,10 @@ function orientedSegment(relation: DiagramRelationView, boxes: Map<string, Layou
   if (!from || !to) {
     return null;
   }
-  const kind = relation.kind;
-  switch (kind) {
-    case 'composition':
-    case 'aggregation':
-      // Del lado de la parte hacia el todo: el rombo queda en el todo.
-      return { segment: edgeBetween(to, from), startName: relation.to, endName: relation.from };
-    case 'inheritance':
-    case 'realization':
-    case 'association':
-    case 'dependency':
-    case 'link':
-      return { segment: edgeBetween(from, to), startName: relation.from, endName: relation.to };
-    default:
-      return assertNeverRelation(kind);
-  }
+  return RELATION_STYLE[relation.kind].markerAt === 'from'
+    ? { segment: edgeBetween(to, from), startName: relation.to, endName: relation.from }
+    : { segment: edgeBetween(from, to), startName: relation.from, endName: relation.to };
 }
-
-const MARKERS: Record<DiagramRelationKind, string> = {
-  inheritance: 'tri',
-  realization: 'tri',
-  composition: 'dia-fill',
-  aggregation: 'dia',
-  association: 'arrow',
-  dependency: 'arrow',
-  link: '',
-};
 
 function markerDefs(prefix: string) {
   const defs: string[] = [];
@@ -189,9 +172,8 @@ function renderRelation(relation: DiagramRelationView, boxes: Map<string, Layout
   }
   const { x1, y1, x2, y2 } = oriented.segment;
   const state = relation.done ? 'done' : 'todo';
-  const marker = MARKERS[relation.kind];
-  const dashed = relation.kind === 'realization' || relation.kind === 'dependency';
-  const title = `${relation.from} ${RELATION_TEXT[relation.kind]} ${relation.to}${relation.label ? ` (${relation.label})` : ''} · ${relation.done ? 'ya está en tu código' : 'todavía no está en tu código'}`;
+  const { marker, dashed, label } = RELATION_STYLE[relation.kind];
+  const title = `${relation.from} ${label} ${relation.to}${relation.label ? ` (${relation.label})` : ''} · ${relation.done ? 'ya está en tu código' : 'todavía no está en tu código'}`;
   const parts = [
     `<g class="edge ${state}${dashed ? ' dashed' : ''}" data-kind="${relation.kind}">`,
     `<title>${escapeXml(title)}</title>`,
@@ -325,4 +307,32 @@ export function renderDependencyGraphSvg(graph: DependencyGraphView, prefix = 'd
   const defs = `<defs>${['plain', 'hot'].map((state) => `<marker id="${prefix}-arrow-${state}" class="mk mk-${state}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="mk-open" d="M1 1 L9 5 L1 9"/></marker>`).join('')}</defs>`;
   const summary = `Archivos del proyecto: ${graph.nodes.length}${graph.hidden ? ` (y ${graph.hidden} más)` : ''}, ${graph.edges.length} relaciones.`;
   return `<svg xmlns="http://www.w3.org/2000/svg" class="diagram files" viewBox="0 0 ${layout.width} ${layout.height}" width="${layout.width}" height="${layout.height}" role="group" aria-label="${escapeXml(summary)}">${defs}<g class="edges">${edges}</g><g class="nodes">${boxes}</g></svg>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Leyenda
+
+/** Orden de la leyenda: todas las relaciones, con el mismo dibujo que en el diagrama. */
+const LEGEND_ORDER: readonly DiagramRelationKind[] = ['inheritance', 'realization', 'composition', 'aggregation', 'association', 'dependency', 'link'];
+
+/**
+ * La leyenda de las relaciones en SVG, dibujada con RELATION_STYLE (la misma marca y el mismo
+ * punteado que en el diagrama): «hereda de», «implementa», «se compone de»... Va en el mensaje del
+ * panel y el panel solo la inserta.
+ */
+export function renderRelationLegendSvg(prefix = 'lg') {
+  const rowHeight = 20;
+  const width = 190;
+  const rows = LEGEND_ORDER.map((kind, index) => {
+    const style = RELATION_STYLE[kind];
+    const y = 10 + index * rowHeight;
+    return [
+      `<g class="edge todo${style.dashed ? ' dashed' : ''}" data-kind="${kind}">`,
+      `<line x1="4" y1="${y}" x2="44" y2="${y}"${style.marker ? ` marker-end="url(#${prefix}-${style.marker}-todo)"` : ''}/>`,
+      '</g>',
+      `<text class="legend-text" x="56" y="${y + 4}">${escapeXml(style.label)}</text>`,
+    ].join('');
+  }).join('');
+  const height = 10 + LEGEND_ORDER.length * rowHeight - 6;
+  return `<svg xmlns="http://www.w3.org/2000/svg" class="diagram legend" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Leyenda: ${escapeXml(LEGEND_ORDER.map((kind) => RELATION_STYLE[kind].label).join(', '))}">${markerDefs(prefix)}${rows}</svg>`;
 }

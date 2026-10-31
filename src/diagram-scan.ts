@@ -6,23 +6,22 @@
 // (resolveProjectDependencyGraph). Nada sale del equipo; igual se respetan las reglas del
 // escaneo: la misma busqueda (findWorkspaceFiles, con adaceen.scan.excludeGlob), sin archivos de
 // claves (scan-privacy.ts) y sin paquetes instalados (.venv, node_modules); cada archivo se lee
-// como en el indice del tutor (readWorkspaceText, dependencyIndexFields). La lectura y la
+// como en el indice del tutor (readIndexedSource). La lectura y la
 // comparacion son puras y estan probadas (class-diagram.ts, source-classes.ts, diagram-model.ts).
 import * as vscode from 'vscode';
 import { extractMermaidClassDiagram, parseMermaidClassDiagram, parsePlantUmlClassDiagram, pickDiagramFile } from './class-diagram';
 import type { ClassDiagram } from './class-diagram';
-import { workspaceRelativePath } from './dependency-scan';
+import { isInWorkspaceFolder, readIndexedSource, workspaceRelativePath } from './dependency-scan';
 import type { BuildFileCache } from './dependency-scan';
 import { compareDiagram, EMPTY_DIAGRAM_NOTE, NO_DIAGRAM_NOTE } from './diagram-model';
 import type { DiagramTargetView } from './diagram-model';
-import { dependencyFamily, dependencyIndexFields, isThirdPartyPath, resolveProjectDependencyGraph } from './file-dependencies';
+import { isThirdPartyPath, resolveProjectDependencyGraph } from './file-dependencies';
 import type { DependencyIndexFile, ProjectDependencyGraph } from './file-dependencies';
 import { isSecretPath } from './scan-privacy';
 import { resolveScanOptions } from './settings';
 import { extractSourceClasses, mergeSourceClasses } from './source-classes';
 import type { SourceClass } from './source-classes';
 import { readWorkspaceText } from './source-text';
-import { inferActiveLanguage } from './suggestion-results';
 import { findWorkspaceFiles } from './workspace-scan';
 
 const SOURCE_GLOB = '**/*.{h,hh,hpp,hxx,c,cc,cpp,cxx,tpp,ipp,inl,java,py,cs,ts,tsx,js,jsx,mjs,cjs}';
@@ -44,19 +43,14 @@ export type DiagramScanResult = {
   uris: Map<string, string>;
 };
 
-function inFolder(uri: vscode.Uri, folder: vscode.WorkspaceFolder) {
-  return vscode.workspace.getWorkspaceFolder(uri)?.uri.toString() === folder.uri.toString();
-}
-
 /**
  * Los archivos de la carpeta que cumplen `includeGlob`, con la busqueda del escaneo
  * (findWorkspaceFiles) y sus reglas (adaceen.scan.excludeGlob). Sin selectFolders: «Ver diagrama»
  * lee el proyecto del archivo activo, no las carpetas que elige el modo de escaneo. Sin las de
  * una carpeta del proyecto abierta adentro de esta.
  */
-async function findInFolder(folder: vscode.WorkspaceFolder, includeGlob: string, maxFiles: number) {
-  const uris = await findWorkspaceFiles([folder], resolveScanOptions({ includeGlob, maxFiles }));
-  return uris.filter((uri) => inFolder(uri, folder));
+function findInFolder(folder: vscode.WorkspaceFolder, includeGlob: string, maxFiles: number) {
+  return findWorkspaceFiles([folder], resolveScanOptions({ includeGlob, maxFiles }), isInWorkspaceFolder);
 }
 
 function readText(uri: vscode.Uri, openDocuments: Map<string, vscode.TextDocument>, maxBytes: number) {
@@ -133,15 +127,13 @@ export async function scanDiagram(options: {
       continue;
     }
     try {
-      const read = await readText(uri, openDocuments, maxFileBytes);
+      const read = await readIndexedSource(uri, openDocuments, maxFileBytes);
       if (!read) {
         continue;
       }
-      const language = inferActiveLanguage(path, read.languageId);
-      const family = dependencyFamily(language, path);
       uris.set(path, uri.toString());
-      indexFiles.push({ path, language, ...dependencyIndexFields(read.text, family) });
-      classes.push(...extractSourceClasses(read.text, path, language));
+      indexFiles.push({ path, language: read.language, ...read.fields });
+      classes.push(...extractSourceClasses(read.text, path, read.language));
     } catch (error) {
       options.log?.(`[Diagrama] No se pudo leer ${path}: ${String(error)}`);
     }

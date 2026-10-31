@@ -1,4 +1,5 @@
-import { CODE_APPLICATION_REASON_CODES } from './suggestion-code';
+import { CODE_APPLICATION_REASON_CODES } from './code-application';
+import type { CodeApplicationReasonCode } from './code-application';
 import type { TelemetryEventInput } from './telemetry';
 
 /**
@@ -41,7 +42,7 @@ export type ApplyCheckRequest = {
 export type ApplyCheckDecision = {
   allowed: boolean;
   reason: string;
-  reasonCode: string;
+  reasonCode: CodeApplicationReasonCode;
   maxLines: number | null;
   remaining: number | null;
   requireConfirmation: boolean;
@@ -145,7 +146,7 @@ export function parseApplyCheckResponse(data: unknown): ApplyCheckDecision | nul
   }
   const reasonCode = typeof record.reasonCode === 'string' && record.reasonCode.trim()
     ? record.reasonCode.trim().slice(0, 80)
-    : record.allowed ? 'ok' : 'not_allowed';
+    : record.allowed ? CODE_APPLICATION_REASON_CODES.ok : CODE_APPLICATION_REASON_CODES.notAllowed;
   return {
     allowed: record.allowed,
     reason: typeof record.reason === 'string' ? record.reason.trim().slice(0, 600) : '',
@@ -165,7 +166,7 @@ export function isOfflineApplicationAllowed(linesChanged: number, offlineMaxLine
   return linesChanged <= max;
 }
 
-export function defaultBlockedReason(reasonCode: string) {
+export function defaultBlockedReason(reasonCode: CodeApplicationReasonCode) {
   switch (reasonCode) {
     case CODE_APPLICATION_REASON_CODES.disabled:
       return 'Tu docente desactivó la aplicación de código del tutor. Usa la sugerencia como guía y escríbela tú.';
@@ -269,7 +270,7 @@ export type CodeApplicationVerdict = {
   linesChanged: number;
   charsChanged: number;
   reason: string;
-  reasonCode: string;
+  reasonCode: CodeApplicationReasonCode;
   remaining: number | null;
   decisionId: string | null;
   requireConfirmation: boolean;
@@ -278,7 +279,7 @@ export type CodeApplicationVerdict = {
 function blockedEvent(
   attempt: CodeApplicationAttempt,
   request: ApplyCheckRequest,
-  reasonCode: string,
+  reasonCode: CodeApplicationReasonCode,
   decisionId: string | null,
   extra: Record<string, unknown>,
 ): TelemetryEventInput {
@@ -350,7 +351,7 @@ export async function guardCodeApplication(
         allowed: false,
         offline: true,
         reason,
-        reasonCode: 'offline_too_large',
+        reasonCode: CODE_APPLICATION_REASON_CODES.offlineTooLarge,
         remaining: null,
         decisionId: attempt.decisionId || null,
         requireConfirmation: false,
@@ -361,7 +362,7 @@ export async function guardCodeApplication(
       allowed: true,
       offline: true,
       reason: '',
-      reasonCode: 'offline_allowed',
+      reasonCode: CODE_APPLICATION_REASON_CODES.offlineAllowed,
       remaining: null,
       decisionId: attempt.decisionId || null,
       requireConfirmation: false,
@@ -427,7 +428,7 @@ export async function guardCodeApplication(
         offline: false,
         cancelled: true,
         reason: 'Cancelado por el estudiante.',
-        reasonCode: 'cancelled_by_user',
+        reasonCode: CODE_APPLICATION_REASON_CODES.cancelledByUser,
         remaining: decision.remaining,
         decisionId,
         requireConfirmation: true,

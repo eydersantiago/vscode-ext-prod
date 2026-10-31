@@ -1,6 +1,7 @@
 // ADACEEN (VS Code): metricas de sugerencias, comentarios de accion, rack de reemplazos para el navegador e historial del quiz.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
-import { isSuggestionApplyOffered, primarySuggestionText, summarizeActiveSuggestion } from './active-suggestion';
+import { isSuggestionApplyOffered, summarizeActiveSuggestion } from './active-suggestion';
+import { primarySuggestionText } from './selection-widget-model';
 import { buildSessionHeaders, fetchJsonWithTimeout } from './backend-http';
 import { ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import { detectBranchName } from './git-repo';

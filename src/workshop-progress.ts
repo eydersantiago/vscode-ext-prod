@@ -1,48 +1,70 @@
 // ADACEEN (VS Code): avance del taller en la esquina del panel (0.0.38), sin importar vscode.
 //
 // La VM de editores mide cada cierto tiempo cuanto lleva cada estudiante del taller (puntos
-// hechos, si compila) y el backend lo guarda (POST /api/workspaces/progress-report). La vista
-// «Este archivo» muestra el suyo en la esquina: «35 %», con los puntos que faltan al pasar el
-// mouse. Contrato: GET /api/workspaces/my-progress[?repoFullName=<owner/name>] ->
-//   { ok: true, progress: null | { taller, titulo, percent, compiles, done, total,
-//     missing: [{ id, hu, texto }], stale, receivedAt, lastChangeAt } }
-// Con un backend anterior (404), sin sesion (401) o sin red no se muestra nada.
+// hechos y a medias, si compila) y el backend lo guarda (POST /api/workspaces/progress-report).
+// La vista «Este archivo» muestra el suyo en la esquina: «35 %», con lo que falta al pasar el
+// mouse. Contrato (docs/arquitectura/contrato-api.md, backend del 30/10/2026):
+//   GET /api/workshop-progress/me[?repoFullName=<owner/name>] ->
+//   { ok: true, status: "sin-editor" | "sin-taller" | "sin-carpeta" | "en-curso",
+//     progress: null | { taller, titulo, percent, compiles, done, partial, total,
+//       pending: [{ id, hu, texto, partial }] (a lo sumo 8, en el orden del taller), pendingCount,
+//       stale, receivedAt, lastChangeAt, matchedBy: "repo" | "pilot" | "latest" } }
+// progress solo viene con «en-curso». percent es ponderado por el peso de cada punto; done,
+// partial y total son cuentas de puntos. Sin sesion (401) o sin red no se muestra nada.
 // Se prueba con node:test.
 
-export type WorkshopMissingPoint = { id: string; hu: string; texto: string };
+/** Lo que dice el backend del avance: sin vincular GitHub, sin taller, sin la carpeta, o el avance. */
+export type WorkshopStatus = 'sin-editor' | 'sin-taller' | 'sin-carpeta' | 'en-curso';
+
+/** Un punto del taller que falta o va a medias. */
+export type WorkshopPendingPoint = { id: string; hu: string; texto: string; partial: boolean };
 
 export type WorkshopProgress = {
   taller: string;
   titulo: string;
+  /** Ponderado por el peso de cada punto (lo calcula la VM). */
   percent: number;
   compiles: boolean | null;
+  /** Puntos hechos, a medias y del taller (cuentas, sin peso). */
   done: number;
+  partial: number;
   total: number;
-  missing: WorkshopMissingPoint[];
+  /** Lo que falta o va a medias, en el orden del taller (a lo sumo 8). */
+  pending: WorkshopPendingPoint[];
+  /** Cuantos faltan o van a medias en total (antes del tope de pending). */
+  pendingCount: number;
   stale: boolean;
   receivedAt: string;
   lastChangeAt: string;
+  matchedBy: 'repo' | 'pilot' | 'latest' | '';
 };
+
+/** La respuesta revisada: el estado y, solo con «en-curso», el avance. */
+export type WorkshopProgressReply =
+  | { status: 'en-curso'; progress: WorkshopProgress }
+  | { status: Exclude<WorkshopStatus, 'en-curso'>; progress: null };
 
 /** Lo que pinta la vista: null = no se muestra. */
 export type ProgressPill = {
-  /** «35 %». */
+  /** «35 %» (o «— %» si falta algo para medir). */
   text: string;
   /** Lo que sale al pasar el mouse (y lee el lector de pantalla). */
   title: string;
-  /** Para el color: bajo (<40), medio (<80) o alto. */
-  level: 'low' | 'mid' | 'high';
+  /** Para el color: bajo (<40), medio (<80), alto, o apagada (no se puede medir todavia). */
+  level: 'low' | 'mid' | 'high' | 'muted';
   stale: boolean;
 };
 
-export const PROGRESS_PATH = '/api/workspaces/my-progress';
-export const MAX_TOOLTIP_POINTS = 8;
+export const PROGRESS_PATH = '/api/workshop-progress/me';
 /** Despues de guardar o compilar, a lo sumo una consulta cada 2 minutos. */
 export const PROGRESS_WORK_THROTTLE_MS = 2 * 60_000;
 /** Con la vista a la vista, una consulta cada 5 minutos. */
 export const PROGRESS_POLL_MS = 5 * 60_000;
 
+/** El backend manda a lo sumo 8 puntos pendientes; se cuidan los mismos. */
+const MAX_PENDING_POINTS = 8;
 const MAX_TEXT = 160;
+const STATUSES: readonly WorkshopStatus[] = ['sin-editor', 'sin-taller', 'sin-carpeta', 'en-curso'];
 
 function text(value: unknown, max = MAX_TEXT) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -64,19 +86,7 @@ export function progressUrl(baseUrl: string, repo?: string) {
   return `${base}${PROGRESS_PATH}${param ? `?repoFullName=${encodeURIComponent(param)}` : ''}`;
 }
 
-/**
- * La respuesta del backend, revisada: null si no trae avance (todavia no hay informe, el
- * estudiante no empezo) o si no tiene la forma del contrato.
- */
-export function normalizeWorkshopProgress(value: unknown): WorkshopProgress | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  const data = value as Record<string, unknown>;
-  if (data.ok !== true) {
-    return null;
-  }
-  const raw = data.progress;
+function normalizeProgress(raw: unknown): WorkshopProgress | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return null;
   }
@@ -84,25 +94,50 @@ export function normalizeWorkshopProgress(value: unknown): WorkshopProgress | nu
   if (typeof progress.percent !== 'number' || !Number.isFinite(progress.percent)) {
     return null;
   }
-  const missing = Array.isArray(progress.missing)
-    ? progress.missing
+  const pending = Array.isArray(progress.pending)
+    ? progress.pending
       .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-      .map((item) => ({ id: text(item.id, 40), hu: text(item.hu, 40), texto: text(item.texto) }))
+      .map((item) => ({ id: text(item.id, 40), hu: text(item.hu, 40), texto: text(item.texto), partial: item.partial === true }))
       .filter((item) => item.id || item.texto)
-      .slice(0, 100)
+      .slice(0, MAX_PENDING_POINTS)
     : [];
+  const matchedBy = progress.matchedBy === 'repo' || progress.matchedBy === 'pilot' || progress.matchedBy === 'latest' ? progress.matchedBy : '';
   return {
     taller: text(progress.taller, 80),
     titulo: text(progress.titulo, 120),
     percent: Math.min(100, Math.max(0, Math.round(progress.percent))),
     compiles: typeof progress.compiles === 'boolean' ? progress.compiles : null,
     done: count(progress.done),
+    partial: count(progress.partial),
     total: count(progress.total),
-    missing,
+    pending,
+    // Nunca menos de lo que vino en la lista.
+    pendingCount: Math.max(count(progress.pendingCount), pending.length),
     stale: progress.stale === true,
     receivedAt: text(progress.receivedAt, 40),
     lastChangeAt: text(progress.lastChangeAt, 40),
+    matchedBy,
   };
+}
+
+/**
+ * La respuesta del backend, revisada: null si no tiene la forma del contrato (o no hay respuesta:
+ * sin sesion). «en-curso» sin un avance valido tampoco vale.
+ */
+export function normalizeWorkshopProgressReply(value: unknown): WorkshopProgressReply | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  const status = STATUSES.find((item) => item === data.status);
+  if (data.ok !== true || !status) {
+    return null;
+  }
+  if (status !== 'en-curso') {
+    return { status, progress: null };
+  }
+  const progress = normalizeProgress(data.progress);
+  return progress ? { status, progress } : null;
 }
 
 /** «hoy 14:32», «ayer 09:05» o «28/10 18:40» (hora local). '' si la fecha no se entiende. */
@@ -127,26 +162,51 @@ export function formatReportTime(iso: string, now: Date = new Date()) {
   return `${pad(date.getDate())}/${pad(date.getMonth() + 1)} ${time}`;
 }
 
+/** «2 hechos y 3 a medias de 10 puntos» (cuentas sin peso: el porcentaje si lleva el peso de cada punto). */
+export function pointsSummary(progress: Pick<WorkshopProgress, 'done' | 'partial' | 'total'>) {
+  if (!progress.total) {
+    return '';
+  }
+  const done = `${progress.done} ${progress.done === 1 ? 'hecho' : 'hechos'}`;
+  const partial = progress.partial ? ` y ${progress.partial} a medias` : '';
+  return `${done}${partial} de ${progress.total} ${progress.total === 1 ? 'punto' : 'puntos'}`;
+}
+
+/** Sin avance que mostrar todavia: la pastilla apagada dice que falta (o no se muestra). */
+const STATUS_HINTS: Record<Exclude<WorkshopStatus, 'en-curso'>, string> = {
+  'sin-editor': 'Tu avance del taller se mide con tu cuenta de GitHub: vincúlala en ADACEEN (ADACEEN: Conectar) para verlo aquí.',
+  'sin-carpeta': 'Todavía no se ve tu carpeta del taller en el editor: ábrela (o clónala) en el túnel para que se mida tu avance.',
+  'sin-taller': '',
+};
+
 /** La pastilla de la esquina y su texto al pasar el mouse. null: no se muestra. */
-export function buildProgressPill(progress: WorkshopProgress | null, now: Date = new Date()): ProgressPill | null {
-  if (!progress) {
+export function buildProgressPill(reply: WorkshopProgressReply | null, now: Date = new Date()): ProgressPill | null {
+  if (!reply) {
     return null;
   }
+  if (reply.status !== 'en-curso') {
+    const hint = STATUS_HINTS[reply.status];
+    return hint ? { text: '— %', title: hint, level: 'muted', stale: false } : null;
+  }
+  const progress = reply.progress;
   const lines: string[] = [];
   const name = progress.titulo || progress.taller;
-  lines.push(`Avance del taller${name ? ` «${name}»` : ''}: ${progress.percent} %${progress.total ? ` (${progress.done} de ${progress.total} puntos)` : ''}`);
+  const points = pointsSummary(progress);
+  // El porcentaje pondera cada punto por su peso: con las cuentas al lado, «80 %» y «2 hechos y 3 a
+  // medias de 10» no parecen contradecirse.
+  lines.push(`Avance del taller${name ? ` «${name}»` : ''}: ${progress.percent} %${points ? ` · ${points}` : ''}`);
   if (progress.compiles === false) {
     lines.push('Tu proyecto no compila: arregla eso primero.');
   } else if (progress.compiles === true) {
     lines.push('Tu proyecto compila.');
   }
-  if (progress.missing.length) {
+  if (progress.pending.length) {
     lines.push('Te falta:');
-    for (const point of progress.missing.slice(0, MAX_TOOLTIP_POINTS)) {
+    for (const point of progress.pending) {
       const label = point.texto || point.id;
-      lines.push(`• ${point.hu ? `${point.hu}: ` : ''}${label}`);
+      lines.push(`• ${point.hu ? `${point.hu}: ` : ''}${label}${point.partial ? ' (a medias)' : ''}`);
     }
-    const rest = progress.missing.length - MAX_TOOLTIP_POINTS;
+    const rest = progress.pendingCount - progress.pending.length;
     if (rest > 0) {
       lines.push(`… y ${rest} ${rest === 1 ? 'punto más' : 'puntos más'}`);
     }

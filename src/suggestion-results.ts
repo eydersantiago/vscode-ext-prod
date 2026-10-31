@@ -1,8 +1,8 @@
 // ADACEEN (VS Code): utilidades de texto y normalizacion de la respuesta del backend para la sugerencia activa.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
-import { asRecord, toOptionalString } from './settings';
-import { normalizeCodeCutSummary, normalizeCodeTruncation } from './suggestion-code';
-import type { ActiveSuggestionRagSource, BackendSuggestionResult, BackendSuggestionSettledResult, SuggestionCodeApplication, SuggestionPolicyApplied } from './types';
+import { normalizeSuggestionCodeApplication } from './code-application';
+import type { ActiveSuggestionRagSource, BackendSuggestionResult, BackendSuggestionSettledResult, SuggestionPolicyApplied } from './types';
+import { asRecord, toOptionalString } from './values';
 
 export function pathBaseName(value: string) {
   const clean = value.replace(/\\/g, '/').split('/').filter(Boolean);
@@ -210,25 +210,6 @@ export function normalizePolicyApplied(value: unknown): SuggestionPolicyApplied 
     blocked: data.blocked === true,
     reason: (toOptionalString(data.reason) || '').slice(0, 600),
     reasonCode: text('reasonCode'),
-  };
-}
-
-export function normalizeSuggestionCodeApplication(value: unknown): SuggestionCodeApplication | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return null;
-  }
-  const data = asRecord(value);
-  const cut = normalizeCodeCutSummary(data.cut);
-  return {
-    allowed: data.allowed !== false,
-    maxLines: optionalFiniteInt(data.maxLines),
-    remaining: optionalFiniteInt(data.remaining),
-    requireConfirmation: data.requireConfirmation === true,
-    countsAsHint: data.countsAsHint === true,
-    reason: (toOptionalString(data.reason) || '').slice(0, 600),
-    reasonCode: (toOptionalString(data.reasonCode) || '').slice(0, 80),
-    truncation: normalizeCodeTruncation(data.truncation),
-    ...(cut ? { cut } : {}),
   };
 }
 

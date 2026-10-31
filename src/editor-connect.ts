@@ -209,8 +209,15 @@ export class EditorConnection implements vscode.Disposable {
     void this.rememberWorkspaceRepo();
   }
 
-  onDidChangeSession(listener: SessionListener) {
+  /** Avisa cada cambio de sesion; devuelve como dejar de escuchar (0.0.38). */
+  onDidChangeSession(listener: SessionListener): vscode.Disposable {
     this.listeners.push(listener);
+    return new vscode.Disposable(() => {
+      const index = this.listeners.indexOf(listener);
+      if (index >= 0) {
+        this.listeners.splice(index, 1);
+      }
+    });
   }
 
   /**
@@ -309,7 +316,7 @@ export class EditorConnection implements vscode.Disposable {
 
   private handleChange(session: ResolvedEditorSession | null, idChanged: boolean) {
     this.renderStatus(session);
-    for (const listener of this.listeners) {
+    for (const listener of [...this.listeners]) {
       try {
         listener(session, idChanged);
       } catch {

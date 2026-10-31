@@ -11,8 +11,9 @@
 //   - «Ver panel» llevaba al quiz; ahora es «Resumen y material» (vista «Este
 //     archivo» con el resumen y el material del curso).
 
-import { GUIDE_CODE_LABEL } from './suggestion-code';
-import type { SuggestionGuide } from './suggestion-code';
+import type { CodeApplicationPolicy } from './code-application';
+import { GUIDE_CODE_LABEL } from './suggestion-guide';
+import type { SuggestionGuide } from './suggestion-guide';
 import { assertNeverPhase, resolveDisplayedCode, responseAllowsApply, suggestionPhase } from './suggestion-phase';
 import type { DisplayedCode, SuggestionPhase } from './suggestion-phase';
 import type { SuggestionApplyMode, SuggestionSource } from './types';
@@ -49,11 +50,11 @@ export type SelectionWidgetModel = {
   blocked?: boolean;
   tutorMessage?: string;
   /**
-   * false cuando la politica del docente no permite aplicar codigo en este archivo
-   * (code_application.allowed). Lo que descarta la respuesta (bloqueada, sin modelo o pista
-   * local) no va aqui: lo deriva responseAllowsApply de las otras banderas.
+   * La politica del docente para aplicar en este archivo (code_application: si deja, por que no y
+   * su codigo; 0.0.38). null o sin el campo: deja. Lo que descarta la respuesta (bloqueada, sin
+   * modelo o pista local) no va aqui: lo deriva responseAllowsApply de las otras banderas.
    */
-  codeApplicationAllowed?: boolean;
+  codeApplication?: CodeApplicationPolicy | null;
   /** Nota discreta bajo las acciones, p. ej. "Te quedan 3 aplicaciones en este archivo". */
   applicationNote?: string;
   /** Se esta pidiendo al tutor el codigo de esta accion. */
@@ -126,7 +127,7 @@ export function sanitizeTutorMarkdown(text: string) {
 
 /** La ventana ofrece acciones de aplicar para este modelo (la misma regla que isSuggestionApplyOffered). */
 export function selectionWidgetOffersApply(model: SelectionWidgetModel) {
-  return responseAllowsApply(model) && model.codeApplicationAllowed !== false;
+  return responseAllowsApply(model) && model.codeApplication?.allowed !== false;
 }
 
 /** Los botones del titulo (Insertar / Modificar / Eliminar) solo cuando hay algo que aplicar. */
@@ -134,21 +135,18 @@ export function selectionWidgetShowsTitleActions(model: SelectionWidgetModel) {
   return suggestionPhase(model) === 'ready' && selectionWidgetOffersApply(model);
 }
 
-/**
- * Lo que la ventana muestra del codigo del tutor (0.0.38): la misma regla que la vista «Este
- * archivo» (resolveDisplayedCode). La ventana guarda la politica como codeApplicationAllowed y su
- * motivo en applicationNote.
- */
+/** Lo que la ventana muestra del codigo del tutor (0.0.38): la misma regla que la vista «Este archivo». */
 export function selectionWidgetCode(model: SelectionWidgetModel): DisplayedCode {
-  return resolveDisplayedCode({
-    ...model,
-    codeApplication: { allowed: model.codeApplicationAllowed !== false, reason: model.applicationNote || '' },
-  });
+  return resolveDisplayedCode(model);
 }
 
-/** Causas de guia que ya explican la politica del docente: la nota de la politica no se repite. */
-function guideExplainsPolicy(shown: DisplayedCode) {
-  return shown.kind === 'guide' && (shown.cause === 'policy_cut' || shown.cause === 'policy_blocked');
+/**
+ * Causas de guia que ya dicen por que no se aplica (el tope de lineas, la respuesta cortada o la
+ * politica): la nota del backend (code_application.reason) no se repite con otras palabras. Una
+ * guia por resumen «...» o llaves sin cerrar no dice nada de la politica: ahi la nota si va.
+ */
+function guideExplainsWhyNotApplicable(shown: DisplayedCode) {
+  return shown.kind === 'guide' && (shown.cause === 'policy_cut' || shown.cause === 'incomplete_reply' || shown.cause === 'policy_blocked');
 }
 
 function safeFence(code: string) {
@@ -322,7 +320,7 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
     // de lineas o aplicacion no permitida), la nota del backend («pasaba de 5 lineas y se
     // recorto») no lo repite con otras palabras.
     lines.push(secondary);
-    if (!guideExplainsPolicy(shown)) {
+    if (!guideExplainsWhyNotApplicable(shown)) {
       lines.push('');
       lines.push(`_${escapeMarkdown(model.applicationNote || 'Usa el código como guía y escríbelo tú.')}_`);
     }

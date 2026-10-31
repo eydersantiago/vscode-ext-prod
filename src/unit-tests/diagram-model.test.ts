@@ -199,9 +199,10 @@ describe('comparar el diagrama con el codigo (0.0.38)', () => {
   it('la telemetria lleva solo cuentas', () => {
     const target = compareDiagram(parsePlantUmlClassDiagram(BANCO_PUML), studentClasses());
     const metadata = diagramTelemetryMetadata(target);
-    assert.deepEqual(metadata, { classes: 6, done: 3, partial: 1, missing: 2 });
+    assert.deepEqual(metadata, { diagramClasses: 6, classesDone: 3, classesPartial: 1, classesMissing: 2 }, 'las claves que acepta el backend');
     assert.doesNotMatch(JSON.stringify(metadata), /Cuenta|Banco|\.h/, 'sin nombres de clases ni de archivos');
-    assert.deepEqual(diagramTelemetryMetadata(null), { classes: 0, done: 0, partial: 0, missing: 0 });
+    assert.deepEqual(diagramTelemetryMetadata(null), { diagramClasses: 0, classesDone: 0, classesPartial: 0, classesMissing: 0 });
+    assert.ok(Object.values(metadata).every((value) => Number.isInteger(value) && value >= 0), 'enteros no negativos');
   });
 });
 

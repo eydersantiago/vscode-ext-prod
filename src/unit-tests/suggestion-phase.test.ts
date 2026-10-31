@@ -69,7 +69,7 @@ describe('fase de la sugerencia (0.0.37)', () => {
   it('la ventana usa la misma regla: sin tutor no ofrece aplicar ni muestra botones', () => {
     assert.equal(selectionWidgetOffersApply(widget()), true);
     assert.equal(selectionWidgetShowsTitleActions(widget()), true);
-    for (const patch of [{ tutorUnavailable: true }, { blocked: true }, { source: 'local-fallback' as const }, { codeApplicationAllowed: false }]) {
+    for (const patch of [{ tutorUnavailable: true }, { blocked: true }, { source: 'local-fallback' as const }, { codeApplication: { allowed: false, reason: '', reasonCode: 'code_application_disabled' } }]) {
       assert.equal(selectionWidgetOffersApply(widget(patch)), false, JSON.stringify(patch));
       assert.equal(selectionWidgetShowsTitleActions(widget(patch)), false, JSON.stringify(patch));
     }
