@@ -44,6 +44,8 @@ export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): Sel
     requestedAction: model.requestedAction || '',
     proposalWarning: model.proposalWarning || '',
     tutorUnavailable: !!model.tutorUnavailable,
+    guideCode: model.guideCode || '',
+    guideReason: model.guideReason || '',
   };
 }
 

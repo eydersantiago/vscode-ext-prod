@@ -82,8 +82,12 @@ export type FileViewState = {
   overviewFrom: 'tutor' | 'local' | '';
   summaryLoading: boolean;
   tips: string[];
-  /** La sugerencia de ahora, en una linea (la ventana flotante tiene el detalle). */
-  suggestion: { headline: string; status: string } | null;
+  /**
+   * La sugerencia de ahora, en una linea (la ventana flotante tiene el detalle). 0.0.38: con el
+   * codigo del tutor que no se aplica con un clic (guia de solo lectura, con su motivo): la
+   * ventana flotante puede estar cerrada o en otra pestaña y el codigo no se debe perder.
+   */
+  suggestion: { headline: string; status: string; guide: { code: string; reason: string; language: string } | null } | null;
   sources: FileViewSource[];
   material: {
     status: FileViewMaterialStatus;
@@ -257,6 +261,33 @@ function suggestionStatus(model: ActiveSuggestionModel) {
   }
 }
 
+/** Lineas de la guia en la vista (la ventana flotante muestra el bloque completo). */
+const GUIDE_MAX_LINES = 40;
+
+/**
+ * Codigo de guia de la sugerencia (0.0.38): el que no se pudo dejar listo para aplicar
+ * (guideCode) o, si el docente no deja aplicar, el de la accion. null si no hay, o si la
+ * sugerencia ya se aplico o no esta lista.
+ */
+export function suggestionGuide(model: ActiveSuggestionModel) {
+  if (model.applied || suggestionPhase(model) !== 'ready') {
+    return null;
+  }
+  const policyBlocks = model.codeApplication?.allowed === false;
+  const code = String(model.guideCode || (policyBlocks ? model.completionText : '') || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\n+$/, '');
+  if (!code.trim()) {
+    return null;
+  }
+  const lines = code.split('\n');
+  return {
+    code: lines.length > GUIDE_MAX_LINES ? `${lines.slice(0, GUIDE_MAX_LINES).join('\n')}\n…` : code,
+    reason: model.guideReason || (policyBlocks ? model.codeApplication?.reason || '' : ''),
+    language: model.language || '',
+  };
+}
+
 export type FileViewExtras = {
   /**
    * El archivo del editor activo (0.0.36); null: no hay archivo abierto. Sin el campo, el de la
@@ -297,7 +328,7 @@ export function buildFileViewState(
     summaryLoading: !!file && summaryLoading,
     tips,
     suggestion: fileModel && headline && fileModel.triggerKind === 'cursor'
-      ? { headline, status: suggestionStatus(fileModel) }
+      ? { headline, status: suggestionStatus(fileModel), guide: suggestionGuide(fileModel) }
       : null,
     dependencies: file ? extras.dependencies ?? null : null,
     sources: (fileModel?.ragSources || []).slice(0, 6).map((source, index) => ({

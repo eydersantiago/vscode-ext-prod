@@ -105,7 +105,7 @@ describe('vista «Este archivo» (0.0.34)', () => {
     assert.equal(state.overviewFrom, 'tutor');
     assert.deepEqual(state.tips, ['Valida que la base no sea negativa.']);
     assert.equal(state.focusLabel, 'Selección, líneas 84-89');
-    assert.deepEqual(state.suggestion, { headline: 'El if no cubre el caso del cero.', status: 'del tutor' });
+    assert.deepEqual(state.suggestion, { headline: 'El if no cubre el caso del cero.', status: 'del tutor', guide: null });
     assert.equal(state.sources[0].meta, 'poo.pdf · p. 12-13 · [POO p. 12]');
     assert.equal(state.material.status, 'idle');
   });

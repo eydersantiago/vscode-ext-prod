@@ -3,6 +3,7 @@ import {
   APPLY_LABEL,
   buildSelectionWidgetText,
   SELECTION_WIDGET_COMMANDS,
+  selectionWidgetCode,
   selectionWidgetShowsTitleActions,
 } from './selection-widget-text';
 import type { SelectionWidgetModel } from './selection-widget-text';
@@ -82,8 +83,9 @@ function commentLabel(model: SelectionWidgetModel) {
     case 'local_fallback':
       return 'pista';
     case 'ready': {
-      const ready = model.completionText.trim() ? model.completionMode : '';
-      return ready ? APPLY_LABEL[ready].toLowerCase() : 'pista';
+      // 0.0.38: el codigo que solo se muestra como guia tambien se nombra.
+      const shown = selectionWidgetCode(model);
+      return shown.kind === 'apply' ? APPLY_LABEL[shown.mode].toLowerCase() : shown.kind === 'guide' ? 'código de guía' : 'pista';
     }
     default:
       return assertNeverPhase(phase);

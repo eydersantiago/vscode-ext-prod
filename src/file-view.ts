@@ -206,6 +206,11 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
       font-size: 10px; font-weight: 600; color: var(--vscode-button-foreground); background: var(--vscode-button-background); margin-top: 1px; }
     .now { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
     .now .status { font-size: 11px; color: var(--muted); }
+    .now .guide-label { margin: 8px 0 4px; }
+    pre.guide { margin: 0; padding: 6px 8px; max-height: 260px; overflow: auto; border-radius: 4px; white-space: pre; tab-size: 4;
+      font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size, 12px); line-height: 1.4;
+      color: var(--vscode-editor-foreground); background: var(--vscode-textCodeBlock-background, rgba(128,128,128,.12)); }
+    .now .guide-reason { margin: 4px 0 2px; font-size: 11px; }
     .label { margin: 0 0 4px; font-size: 11px; color: var(--muted); }
     ul.list { list-style: none; margin: 0 -8px; padding: 0; display: grid; gap: 2px; }
     ul.list li button { display: block; width: 100%; text-align: left; padding: 6px 8px; border-radius: 4px; color: var(--vscode-foreground);
@@ -441,11 +446,16 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
 
       function nowSection(state) {
         if (!state.suggestion) return null;
+        var guide = state.suggestion.guide;
         return el('section', {}, [
           el('h2', { text: 'Sugerencia de ahora' }),
           el('div', { class: 'now' }, [
             el('div', { text: state.suggestion.headline }),
-            el('div', { class: 'status', text: state.suggestion.status + ' · el código y las acciones están junto a tu selección' }),
+            // 0.0.38: el codigo que no se aplica con un clic se ve aqui tambien, de solo lectura.
+            guide ? el('p', { class: 'label guide-label', text: 'Código de guía (no se aplica con un clic):' }) : null,
+            guide ? el('pre', { class: 'guide', 'aria-label': 'Código de guía del tutor' }, [el('code', { text: guide.code })]) : null,
+            guide && guide.reason ? el('p', { class: 'muted guide-reason', text: guide.reason }) : null,
+            el('div', { class: 'status', text: state.suggestion.status + (guide ? ' · escríbelo tú usando la guía' : ' · el código y las acciones están junto a tu selección') }),
           ]),
         ]);
       }

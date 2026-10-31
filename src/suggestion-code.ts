@@ -278,12 +278,34 @@ const ELISION_PHRASE = /\b(?:resto|demas|demás)\b.*\b(?:codigo|código|metodo|m
 const COMMENT_START = /^(?:\/\/+|#(?!\s*(?:include|define|undef|if|ifdef|ifndef|elif|else|endif|pragma)\b)|\/\*+|<!--|--\s)/;
 
 /**
+ * Marca con la que el backend corta un bloque largo (0.0.38): «// ... recortado por la politica
+ * del docente: completa el resto tu» (limitCodeBlocks en intervention-templates.ts). No es un
+ * resumen del modelo: las lineas que faltan no estan en el bloque del estudiante, asi que no se
+ * pueden completar con las suyas. Con o sin tildes, y con cualquier comentario o "..." delante.
+ */
+const POLICY_CUT_PREFIX = /^(?:\/\/+|#+|\/\*+|<!--|--|;;|'|\.{3,}|…)/;
+const POLICY_CUT_PHRASE = /\brecortad[oa]s?\b[^\n]*\b(?:pol[ií]tica|docente|l[ií]mite)\b/i;
+
+export function isPolicyCutLine(line: string) {
+  const text = line.trim();
+  return !!text && POLICY_CUT_PREFIX.test(text) && POLICY_CUT_PHRASE.test(text);
+}
+
+/** El codigo sin las marcas de recorte del backend, y si traia alguna. */
+export function stripPolicyCutLines(code: string): { code: string; cut: boolean } {
+  const lines = String(code || '').replace(/\r\n?/g, '\n').split('\n');
+  const kept = lines.filter((line) => !isPolicyCutLine(line));
+  return { code: kept.join('\n'), cut: kept.length !== lines.length };
+}
+
+/**
  * "..." solo (o con un comentario), un comentario que empieza con "..." o uno que dice "resto
  * igual", "sin cambios"... No la sintaxis con puntos: "...args", "...(lista)", "typename...".
+ * Tampoco la marca de recorte del backend (isPolicyCutLine): esa no se puede completar.
  */
 export function isElisionLine(line: string) {
   const text = line.trim();
-  if (!text) {
+  if (!text || isPolicyCutLine(text)) {
     return false;
   }
   if (ELLIPSIS_ALONE.test(text) || COMMENTED_ELLIPSIS.test(text)) {
@@ -496,48 +518,73 @@ export type PreparedSuggestionCode = {
   code: string;
   /** Avisos para la ventana (se juntan con proposalWarning). */
   notes: string[];
-  /** No se ofrece aplicar este codigo con un clic (se explica en unusableReason). */
+  /**
+   * No se ofrece aplicar este codigo con un clic (se explica en unusableReason). Desde la 0.0.38
+   * el codigo igual se muestra, como guia (suggestionCodeFields).
+   */
   unusable: boolean;
   unusableReason: string;
+  /** El backend lo corto por el limite de lineas del docente (se quito su marca, isPolicyCutLine). */
+  policyCut: boolean;
 };
 
 export const ELISION_EXPANDED_NOTE = 'El tutor resumió con «...» líneas que no cambian: se completaron con las de tu bloque. Revísalo con «Ver cambios».';
-export const ELISION_UNUSABLE_REASON = 'El tutor resumió parte de tu bloque con «...» y así se perderían líneas. Pide la versión otra vez con «Proponer una mejora».';
+export const ELISION_UNUSABLE_REASON = 'El tutor resumió parte de tu bloque con «...»: aplicarlo así borraría líneas. Úsalo como guía o pide la versión completa con «Proponer una mejora».';
 export const ELISION_INSERT_NOTE = 'El código propuesto deja partes sin escribir («...»): complétalas tú antes de compilar.';
-export const UNBALANCED_REASON = 'La versión propuesta deja llaves o paréntesis sin cerrar y rompería tu bloque. Pide «Otra sugerencia» o escríbelo con la pista.';
+export const UNBALANCED_REASON = 'La versión propuesta deja llaves o paréntesis sin cerrar y rompería tu bloque: úsala como guía o pide «Otra sugerencia».';
 export const UNBALANCED_INSERT_NOTE = 'Ojo: el código para insertar no cierra todas sus llaves o paréntesis; revisa dónde termina.';
+export const POLICY_CUT_REASON = 'Tu docente limita cuántas líneas escribe el tutor: esto es solo el comienzo. Úsalo como guía y completa tú el resto.';
+export const POLICY_CUT_NOTE = 'Tu docente limita cuántas líneas escribe el tutor: el código quedó corto, revisa que haga todo lo que necesitas.';
 
 /**
  * El codigo del tutor listo para la ventana y para aplicar (0.0.35): sin margen numerado, con
  * los resumenes "..." completados con el bloque original (en un reemplazo) y revisado el
  * balance de llaves y parentesis.
+ *
+ * 0.0.38: sin la marca de recorte del backend (antes contaba como un «...» del modelo, el
+ * reemplazo no se podia completar y la ventana no mostraba ningun codigo). Despues de quitarla:
+ * un codigo para insertar se puede aplicar si cierra sus llaves; una version del bloque cortada
+ * nunca (borraria el final del bloque), y queda como guia.
  */
 export function prepareSuggestionCode(
   code: string,
   options: { selection?: string; mode?: SuggestionApplyMode | ''; language?: string },
 ): PreparedSuggestionCode {
   const notes: string[] = [];
-  let text = stripLineGutters(code).replace(/\s+$/, '');
-  if (!text.trim()) {
-    return { code: '', notes, unusable: false, unusableReason: '' };
+  const stripped = stripPolicyCutLines(stripLineGutters(code));
+  const policyCut = stripped.cut;
+  let text = stripped.code.replace(/\s+$/, '');
+  if (!text.trim() || isPlaceholderCode(text)) {
+    return { code: '', notes, unusable: false, unusableReason: '', policyCut };
   }
   const selection = String(options.selection || '');
+  const language = String(options.language || '');
+  const unusable = (reason: string): PreparedSuggestionCode => ({ code: text, notes, unusable: true, unusableReason: reason, policyCut });
+  if (policyCut) {
+    if (options.mode === 'replace') {
+      return unusable(POLICY_CUT_REASON);
+    }
+    const balance = bracketBalance(text, language);
+    if (balance.reliable && !isBalanced(balance)) {
+      return unusable(POLICY_CUT_REASON);
+    }
+    notes.push(POLICY_CUT_NOTE);
+  }
   const hasElision = text.split('\n').some(isElisionLine);
   if (hasElision) {
     if (options.mode === 'replace' && selection.trim()) {
       const expanded = expandElisions(text, selection);
       if (expanded === null) {
-        return { code: text, notes, unusable: true, unusableReason: ELISION_UNUSABLE_REASON };
+        return unusable(ELISION_UNUSABLE_REASON);
       }
       text = expanded.replace(/\s+$/, '');
       notes.push(ELISION_EXPANDED_NOTE);
     } else if (options.mode === 'replace') {
-      return { code: text, notes, unusable: true, unusableReason: ELISION_UNUSABLE_REASON };
+      return unusable(ELISION_UNUSABLE_REASON);
     } else {
       notes.push(ELISION_INSERT_NOTE);
     }
   }
-  const language = String(options.language || '');
   const balance = bracketBalance(text, language);
   if (balance.reliable && !isBalanced(balance)) {
     if (options.mode === 'replace' && selection.trim()) {
@@ -547,7 +594,7 @@ export function prepareSuggestionCode(
         && originalBalance.bracket === balance.bracket
         && originalBalance.brace === balance.brace;
       if (isBalanced(originalBalance)) {
-        return { code: text, notes, unusable: true, unusableReason: UNBALANCED_REASON };
+        return unusable(UNBALANCED_REASON);
       }
       if (!sameShape) {
         notes.push(UNBALANCED_INSERT_NOTE);
@@ -556,5 +603,26 @@ export function prepareSuggestionCode(
       notes.push(UNBALANCED_INSERT_NOTE);
     }
   }
-  return { code: text, notes, unusable: false, unusableReason: '' };
+  return { code: text, notes, unusable: false, unusableReason: '', policyCut };
+}
+
+/**
+ * Los campos del modelo de la sugerencia que salen del codigo preparado (0.0.38). Un codigo que
+ * no se puede aplicar ya no se borra: va en guideCode (solo lectura, con el motivo) y la accion
+ * queda sin codigo, asi nada lo aplica por error. Antes completionText quedaba vacio y la
+ * ventana solo decia «El tutor resumió...» sin mostrar el codigo (piloto del 30/10/2026).
+ */
+export function suggestionCodeFields(
+  prepared: PreparedSuggestionCode,
+  modes: { completionMode: SuggestionApplyMode | ''; completionText: string },
+): { completionMode: SuggestionApplyMode | ''; completionText: string; guideCode: string; guideReason: string } {
+  if (prepared.unusable) {
+    return { completionMode: '', completionText: '', guideCode: prepared.code, guideReason: prepared.unusableReason };
+  }
+  return {
+    completionMode: prepared.code ? modes.completionMode : '',
+    completionText: prepared.code,
+    guideCode: '',
+    guideReason: '',
+  };
 }

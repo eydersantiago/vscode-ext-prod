@@ -7,7 +7,7 @@ import type { SuggestDiagnostic } from './error-signals';
 import { indexFilesInFolderOf } from './dependency-scan';
 import { formatDependenciesForPrompt, isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
-import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes } from './suggestion-code';
+import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, suggestionCodeFields } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { countMatches, inferSuggestionApplyMode } from './suggestion-edit';
 import { parseBackendSuggestionSections } from './suggestion-format';
@@ -525,18 +525,18 @@ export function buildBackendActiveSuggestionModel(
     mode: resolvedModes.completionMode,
     language: snapshot.language,
   });
-  const modes = prepared.unusable
-    ? { ...resolvedModes, completionMode: '' as const, completionText: '' }
-    : { ...resolvedModes, completionText: prepared.code };
+  // 0.0.38: el codigo que no se puede aplicar tal cual se muestra como guia (guideCode) en vez
+  // de borrarse: la accion queda sin codigo y nada lo aplica por error.
+  const modes = { ...resolvedModes, ...suggestionCodeFields(prepared, resolvedModes) };
   // Una respuesta que es solo la linea "Aplicar:" y el bloque de codigo tambien vale
   // (antes se descartaba por no traer texto fuera del bloque).
   const codeOnlyHeadline = modes.completionText
     ? (modes.completionMode === 'replace'
       ? 'El tutor propone una versión mejorada del bloque.'
       : 'El tutor propone código para continuar.')
-    : prepared.unusable
-      // Escribio codigo, pero no se puede aplicar tal cual: la sugerencia se muestra con el motivo.
-      ? 'El tutor propuso código que no se puede aplicar tal cual.'
+    : modes.guideCode
+      // Escribio codigo, pero no se puede aplicar tal cual: se muestra como guia con el motivo.
+      ? 'El tutor propone código para usar como guía.'
       : '';
   const sectionFocusLines = focusSections.sugerencias.length > 0 ? focusSections.sugerencias : focusSections.all;
   const focusLines = sectionFocusLines.length > 0 ? sectionFocusLines : (codeOnlyHeadline ? [codeOnlyHeadline] : []);
@@ -611,7 +611,7 @@ export function buildBackendActiveSuggestionModel(
       modes.completionMode === 'replace' && replacementDropsMostOfSelection(snapshot.selectionText, completionText) ? DROPS_MOST_WARNING : '',
       ...prepared.notes,
     ].filter(Boolean).join(' '),
-    ...(prepared.unusable ? { codeRequestNote: prepared.unusableReason } : {}),
+    ...(modes.guideCode ? { guideCode: modes.guideCode, guideReason: modes.guideReason } : {}),
     // Respuesta sin modelo para el foco: antes la ventana decia ademas «El tutor respondio sin
     // codigo para esto», como si hubiera respondido (piloto del 25/10/2026).
     ...(primaryResult === focusResult && focusResult.degraded ? { tutorUnavailable: true } : {}),

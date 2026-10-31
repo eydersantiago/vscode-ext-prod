@@ -1277,14 +1277,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
   /** Nota bajo el codigo pedido cuando no es para la accion que se pidio (o no hay codigo). */
   const codeRequestNoteFor = (next: ActiveSuggestionModel, mode: EditorCodeAction) => {
-    // Sin modelo la ventana ya explica que el tutor no esta disponible.
-    if (suggestionReadyForMode(next, mode) || next.tutorUnavailable) {
+    // Sin modelo la ventana ya explica que el tutor no esta disponible. Con codigo de guia
+    // (0.0.38: resumen «...», llaves sin cerrar o recortado) la ventana lo muestra con su motivo.
+    if (suggestionReadyForMode(next, mode) || next.tutorUnavailable || next.guideCode) {
       return '';
-    }
-    // 0.0.35: el motivo concreto si el codigo no se puede aplicar tal cual (resumen «...» o
-    // llaves sin cerrar, prepareSuggestionCode).
-    if (next.codeRequestNote) {
-      return next.codeRequestNote;
     }
     const produced = producedMode(next);
     if (mode === 'replace' && produced === 'insert') {
