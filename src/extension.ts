@@ -16,6 +16,7 @@ import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnc
 import { ERROR_TEXT_MAX_CHARS, ErrorSignalTracker } from './error-signals';
 import type { BlockingSignal, ErrorSignal } from './error-signals';
 import { BuildFileCache, computeActiveFileDependencies, DependencyProbeCache, indexKeyOf, workspaceRelativePath } from './dependency-scan';
+import { DiagramController } from './diagram-controller';
 import type { ActiveFileDependencies } from './dependency-scan';
 import { AdaceenFileViewProvider } from './file-view';
 import { buildDependencyViewState, buildFileViewState, dependencyItemId, EMPTY_MATERIAL_STATE } from './file-view-model';
@@ -43,6 +44,9 @@ import type { TelemetryEventInput } from './telemetry';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionInFlight, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, CursorIdleAnchor, ScanCommandArgs, ScanPayload, SuggestionApplyMode, SuggestionTrigger, WorkspaceProjectIndex } from './types';
 import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity, stableStringHash } from './workspace-index';
 import { askScanPermission, performWorkspaceScan, renderScanOutput } from './workspace-scan';
+import { buildProgressPill } from './workshop-progress';
+import { fetchMyWorkshopProgress } from './workshop-progress-client';
+import { WorkshopProgressPoller } from './workshop-progress-poller';
 
 /** /suggest-tab respondio, pero sin texto ni codigo que mostrar. */
 class BackendAnsweredWithoutSuggestion extends Error {
@@ -168,6 +172,14 @@ export async function activate(context: vscode.ExtensionContext) {
   let dependencyRun = 0;
   const dependencyProbes = new DependencyProbeCache();
   const dependencyBuildFiles = new BuildFileCache();
+  // 0.0.38: avance del taller en la esquina de la vista (GET /api/workspaces/my-progress). Un
+  // backend anterior o sin sesion: no se muestra nada.
+  const workshopProgress = new WorkshopProgressPoller({
+    fetchProgress: fetchMyWorkshopProgress,
+    onChange: () => refreshFileView(),
+    log: safeLog,
+  });
+  context.subscriptions.push(workshopProgress);
   // El indice que usa el cuadro. Se pide uno nuevo si cambio otro archivo: uno guardado que no
   // es el que se ve, o uno que se guardo mientras se veia y ahora se ve otro (el estudiante
   // agrega #include "figura.h" en main.cpp y vuelve a figura.h: «La usan» tiene que mostrarlo).
@@ -448,6 +460,7 @@ export async function activate(context: vscode.ExtensionContext) {
       materialState,
       {
         activeFile,
+        progress: buildProgressPill(workshopProgress.progress),
         dependencies: deps
           ? buildDependencyViewState(deps.result?.deps || null, deps.result?.filePath || '', deps.loading, {
             partial: deps.result?.partial,
@@ -1709,11 +1722,27 @@ export async function activate(context: vscode.ExtensionContext) {
     recordMaterialOpened(item.title, { origin, courseCode: item.courseCode, sourceId: item.id });
   };
 
+  // 0.0.38: «Ver diagrama» (comando y boton de la vista): el diagrama del taller y las dependencias.
+  const diagram = new DiagramController({
+    buildFiles: dependencyBuildFiles,
+    track: (event) => telemetry.track(event),
+    pageContext: editorPageContext,
+    log: safeLog,
+  });
+  context.subscriptions.push(diagram);
+
   fileView = new AdaceenFileViewProvider({
     onVisible: () => {
       refreshFileView();
       void requestFileSummary(false);
       scheduleDependencyRefresh(0);
+      workshopProgress.setVisible(true);
+    },
+    onHidden: () => {
+      workshopProgress.setVisible(false);
+    },
+    openDiagram: () => {
+      void diagram.open('file_view');
     },
     openDependency: (group, index, key, id) => {
       void openDependency(group, index, key, id);
@@ -1748,6 +1777,13 @@ export async function activate(context: vscode.ExtensionContext) {
       if (model && !model.loading) {
         recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', 'file_view');
       }
+    }),
+    // 0.0.38: «ADACEEN: Abrir panel» trae el panel ADACEEN (su icono) con «Este archivo».
+    vscode.commands.registerCommand('adaceen.openPanel', async () => {
+      await fileView?.reveal(false);
+    }),
+    vscode.commands.registerCommand('adaceen.showDiagram', async () => {
+      await diagram.open('command');
     }),
     // 0.0.36: «ADACEEN: Ver dependencias del archivo» (paleta de comandos): abre el cuadro.
     vscode.commands.registerCommand('adaceen.showDependencies', async () => {
@@ -1961,6 +1997,8 @@ export async function activate(context: vscode.ExtensionContext) {
   connection.onDidChangeSession((_session, idChanged) => {
     if (idChanged) {
       scheduleCursorIdleSuggestionRefresh();
+      // Otra cuenta (o se conecto): su avance, aunque el backend anterior no tuviera la ruta.
+      void workshopProgress.refresh(true);
     }
   });
 
@@ -2254,6 +2292,8 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
       clearWorkspaceProjectIndexCache();
+      // El avance del taller cambia con lo que se guarda (a lo sumo una consulta cada 2 minutos).
+      workshopProgress.noteWork();
       // Otro archivo pudo empezar (o dejar) de incluir al de la vista: «La usan» cambia. Guardar
       // el mismo archivo de la vista no cambia quien lo usa (y lo suyo se lee del editor); queda
       // anotado para cuando se vea otro archivo.
@@ -2489,9 +2529,23 @@ export async function activate(context: vscode.ExtensionContext) {
     },
   );
 
+  // Una compilacion (tarea de VS Code o comando en la terminal con integracion de shell) tambien
+  // cambia el avance; a lo sumo una consulta cada 2 minutos.
+  if (typeof vscode.tasks?.onDidEndTaskProcess === 'function') {
+    context.subscriptions.push(vscode.tasks.onDidEndTaskProcess(() => workshopProgress.noteWork()));
+  }
+  if (typeof vscode.window.onDidEndTerminalShellExecution === 'function') {
+    context.subscriptions.push(vscode.window.onDidEndTerminalShellExecution((event) => {
+      if (/\b(?:make|cmake|g\+\+|gcc|clang\+?\+?|javac|mvn|gradle|python3?|dotnet)\b/.test(event.execution.commandLine.value || '')) {
+        workshopProgress.noteWork();
+      }
+    }));
+  }
+
   scheduleCursorIdleSuggestionRefresh();
   evaluateErrorSignals();
   void runWorkerCycle();
+  void workshopProgress.refresh();
 }
 
 export function deactivate() {}

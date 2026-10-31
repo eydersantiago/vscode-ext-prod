@@ -2,8 +2,10 @@ import * as vscode from 'vscode';
 import type { FileViewDependencyGroup, FileViewState } from './file-view-model';
 
 /**
- * Vista «Este archivo» (0.0.34), en el Explorador debajo del arbol de archivos
- * (el estudiante la puede arrastrar a otro lado y VS Code lo recuerda).
+ * Vista «Este archivo» (0.0.34). Desde la 0.0.38 es la primera vista del panel ADACEEN (su
+ * icono en la barra de actividad): en el Explorador quedaba debajo de Esquema y Linea de tiempo
+ * y casi nadie la veia. Arriba lleva el boton «Ver diagrama» y, en la esquina, el avance del
+ * taller («35 %», con lo que falta al pasar el mouse).
  *
  * Volvio lo que la 0.0.26 se llevo junto con el panel de sugerencias (reunion
  * del 20/10/2026): de que trata el archivo activo y el acceso al material del
@@ -30,6 +32,10 @@ type FileViewHandlers = {
   openQuiz: () => void;
   /** key y label: de que cuadro y que elemento era el clic (el cuadro pudo cambiar despues). */
   openDependency: (group: FileViewDependencyGroup, index: number, key: string, id: string) => void;
+  /** Boton «Ver diagrama» (0.0.38): abre el panel con el diagrama del taller y las dependencias. */
+  openDiagram: () => void;
+  /** La vista se oculto (0.0.38: deja de pedir el avance del taller cada 5 minutos). */
+  onHidden?: () => void;
 };
 
 function randomId(length: number) {
@@ -62,6 +68,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
 
   update(state: FileViewState) {
     this.state = state;
+    this.applyDescription();
     const text = JSON.stringify(state);
     if (this.view && this.ready && text === this.posted) {
       return;
@@ -69,6 +76,17 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     if (this.view) {
       this.posted = this.ready ? text : '';
       void this.view.webview.postMessage({ type: 'state', state });
+    }
+  }
+
+  /**
+   * 0.0.38: el avance tambien en la cabecera de la vista («ESTE ARCHIVO  35 %»), que se ve con la
+   * vista plegada. El texto completo (lo que falta) esta en la pastilla de adentro.
+   */
+  private applyDescription() {
+    if (this.view) {
+      const pill = this.state?.progress;
+      this.view.description = pill ? `${pill.text}${pill.stale ? ' · desactualizado' : ''}` : undefined;
     }
   }
 
@@ -102,11 +120,14 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     this.posted = '';
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this.renderShell();
+    this.applyDescription();
     this.disposables.push(
       webviewView.webview.onDidReceiveMessage((message: unknown) => this.handleMessage(message)),
       webviewView.onDidChangeVisibility(() => {
         if (webviewView.visible) {
           this.handlers.onVisible();
+        } else {
+          this.handlers.onHidden?.();
         }
       }),
       webviewView.onDidDispose(() => {
@@ -114,6 +135,7 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
           this.view = null;
           this.ready = false;
         }
+        this.handlers.onHidden?.();
       }),
     );
     this.handlers.onVisible();
@@ -156,6 +178,9 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
       case 'openQuiz':
         this.handlers.openQuiz();
         return;
+      case 'openDiagram':
+        this.handlers.openDiagram();
+        return;
       case 'openDependency':
         if (typeof data.group === 'string' && (DEPENDENCY_GROUPS as readonly string[]).includes(data.group) && Number.isInteger(data.index) && Number(data.index) >= 0) {
           this.handlers.openDependency(
@@ -184,6 +209,20 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
     body { margin: 0; padding: 10px 14px 18px; color: var(--vscode-foreground); background: transparent;
       font-family: var(--vscode-font-family); font-size: 13px; line-height: 1.5; }
     button { font: inherit; cursor: pointer; }
+    .topbar { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
+    .primary { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 0; border-radius: 3px;
+      color: var(--vscode-button-foreground); background: var(--vscode-button-background); font-weight: 600; }
+    .primary:hover { background: var(--vscode-button-hoverBackground, var(--vscode-button-background)); }
+    .primary:focus-visible, .pill:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+    .primary .glyph { font-size: 14px; line-height: 1; }
+    .pill { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 10px;
+      font-size: 11px; font-weight: 600; line-height: 18px; cursor: help; border: 1px solid transparent;
+      color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); }
+    .pill.low { box-shadow: inset 3px 0 0 var(--vscode-charts-red, #f14c4c); }
+    .pill.mid { box-shadow: inset 3px 0 0 var(--vscode-charts-yellow, #cca700); }
+    .pill.high { box-shadow: inset 3px 0 0 var(--vscode-charts-green, #89d185); }
+    .pill.stale { opacity: .75; border-style: dashed; border-color: var(--vscode-descriptionForeground); }
+    .pill .stale-tag { font-weight: 500; color: inherit; opacity: .9; }
     .file { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; margin-bottom: var(--gap); }
     .file-tag { grid-row: span 2; min-width: 34px; height: 34px; padding: 0 6px; box-sizing: border-box; display: grid; place-items: center;
       border-radius: 6px; font-family: var(--vscode-editor-font-family); font-size: 11px; font-weight: 600; letter-spacing: .02em;
@@ -296,6 +335,21 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
       function send(message) { vscode.postMessage(message); }
       function fold(value) { return String(value || '').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g, ''); }
       function spinnerText(text) { return el('p', { class: 'muted' }, [el('span', { class: 'spinner', 'aria-hidden': 'true' }), document.createTextNode(text)]); }
+
+      // 0.0.38: «Ver diagrama» arriba y el avance del taller en la esquina (con o sin archivo).
+      function topbar(state) {
+        var pill = state && state.progress;
+        return el('div', { class: 'topbar' }, [
+          el('button', { class: 'primary', 'data-focus': 'diagram', title: 'Cómo debe quedar el taller y las dependencias de tu proyecto', onclick: function () { send({ type: 'openDiagram' }); } }, [
+            el('span', { class: 'glyph', 'aria-hidden': 'true', text: '◇' }),
+            document.createTextNode('Ver diagrama'),
+          ]),
+          pill ? el('span', { class: 'pill ' + pill.level + (pill.stale ? ' stale' : ''), title: pill.title, tabindex: '0', role: 'status', 'aria-label': pill.title, 'data-focus': 'progress' }, [
+            document.createTextNode(pill.text),
+            pill.stale ? el('span', { class: 'stale-tag', text: '· desactualizado' }) : null,
+          ]) : null,
+        ]);
+      }
 
       function header(state) {
         var tag = (state.language || 'txt').replace(/[^a-z0-9+#]/gi, '').slice(0, 6) || 'txt';
@@ -549,13 +603,14 @@ export class AdaceenFileViewProvider implements vscode.WebviewViewProvider, vsco
         var focused = document.activeElement && document.activeElement.type === 'search';
         var focusKey = document.activeElement && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-focus') : null;
         if (!state || !state.hasFile) {
-          root.replaceChildren(
+          root.replaceChildren.apply(root, [
+            topbar(state),
             el('p', { class: 'muted', text: 'Abre un archivo de tu proyecto: aquí verás de qué trata, qué usa y el material del curso que usa el tutor.' }),
             el('div', { class: 'divider' }),
             state ? materialSection(state) : null
-          );
+          ].filter(Boolean));
         } else {
-          var parts = [header(state), overviewSection(state), dependenciesSection(state), tipsSection(state), nowSection(state), materialSection(state),
+          var parts = [topbar(state), header(state), overviewSection(state), dependenciesSection(state), tipsSection(state), nowSection(state), materialSection(state),
             el('div', { class: 'row' }, [el('button', { class: 'link', 'data-focus': 'quiz', text: 'Quiz e historial', onclick: function () { send({ type: 'openQuiz' }); } })])];
           root.replaceChildren.apply(root, parts.filter(Boolean));
         }

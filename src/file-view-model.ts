@@ -2,10 +2,11 @@
 //
 // Reunion del 20/10/2026: «el panel que se ve como un resumen de lo que trata la
 // pestaña no está, tampoco el atajo para ver el material de la RAG». Volvieron en
-// una vista del Explorador (debajo del arbol de archivos): de que trata el
-// archivo activo, que hacer despues, el material citado en la ultima sugerencia
-// y todo el material del curso.
+// una vista (desde la 0.0.38, la primera del panel ADACEEN, con su icono): de que
+// trata el archivo activo, que hacer despues, el material citado en la ultima
+// sugerencia y todo el material del curso.
 import type { CourseMaterialItem } from './course-material';
+import type { ProgressPill } from './workshop-progress';
 import type { DependencyFamily, FileDependencies, FileDependencyItem } from './file-dependencies';
 import { assertNeverPhase, suggestionPhase } from './suggestion-phase';
 import type { ActiveSuggestionModel, ActiveSuggestionRagSource } from './types';
@@ -97,6 +98,8 @@ export type FileViewState = {
   };
   /** null: no aplica (sin archivo, o un archivo que no declara dependencias y nadie usa). */
   dependencies: FileViewDependencies | null;
+  /** Avance del taller en la esquina (0.0.38); null: no se muestra (sin informe o backend anterior). */
+  progress: ProgressPill | null;
 };
 
 export const EMPTY_MATERIAL_STATE: FileViewMaterialState = { status: 'idle', courseCode: '', items: [], message: '' };
@@ -295,6 +298,8 @@ export type FileViewExtras = {
    */
   activeFile?: FileViewActiveFile | null;
   dependencies?: FileViewDependencies | null;
+  /** Avance del taller (0.0.38): se ve con o sin archivo abierto. */
+  progress?: ProgressPill | null;
 };
 
 export function buildFileViewState(
@@ -331,6 +336,7 @@ export function buildFileViewState(
       ? { headline, status: suggestionStatus(fileModel), guide: suggestionGuide(fileModel) }
       : null,
     dependencies: file ? extras.dependencies ?? null : null,
+    progress: extras.progress ?? null,
     sources: (fileModel?.ragSources || []).slice(0, 6).map((source, index) => ({
       index,
       title: source.title || source.fileName || 'Fuente del curso',

@@ -2689,3 +2689,66 @@ export function formatDependenciesForPrompt(deps: FileDependencies | null, maxCh
   const text = `Dependencias del archivo: ${parts.join('; ')}.`;
   return text.length > maxChars ? `${text.slice(0, maxChars - 2)}….` : text;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Grafo del proyecto (0.0.38, «Ver diagrama»)
+
+export type ProjectDependencyGraph = {
+  /** Archivos de codigo del proyecto (rutas relativas), en el orden del indice. */
+  files: string[];
+  /** De un archivo a otro del proyecto que incluye o importa. */
+  edges: Array<{ from: string; to: string }>;
+  /** Lo que un archivo incluye y no esta en el proyecto (ni es una biblioteca conocida). */
+  missing: Array<{ from: string; label: string; line: number; hint: string }>;
+  /** Bibliotecas, con cuantos archivos las usan. */
+  libraries: Array<{ label: string; description: string; count: number }>;
+};
+
+const MAX_GRAPH_FILES = 400;
+const MAX_GRAPH_MISSING = 60;
+
+/**
+ * Lo que usa cada archivo del proyecto, con la misma lectura que el cuadro «Dependencias»
+ * (resolveImport sobre un solo ProjectFiles). Sin busqueda en el disco: quien llama pasa en
+ * `files` todos los archivos de codigo que encontro (no el indice de 90 del tutor).
+ */
+export function resolveProjectDependencyGraph(input: { files: DependencyIndexFile[]; buildFiles?: string[] }): ProjectDependencyGraph {
+  const files = (input.files || []).slice(0, MAX_GRAPH_FILES);
+  const project = new ProjectFiles(files, [], input.buildFiles || []);
+  const graph: ProjectDependencyGraph = { files: [], edges: [], missing: [], libraries: [] };
+  const libraries = new Map<string, { label: string; description: string; users: Set<string> }>();
+  const edgeKeys = new Set<string>();
+  for (const file of files) {
+    const path = normalizePath(file.path);
+    const family = dependencyFamily(file.language || '', path);
+    if (family === 'none' || THIRD_PARTY_SEGMENT.test(path)) {
+      continue;
+    }
+    graph.files.push(path);
+    const refs = new Set(file.typeRefs || []);
+    const options: ResolveOptions = { uses: (name) => refs.has(name), hints: true, ownPackage: file.javaPackage };
+    const missingHere = new Set<string>();
+    for (const imp of (file.imports || []).slice(0, 300)) {
+      for (const item of resolveImport(imp, path, family, project, options)) {
+        if (item.type === 'local' && item.path && item.path !== path) {
+          const key = `${path}\n${item.path}`;
+          if (!edgeKeys.has(key)) {
+            edgeKeys.add(key);
+            graph.edges.push({ from: path, to: item.path });
+          }
+        } else if (item.type === 'library') {
+          const entry = libraries.get(item.label) || { label: item.label, description: item.description || '', users: new Set<string>() };
+          entry.users.add(path);
+          libraries.set(item.label, entry);
+        } else if (item.type === 'missing' && !missingHere.has(item.label) && graph.missing.length < MAX_GRAPH_MISSING) {
+          missingHere.add(item.label);
+          graph.missing.push({ from: path, label: item.label, line: imp.line, hint: item.hint || '' });
+        }
+      }
+    }
+  }
+  graph.libraries = [...libraries.values()]
+    .map((entry) => ({ label: entry.label, description: entry.description, count: entry.users.size }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+  return graph;
+}

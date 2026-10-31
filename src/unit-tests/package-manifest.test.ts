@@ -9,8 +9,9 @@ const manifest = JSON.parse(readFileSync(path.join(__dirname, '..', '..', 'packa
   capabilities?: { untrustedWorkspaces?: { supported: boolean | string; restrictedConfigurations?: string[] } };
   contributes: {
     commands: Array<{ command: string; title: string }>;
-    menus: { commandPalette: Array<{ command: string; when: string }> };
+    menus: { commandPalette: Array<{ command: string; when: string }>; 'view/title'?: Array<{ command: string; when: string }> };
     views: Record<string, Array<{ id: string; type?: string; name: string }>>;
+    viewsContainers?: { activitybar?: Array<{ id: string; title: string; icon: string }> };
     configuration: { properties: Record<string, unknown> };
   };
 };
@@ -40,13 +41,21 @@ describe('package.json', () => {
     }
   });
 
-  it('0.0.34: la vista «Este archivo» esta en el Explorador y sus comandos existen', () => {
-    const fileView = (manifest.contributes.views.explorer || []).find((view) => view.id === 'adaceen.fileView');
-    assert.ok(fileView, 'vista del resumen y el material en el Explorador');
-    assert.equal(fileView.type, 'webview');
-    for (const command of ['adaceen.openFileView', 'adaceen.openCourseMaterial', 'adaceen.showProposalDiff']) {
+  it('0.0.38: «Este archivo» es la primera vista del panel ADACEEN (con su icono), ya no en el Explorador', () => {
+    assert.equal((manifest.contributes.views.explorer || []).some((view) => view.id === 'adaceen.fileView'), false, 'debajo de Esquema y Línea de tiempo casi no se veía');
+    const container = (manifest.contributes.viewsContainers?.activitybar || []).find((item) => item.id === 'adaceen');
+    assert.ok(container, 'contenedor propio en la barra de actividad');
+    assert.equal(container.icon, 'media/adaceen.svg');
+    const views = manifest.contributes.views.adaceen || [];
+    assert.deepEqual(views.map((view) => view.id), ['adaceen.fileView', 'adaceen.quizView'], '«Este archivo» primero, «Quiz y seguimiento» después');
+    assert.equal(views[0].type, 'webview');
+    for (const command of ['adaceen.openFileView', 'adaceen.openPanel', 'adaceen.showDiagram', 'adaceen.openCourseMaterial', 'adaceen.showProposalDiff']) {
       assert.ok(manifest.contributes.commands.some((item) => item.command === command), command);
     }
+    assert.ok(manifest.contributes.commands.some((item) => item.command === 'adaceen.openPanel' && item.title === 'ADACEEN: Abrir panel'));
+    assert.ok(manifest.contributes.commands.some((item) => item.command === 'adaceen.showDiagram' && item.title === 'ADACEEN: Ver diagrama'));
+    assert.ok(!manifest.contributes.menus.commandPalette.some((item) => item.command === 'adaceen.showDiagram' || item.command === 'adaceen.openPanel'), 'los dos en la paleta');
+    assert.ok((manifest.contributes.menus['view/title'] || []).some((item) => item.command === 'adaceen.showDiagram' && item.when === 'view == adaceen.fileView'), 'botón en el título de la vista');
     assert.ok(manifest.contributes.menus.commandPalette.some((item) => item.command === 'adaceen.openRagSource' && item.when === 'false'), 'sin argumento no sirve: fuera de la paleta');
   });
 });

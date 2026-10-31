@@ -4,6 +4,32 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.38] - 2026-10-30
+
+Pedidos del 30 de octubre, tras el piloto de la noche: la ventana de la selección de `int main(){ ... }` mostró solo «El tutor resumió parte de tu bloque con «...»...» y «El codigo sugerido pasaba de 5 lineas y se recortó: usalo como guia.», sin ningún código; y la vista «Este archivo» casi no se veía. Va con el backend del mismo día (deja de poner la marca de recorte dentro del código y agrega `GET /api/workspaces/my-progress`); con un backend anterior funciona igual: la marca se quita y el avance no se muestra.
+
+### Corregido
+
+- **El código del tutor ya no se esconde.** El backend cortó el bloque a 5 líneas y agregó `// ... recortado por la politica del docente: completa el resto tu`; la extensión lo tomó por un resumen «...» del modelo, no pudo completarlo con el bloque del estudiante, lo marcó como no aplicable y vació el código (`active-suggestion.ts`). Ahora:
+  - La marca de recorte del backend se reconoce y se quita (`isPolicyCutLine`, `stripPolicyCutLines` en `suggestion-code.ts`, con o sin tildes) y no cuenta como un resumen del modelo. Después se decide otra vez: un código para insertar que cierra sus llaves se puede insertar (con el aviso «Tu docente limita cuántas líneas escribe el tutor...»); una versión del bloque cortada nunca se aplica (borraría el final del bloque).
+  - Todo código que no se puede aplicar tal cual (resumen «...» que no se pudo completar, llaves sin cerrar, recortado) va como **código de guía** de solo lectura, con el motivo y sin el botón de aplicar: en la ventana de la selección («Código de guía (no se aplica con un clic)») y en «Sugerencia de ahora» de la vista «Este archivo». Si el docente no deja aplicar, el código de la acción también se ve como guía. El modelo lo guarda aparte (`guideCode`, `guideReason`, `suggestionCodeFields`): la acción queda sin código y nada lo aplica por error.
+  - Los resúmenes «...» reales se siguen completando con el bloque original cuando no hay duda (`expandElisions`), como en la 0.0.35.
+  - El motivo ya no se repite con las palabras del backend («pasaba de 5 lineas y se recortó»).
+
+### Cambiado
+
+- **«Este archivo» tiene su propio icono.** Es la primera vista del panel ADACEEN de la barra de actividad (el mismo icono del quiz; «Quiz y seguimiento» queda segunda). En el Explorador quedaba al fondo, debajo de Esquema y Línea de tiempo. El bombillo de la barra de estado, «Resumen y material» y los comandos de siempre la abren; no se abre sola con cada sugerencia (solo con `adaceen.suggestions.autoRevealPanel`, como antes). Comando nuevo «ADACEEN: Abrir panel».
+
+### Agregado
+
+- **Avance del taller en la esquina** de «Este archivo»: «35 %» con un color según cuánto falta y, al pasar el mouse, el taller, los puntos hechos, si compila, hasta 8 puntos que faltan y la hora del informe; «desactualizado» si el backend lo dice. Sale de `GET /api/workspaces/my-progress` (con `?repo=owner/name` si se reconoce el repositorio) con las mismas cabeceras que `/suggest-tab`. Se pide al activar, al mostrar la vista, cada 5 minutos con la vista a la vista, al cambiar de cuenta y tras guardar o compilar (a lo sumo cada 2 minutos). Sin sesión, con un backend anterior (404), con la sesión vencida o sin red no se muestra nada (`workshop-progress.ts`, `workshop-progress-poller.ts`, `workshop-progress-client.ts`).
+- **«Ver diagrama»**: botón arriba de «Este archivo», botón en el título de la vista y comando «ADACEEN: Ver diagrama». Abre un panel junto al editor con:
+  - «Cómo debe quedar»: el diagrama de clases del taller (`docs/diagrama-clases.puml`, si no otro `.puml` de `docs/` o de la raíz, o un `classDiagram` de Mermaid en un `.md`) comparado con el código: cada clase **hecha**, **a medias** (con los atributos y métodos que faltan, solo los nombres) o **falta**, y cada relación en verde si el código ya la tiene (`class CuentaAhorros : public Cuenta`, un `vector<Cuenta*>` en `Banco`). Lee clases, interfaces, enums, atributos y métodos con visibilidad, herencia, implementación, composición, agregación, asociación y dependencia, con multiplicidades y etiquetas; se salta notas, `skinparam`, `title`, comentarios y paquetes (`class-diagram.ts`). Del código lee C/C++ (también los `Clase::metodo` del `.cpp`), Java, C#, Python y JS/TS sin comentarios ni cadenas (`source-classes.ts`); el constructor de Python (`__init__`) y los atributos con `_` o `m_` cuentan. Es una guía: el panel dice que el docente decide cómo se califica.
+  - «Dependencias de tu proyecto»: los archivos del proyecto y quién incluye o importa a quién (la misma lectura del cuadro «Dependencias», `resolveProjectDependencyGraph`), con el archivo abierto resaltado, lo no encontrado en color de aviso y las bibliotecas aparte. Hasta 24 archivos en el dibujo (el activo, sus vecinos y los que tienen problemas primero).
+  - Dibujo en SVG propio, en capas (el padre y el todo arriba), con los colores del tema de VS Code, leyenda, y sin bibliotecas ni recursos externos (CSP estricta: funciona en vscode.dev). Un clic (o Enter) en una clase o un archivo lo abre. «Actualizar» vuelve a leer; también al guardar un archivo con el panel abierto. Sin diagrama en el taller lo explica y muestra igual las dependencias. Respeta las reglas del escaneo: sin archivos de claves, sin lo de `adaceen.scan.excludeGlob` ni paquetes instalados; no sale nada del equipo.
+- Telemetría `vscode_diagram_opened` (categoría `navigation`, value `file_view` o `command`) con `metadata.classes`, `metadata.done`, `metadata.partial` y `metadata.missing`: solo cuentas, sin código ni nombres de archivos o clases. El backend tiene que agregar esas cuatro claves a la lista de metadata permitida y el evento al catálogo.
+- Pruebas unitarias nuevas (el caso exacto del piloto, el diagrama del taller del banco, la comparación, el acomodo, el SVG escapado y el avance).
+
 ## [0.0.37] - 2026-10-25
 
 Pedidos del 25 de octubre: «mira por qué sucede esto» (la ventana flotante decía a la vez «El tutor no esta disponible…» y «El tutor respondió sin código para esto») y «que se compruebe que la extensión de VS Code sí se haya instalado en el túnel en la última versión». Va con el backend y la extensión de navegador 0.8.4 del mismo día; con un backend anterior funciona igual (la cabecera nueva se ignora).

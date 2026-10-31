@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.37",
+  "version": "0.0.38",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -55,6 +55,11 @@
         "title": "ADACEEN: Escanear workspace"
       },
       {
+        "command": "adaceen.openPanel",
+        "title": "ADACEEN: Abrir panel",
+        "icon": "$(layout-sidebar-left)"
+      },
+      {
         "command": "adaceen.openAssistant",
         "title": "ADACEEN: Abrir panel de quiz y seguimiento"
       },
@@ -67,6 +72,11 @@
         "command": "adaceen.showDependencies",
         "title": "ADACEEN: Ver dependencias del archivo",
         "icon": "$(references)"
+      },
+      {
+        "command": "adaceen.showDiagram",
+        "title": "ADACEEN: Ver diagrama",
+        "icon": "$(type-hierarchy)"
       },
       {
         "command": "adaceen.openCourseMaterial",
@@ -154,14 +164,12 @@
       ]
     },
     "views": {
-      "explorer": [
+      "adaceen": [
         {
           "type": "webview",
           "id": "adaceen.fileView",
-          "name": "ADACEEN · Este archivo"
-        }
-      ],
-      "adaceen": [
+          "name": "Este archivo"
+        },
         {
           "type": "webview",
           "id": "adaceen.quizView",
@@ -215,6 +223,11 @@
         }
       ],
       "view/title": [
+        {
+          "command": "adaceen.showDiagram",
+          "when": "view == adaceen.fileView",
+          "group": "navigation@0"
+        },
         {
           "command": "adaceen.openCourseMaterial",
           "when": "view == adaceen.fileView",
@@ -307,7 +320,7 @@
         "adaceen.suggestions.autoRevealPanel": {
           "type": "boolean",
           "default": false,
-          "description": "Abre automáticamente la vista «ADACEEN · Este archivo» (de qué trata el archivo y el material del curso) cuando cambia el archivo activo."
+          "description": "Abre automáticamente la vista «Este archivo» del panel ADACEEN (de qué trata el archivo y el material del curso) cuando cambia el archivo activo."
         },
         "adaceen.suggestions.autoOpenSelectionActions": {
           "type": "boolean",
