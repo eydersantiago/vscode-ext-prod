@@ -18,7 +18,7 @@ import type { FileViewDependencyGroup, FileViewState } from './file-view-model';
  *
  * 0.0.36: cuadro «Dependencias» (pedido del 25/10/2026) debajo de «De qué trata»: lo que usa
  * el archivo de tu proyecto (se abre con un clic), las bibliotecas, lo que no se encontro y
- * quien lo usa. El clic manda (grupo, posicion); extension.ts busca el elemento.
+ * quien lo usa. El clic manda (grupo, posicion); file-view-controller.ts busca el elemento.
  */
 
 function assertNeverMessage(message: never): never {

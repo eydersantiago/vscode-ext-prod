@@ -137,7 +137,7 @@ function implicitNote(family: DependencyFamily) {
 
 /**
  * Del resultado de file-dependencies.ts a lo que pinta el cuadro. Conserva el orden de cada
- * grupo: el clic llega con (grupo, posicion) y extension.ts busca el elemento en el resultado.
+ * grupo: el clic llega con (grupo, posicion) y openDependency (file-view-controller.ts) busca el elemento.
  */
 /**
  * Lo que identifica un elemento del cuadro entre el resultado y la vista: el nombre del import

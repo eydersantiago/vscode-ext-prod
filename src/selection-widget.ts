@@ -34,7 +34,7 @@ export type { SelectionWidgetMode, SelectionWidgetModel } from './selection-widg
  *
  * Este modulo no sabe nada del backend: recibe un modelo ya resuelto y lo
  * pinta (el texto sale de selection-widget-text.ts). Aplicar la accion sigue
- * siendo trabajo de extension.ts (adaceen.applySuggestionCompletion).
+ * siendo trabajo de suggestion-apply.ts (adaceen.applySuggestionCompletion).
  */
 
 export const SELECTION_WIDGET_CONTROLLER_ID = 'adaceen.selection';

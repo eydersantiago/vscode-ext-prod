@@ -5,7 +5,7 @@ import type { EditorConnection } from './editor-connect';
 // Sesion (x-session-id): emparejada, archivo del tunel o ajuste heredado (src/editor-session.ts).
 export let editorConnection: EditorConnection | null = null;
 
-// activate() la fija al crear la conexion (antes asignaba la variable directamente en extension.ts).
+// initCoreState() (extension-state.ts) la fija al crear la conexion (antes se asignaba en extension.ts).
 export function setEditorConnection(connection: EditorConnection | null) {
   editorConnection = connection;
 }

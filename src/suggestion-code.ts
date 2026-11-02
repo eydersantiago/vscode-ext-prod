@@ -8,7 +8,7 @@
 //     comentarios (un TODO) no cuenta como codigo;
 //   - cada sugerencia sabe para que accion se escribio su codigo
 //     (completionMode). Las demas acciones piden su propio codigo al tutor
-//     antes de aplicar nada (extension.ts, requestCodeForMode).
+//     antes de aplicar nada (suggestion-apply.ts, requestCodeForMode).
 // Sin importar vscode: se prueba con node:test. El «...» del modelo, las marcas de recorte y
 // las llaves sin cerrar se revisan en suggestion-code-precision.ts.
 import { CODE_APPLICATION_REASON_CODES, policyTruncation } from './code-application';

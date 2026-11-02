@@ -119,6 +119,15 @@ npm run compile
 3. Presiona `F5` para abrir `Extension Development Host`.
 4. En la nueva ventana, abre una carpeta y ejecuta `ADACEEN: Escanear workspace`.
 
+Estructura de `src/` (ningun archivo pasa de ~500 lineas salvo tres clases enteras: `EditorConnection`, `EditorSessionManager` y la vista «Este archivo»):
+
+- `extension.ts`: `activate()` solo llama, en orden, a los `init...`/`register...` de cada modulo.
+- Estado compartido (antes variables locales de `activate()`): `extension-state.ts`, `file-view-state.ts`, `suggestion-state.ts` (`export let` y setters).
+- Sugerencia activa: `suggestion-publish.ts`, `suggestion-refresh.ts`, `suggestion-schedule.ts`, `suggestion-apply.ts`, `suggestion-backend.ts`; la del tutor en `active-suggestion.ts`, la local en `local-suggestion.ts` y el pedido en `suggestion-request.ts`.
+- Vista «Este archivo»: `file-view.ts`, `file-view-controller.ts`, `file-view-commands.ts`; cuadro «Dependencias»: `file-dependencies.ts` y `dependency-*.ts`.
+- Eventos, comandos, senales de error, worker y origen de la GPU: `editor-events.ts`, `extension-commands.ts`, `error-signal-watch.ts`, `scan-worker.ts`, `backend-origin.ts`.
+- Pruebas en `src/unit-tests/*.test.ts` (los datos compartidos en `*-fixtures.ts`).
+
 ## Pruebas local + Codespaces
 
 Para pruebas end-to-end con backend local expuesto por Cloudflare Tunnel, revisa:

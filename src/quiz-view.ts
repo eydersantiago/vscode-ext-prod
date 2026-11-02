@@ -42,7 +42,7 @@ export class AdaceenQuizViewProvider implements vscode.WebviewViewProvider, vsco
     }, 5000);
   }
 
-  // --- API para extension.ts ------------------------------------------------
+  // --- API para activate() y sus modulos -------------------------------------
 
   updateHistory(history: QuizHistoryItem[]) {
     this.state = { ...this.state, history };
