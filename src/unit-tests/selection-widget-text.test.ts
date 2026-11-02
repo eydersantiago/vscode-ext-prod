@@ -135,3 +135,96 @@ describe('ventana flotante (0.0.34)', () => {
     assert.match(warned, /\$\(warning\) _Ojo: revísala con «Ver cambios»\._/);
   });
 });
+
+describe('ventana con la explicacion en vivo (0.0.39)', () => {
+  it('cargando con texto en vivo: la explicacion sanitizada en vez de «Cuando llegue la respuesta...» y la nota de que el codigo va al final', () => {
+    const live = model({
+      loading: true,
+      headline: 'Pista local que no debe verse',
+      partialText: '1) Resumen:\n- El main saluda. [abrir](command:adaceen.applySuggestionCompletion?["insert"])\n\n2) Sugerencias del codigo:\n- Agrega una despedida.',
+    });
+    const text = buildSelectionWidgetText(live);
+    assert.match(text, /consultando al tutor/);
+    assert.match(text, /el código y las acciones aparecen al terminar/);
+    assert.doesNotMatch(text, /Cuando llegue la respuesta/);
+    assert.match(text, /\*\*Resumen\*\*/);
+    assert.match(text, /- Agrega una despedida\./);
+    assert.doesNotMatch(text, /command:adaceen/, 'un enlace command: del texto en vivo no queda activo');
+    assert.doesNotMatch(text, /Pista local que no debe verse/, 'la pista local no se mezcla con la explicacion');
+    assert.doesNotMatch(text, /Insertar debajo|Ver cambios/, 'ninguna accion mientras carga');
+  });
+
+  it('en vivo nunca se pinta un bloque de codigo aunque llegara uno, ni una imagen remota', () => {
+    const text = buildSelectionWidgetText(model({ loading: true, partialText: '- Mira esto ![x](https://evil.example/a.png)\n```cpp\nint x = 0;\n```' }));
+    assert.doesNotMatch(text, /```cpp|int x = 0/);
+    assert.doesNotMatch(text, /!\[/);
+  });
+
+  it('sin texto en vivo, cargando sigue como antes', () => {
+    const text = buildSelectionWidgetText(model({ loading: true }));
+    assert.match(text, /Cuando llegue la respuesta aparecen aquí el código y las acciones\./);
+  });
+
+  it('una explicacion en vivo larga se corta en lo que cabe y no cambia mas hasta el final', () => {
+    const long = Array.from({ length: 30 }, (_, index) => `- Paso ${index + 1}: revisa la condicion y prueba con valores distintos.`).join('\n');
+    const first = buildSelectionWidgetText(model({ loading: true, partialText: long }));
+    const later = buildSelectionWidgetText(model({ loading: true, partialText: `${long}\n- Paso 31: otra cosa.` }));
+    assert.equal(first, later, 'ya cortada, no cambia (no salta el scroll)');
+    assert.match(first, /el resto de la explicación aparece al terminar/);
+    assert.match(first, /Paso 1:/);
+    assert.doesNotMatch(first, /Paso 30:/);
+  });
+
+  it('pidiendo codigo: la espera y debajo la explicacion en vivo', () => {
+    const text = buildSelectionWidgetText(model({ pendingMode: 'replace', partialText: '- Cambia el orden de las lineas.' }));
+    assert.match(text, /Preparando la versión mejorada/);
+    assert.match(text, /- Cambia el orden de las lineas\./);
+  });
+
+  it('lista: la explicacion completa (lo leido en vivo) y debajo el codigo y las acciones', () => {
+    const ready = model({
+      explanationText: '1) Resumen:\n- El if no cubre el caso del cero.\n\n2) Sugerencias del codigo:\n- Agrega la rama del cero.\n\n6) Riesgos:\n- Compila despues.',
+    });
+    const text = buildSelectionWidgetText(ready);
+    const explanationAt = text.indexOf('Agrega la rama del cero.');
+    const codeAt = text.indexOf('```cpp');
+    const actionAt = text.indexOf('Insertar debajo');
+    assert.ok(explanationAt > 0 && codeAt > explanationAt && actionAt > codeAt, 'explicacion, codigo, acciones');
+    assert.match(text, /\*\*Riesgos\*\*/);
+    assert.equal((text.match(/El if no cubre el caso del cero\./g) || []).length, 1, 'el titular no se repite');
+  });
+
+  it('lista y larga: avisa que el codigo y las acciones estan al final (scroll dentro de la ventana)', () => {
+    const long = Array.from({ length: 20 }, (_, index) => `- Idea ${index + 1}: una explicacion de una linea para el estudiante.`).join('\n');
+    const text = buildSelectionWidgetText(model({ explanationText: long }));
+    assert.match(text, /El código y las acciones están al final de la ventana/);
+    assert.ok(text.indexOf('Idea 20') < text.indexOf('```cpp'));
+    const noCode = buildSelectionWidgetText(model({ explanationText: long, completionText: '', completionMode: '' }));
+    assert.match(noCode, /Las acciones están al final de la ventana/);
+  });
+
+  it('lista sin explicacion (pista local o historial anterior): el titular como antes', () => {
+    const text = buildSelectionWidgetText(model());
+    assert.match(text, /El if no cubre el caso del cero\./);
+  });
+});
+
+describe('explicacion del tutor en la ventana: ningun enlace activo (0.0.39)', () => {
+  it('enlaces, imagenes, definiciones, autoenlaces y entidades quedan como texto; el codigo entre comillas no se toca', () => {
+    const text = buildSelectionWidgetText(model({
+      explanationText: [
+        '1) Resumen:',
+        '- Mira [esto](command&#58;adaceen.applySuggestionCompletion) y ![img](https://x.example/a.png).',
+        '[ref]: command:adaceen.selectionWidget.close',
+        '- Abre <https://x.example> si quieres.',
+        '- Usa `a[i](x)` en el bucle.',
+      ].join('\n'),
+    }));
+    assert.doesNotMatch(text, /\]\(command&#58;/, 'el destino con entidad no queda como enlace');
+    assert.doesNotMatch(text, /!\[img\]/);
+    assert.match(text, /\\\[ref\]:/);
+    assert.match(text, /\\<https/);
+    assert.match(text, /`a\[i\]\(x\)`/, 'el codigo entre comillas se ve igual');
+    assert.match(text, /\*\*Resumen\*\*/);
+  });
+});

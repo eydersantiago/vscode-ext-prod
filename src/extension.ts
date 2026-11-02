@@ -34,6 +34,8 @@ import { buildAppliedSuggestionModel, planSuggestionEdit, resolveWorkspaceFileUr
 import { buildRagSourceMarkdown, buildRagSourceTargetUrl, getBackendSuggestionScopeLabel, parseBackendSuggestionSections } from './suggestion-format';
 import { formatSuggestionHistoryMarkdown, readSuggestionHistory, rememberSuggestionHistory, writeSuggestionHistory } from './suggestion-history';
 import { primarySuggestionText, toSelectionWidgetModel } from './selection-widget-model';
+import { createLivePainter, createStreamFanout } from './suggestion-stream';
+import type { SuggestionStreamEvent } from './suggestion-stream';
 import { editorPageContext, publishActiveEditorRack, recordVscodeSuggestionMetric, toQuizHistoryItems } from './suggestion-metrics';
 import type { SuggestionMetricFields } from './suggestion-metrics';
 import { AdaceenSuggestionCodeActionProvider, AdaceenSuggestionCodeLensProvider, AdaceenSuggestionInlayHintProvider, isSuggestionCodeActionRequestFocused } from './suggestion-providers';
@@ -683,6 +685,31 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  /**
+   * 0.0.39: la explicacion en vivo de un pedido. Guarda el texto en el modelo activo y repinta solo
+   * la ventana anclada a la seleccion (sin publishSuggestionModel: ni barra, ni CodeLens, ni vista,
+   * ni metricas, ni historial por cada parcial). createLivePainter decide si el parcial todavia es
+   * de la sugerencia que espera y limita la frecuencia.
+   */
+  const startLivePainter = (target: ActiveSuggestionModel, snapshot: ActiveEditorSnapshot) => createLivePainter<ActiveSuggestionModel>({
+    current: () => activeSuggestionModel,
+    target,
+    // La misma seleccion y la ventana abierta sobre ella: si el estudiante se movio (la ventana se
+    // cerro y la sugerencia nueva todavia no sale por la espera) o la cerro con la X, no se reabre.
+    canPaint: (model) => {
+      const widgetModel = toSelectionWidgetModel(model);
+      return !!widgetModel
+        && model.metricId !== dismissedSuggestionMetricId
+        && resolveActiveSuggestionSettings().selectionWidget
+        && isSnapshotStillActive(snapshot, 'cursor')
+        && selectionWidget.showsAnchor(widgetModel.uriString, widgetModel.startLine, widgetModel.endLine);
+    },
+    paint: (model) => {
+      activeSuggestionModel = model;
+      selectionWidget.show(toSelectionWidgetModel(model));
+    },
+  });
+
   const recordSuggestionMetric = (
     model: ActiveSuggestionModel | null,
     eventType: string,
@@ -743,6 +770,8 @@ export async function activate(context: vscode.ExtensionContext) {
     projectIndex: WorkspaceProjectIndex | null,
     scope: BackendSuggestionRequestScope,
     requestContext: BackendSuggestionRequestContext,
+    /** 0.0.39: la explicacion en vivo de este pedido (la reciben todos los que lo esperan). */
+    onStreamEvent?: (event: SuggestionStreamEvent) => void,
   ): Promise<BackendSuggestionResult> => {
     const cacheKey = buildBackendSuggestionTextCacheKey(snapshot, projectIndex, scope, requestContext.trigger, requestContext.requestedAction);
     // Un pedido explicito del estudiante («Otra sugerencia», «Proponer una mejora»,
@@ -757,16 +786,31 @@ export async function activate(context: vscode.ExtensionContext) {
     const inFlightKey = `${scope}:${cacheKey}`;
     let inFlight = backendSuggestionInFlight.get(inFlightKey);
     if (!inFlight) {
-      const request = fetchBackendSuggestionText(settings, snapshot, projectIndex, scope, requestContext);
-      inFlight = { key: cacheKey, request };
-      backendSuggestionInFlight.set(inFlightKey, inFlight);
-      request.then(
-        () => backendSuggestionInFlight.delete(inFlightKey),
-        () => backendSuggestionInFlight.delete(inFlightKey),
-      );
+      // 0.0.39: el pedido se comparte; su explicacion en vivo tambien (createStreamFanout). Solo se
+      // pide en vivo lo que muestra la ventana anclada a la seleccion: el foco con una seleccion
+      // (el resumen del archivo y el cursor sin seleccion no se ven ahi).
+      const fanout = scope === 'cursor' && settings.selectionWidget && hasActiveSelection(snapshot) ? createStreamFanout() : null;
+      const request = fetchBackendSuggestionText(settings, snapshot, projectIndex, scope, requestContext, fanout ? (event) => fanout.emit(event) : undefined);
+      const entry: BackendSuggestionInFlight = { key: cacheKey, request, ...(fanout ? { subscribe: fanout.subscribe } : {}) };
+      inFlight = entry;
+      backendSuggestionInFlight.set(inFlightKey, entry);
+      const settle = () => {
+        fanout?.close();
+        // Solo si sigue siendo este pedido (clearBackendSuggestionCaches pudo dejar otro).
+        if (backendSuggestionInFlight.get(inFlightKey) === entry) {
+          backendSuggestionInFlight.delete(inFlightKey);
+        }
+      };
+      request.then(settle, settle);
     }
 
-    const result = await inFlight.request;
+    const unsubscribe = onStreamEvent && inFlight.subscribe ? inFlight.subscribe(onStreamEvent) : null;
+    let result: BackendSuggestionResult;
+    try {
+      result = await inFlight.request;
+    } finally {
+      unsubscribe?.();
+    }
     // Sin guardar: la respuesta sin modelo («El tutor no esta disponible») y un pedido de
     // codigo que volvio sin codigo; asi el siguiente intento le pregunta otra vez al tutor.
     const codeRequestWithoutCode = !!requestContext.requestedAction && !extractSuggestionCode(result.outputText);
@@ -985,6 +1029,8 @@ export async function activate(context: vscode.ExtensionContext) {
       publishActiveRackSnapshot(snapshot, model, projectIndex, `${reason}:indexed-local`);
     }
 
+    // 0.0.39: la explicacion en vivo del foco va a la sugerencia que se esta mostrando (loading).
+    const livePainter = settings.useBackend && backendScope === 'cursor' ? startLivePainter(model, snapshot) : null;
     if (settings.useBackend) {
       try {
         const selectedFocus = hasActiveSelection(snapshot);
@@ -1000,7 +1046,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
         if (backendScope === 'cursor') {
           const cursorRequest = withActiveSuggestionDeadline(
-            getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext),
+            getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext, livePainter?.onEvent),
             fallbackDelayMs,
           );
           const cursorSettled = await settleBackendSuggestionResult(cursorRequest);
@@ -1052,6 +1098,7 @@ export async function activate(context: vscode.ExtensionContext) {
           throw new BackendAnsweredWithoutSuggestion();
         }
       } catch (error) {
+        livePainter?.dispose();
         const backendErrorMessage = formatBackendSuggestionError(error);
         const remainingMs = fallbackDelayMs - (Date.now() - backendStartedAt);
         // El tutor ya contesto (sin nada utilizable): la pista local sale de una vez, sin
@@ -1067,6 +1114,7 @@ export async function activate(context: vscode.ExtensionContext) {
           source: 'local-fallback',
           backendError: truncateInline(backendErrorMessage, 180),
           loading: false,
+          partialText: undefined,
         };
         output.appendLine(
           `[Suggestions] Backend no disponible (${reason}, ${getBackendSuggestionScopeLabel(backendScope)}): ${backendErrorMessage}`,
@@ -1074,6 +1122,8 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }
 
+    // Llego la respuesta (o el respaldo): lo que quede en vivo ya no se pinta.
+    livePainter?.dispose();
     if (!isSnapshotStillActive(snapshot, backendScope)) {
       return activeSuggestionModel;
     }
@@ -1351,7 +1401,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     const documentVersion = editor.document.version;
 
-    const pending: ActiveSuggestionModel = { ...model, pendingMode: mode, slow: false, codeRequestNote: '', snapshotKey: snapshot.cacheKey };
+    const pending: ActiveSuggestionModel = { ...model, pendingMode: mode, slow: false, codeRequestNote: '', snapshotKey: snapshot.cacheKey, partialText: undefined };
     publishSuggestionModel(pending, true);
     armSlowNotice(pending);
     recordSuggestionMetric(model, 'vscode_suggestion_manual_refresh', mode, { requestedAction: mode, origin });
@@ -1359,9 +1409,11 @@ export async function activate(context: vscode.ExtensionContext) {
     const keepWithNote = (note: string) => {
       const current = activeSuggestionModel;
       if (current && current.metricId === pending.metricId && current.pendingMode === mode) {
-        publishSuggestionModel({ ...model, pendingMode: undefined, slow: false, codeRequestNote: note, snapshotKey: snapshot.cacheKey }, true);
+        publishSuggestionModel({ ...model, pendingMode: undefined, slow: false, codeRequestNote: note, snapshotKey: snapshot.cacheKey, partialText: undefined }, true);
       }
     };
+    // 0.0.39: mientras se prepara el codigo, la explicacion en vivo va en la ventana.
+    const livePainter = startLivePainter(pending, snapshot);
     try {
       const projectIndex = await getWorkspaceProjectIndex();
       const requestContext: BackendSuggestionRequestContext = {
@@ -1370,9 +1422,10 @@ export async function activate(context: vscode.ExtensionContext) {
         requestedAction: mode,
       };
       const result = await withActiveSuggestionDeadline(
-        getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext),
+        getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext, livePainter.onEvent),
         Math.min(settings.backendTimeoutMs, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS),
       );
+      livePainter.dispose();
       const current = activeSuggestionModel;
       const stillPending = !!current && current.metricId === pending.metricId && current.pendingMode === mode;
       const next = buildBackendActiveSuggestionModel(
@@ -1429,6 +1482,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }, true, { latencyMs: result.latencyMs });
       output.appendLine(`[Suggestions] ${shown.filePath} | codigo pedido=${mode} | ${suggestionReadyForMode(shown, mode) ? 'con codigo' : 'sin codigo'}${shown.blocked ? ' | bloqueada por politica' : ''}`);
     } catch (error) {
+      livePainter.dispose();
       const message = formatBackendSuggestionError(error);
       output.appendLine(`[Suggestions] No llego el codigo pedido (${mode}): ${message}`);
       keepWithNote(`No llegó el código del tutor (${truncateInline(message, 120)}). Intenta de nuevo en un momento.`);

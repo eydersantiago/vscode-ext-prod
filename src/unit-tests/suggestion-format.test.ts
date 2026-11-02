@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { buildRagSourceTargetUrl, parseBackendSuggestionSections, stripCutNoteAfterFence, unwrapEmphasisLine } from '../suggestion-format';
+import { buildRagSourceTargetUrl, explanationFromTutorText, looksLikeCodeLine, parseBackendSuggestionSections, stripCutNoteAfterFence, unwrapEmphasisLine } from '../suggestion-format';
 import { extractSuggestionCode } from '../suggestion-code';
 import type { ActiveSuggestionRagSource } from '../types';
 
@@ -55,5 +55,47 @@ describe('enlace a una fuente RAG sin vscode (0.0.38)', () => {
   it('completa la ruta del visor con la URL del backend que pasa quien llama', () => {
     const source = { url: '/api/rag/sources/abc/view?chunk=3', pageStart: 4 } as ActiveSuggestionRagSource;
     assert.match(buildRagSourceTargetUrl(source, 'https://api.adaceen.test'), /^https:\/\/api\.adaceen\.test\/api\/rag\/sources\/abc\/view/);
+  });
+});
+
+describe('explicacion del tutor (0.0.39)', () => {
+  const ANSWER = [
+    '1) Resumen:',
+    '- El main saluda y termina.',
+    '',
+    '2) Sugerencias del codigo:',
+    '- Agrega una despedida antes del return.',
+    '',
+    '4) Accion:',
+    'Aplicar: replace',
+    '```cpp',
+    'int main() {',
+    '    cout << "Adios";',
+    '}',
+    '```',
+    '',
+    '_El tutor muestra 3 de 9 lineas: el resto lo escribes tu._',
+    '',
+    '6) Riesgos:',
+    '- Compila despues de cada cambio.',
+  ].join('\n');
+
+  it('la respuesta final: todas las secciones de prosa, sin el bloque, sin «Aplicar:» ni el encabezado de la accion', () => {
+    const text = explanationFromTutorText(ANSWER);
+    assert.match(text, /^1\) Resumen:/);
+    assert.match(text, /Agrega una despedida/);
+    assert.match(text, /6\) Riesgos:\n- Compila/);
+    assert.doesNotMatch(text, /```|cout|int main|Aplicar|Accion/);
+  });
+
+  it('en vivo: solo hasta la ultima linea completa y nada desde el primer bloque', () => {
+    assert.equal(explanationFromTutorText('1) Resumen:\n- El main', { live: true }), '1) Resumen:');
+    assert.equal(explanationFromTutorText(ANSWER, { live: true }), ['1) Resumen:', '- El main saluda y termina.', '', '2) Sugerencias del codigo:', '- Agrega una despedida antes del return.'].join('\n'));
+  });
+
+  it('codigo escrito sin bloque no cuenta como explicacion; codigo corto entre comillas en una frase si', () => {
+    assert.equal(explanationFromTutorText('- Mira:\n    saldo += monto;\n}\n- Usa `x++;` al final.'), '- Mira:\n- Usa `x++;` al final.');
+    assert.equal(looksLikeCodeLine('#include <iostream>'), true);
+    assert.equal(looksLikeCodeLine('- Revisa la linea 12.'), false);
   });
 });

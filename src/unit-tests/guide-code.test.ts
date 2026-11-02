@@ -308,3 +308,25 @@ describe('la ventana y la vista «Este archivo» muestran lo mismo del mismo mod
     assert.equal(state.suggestion?.guide?.label, GUIDE_CODE_LABEL);
   });
 });
+
+describe('la ventana lleva la explicacion en vivo solo mientras espera (0.0.39)', () => {
+  function active(patch: Partial<ActiveSuggestionModel> = {}): ActiveSuggestionModel {
+    return {
+      uriString: 'file:///repo/src/main.cpp', filePath: 'src/main.cpp', fileName: 'main.cpp', language: 'cpp',
+      repoFullName: '', title: '', summary: '', fileOverview: '', lineSummary: 'Falta validar el retiro.',
+      suggestions: [], fileSuggestions: [], lineSuggestions: [], nextSteps: [], chips: [], source: 'backend',
+      backendError: '', ragSources: [], ragCourseCode: '', updatedAt: '', line: 10, column: 1,
+      selectionLineCount: 3, selectionOriginalLineCount: 3, selectionTruncated: false, selectionRangeKey: '10-12',
+      fileSummaryCacheKey: 'k', metricId: 'm', completionText: '', completionMode: '', applyMode: 'replace', triggerKind: 'cursor',
+      ...patch,
+    } as ActiveSuggestionModel;
+  }
+
+  it('cargando o pidiendo codigo: partialText pasa a la ventana; lista, no (va explanationText)', () => {
+    assert.equal(toSelectionWidgetModel(active({ loading: true, partialText: 'en vivo' }))?.partialText, 'en vivo');
+    assert.equal(toSelectionWidgetModel(active({ pendingMode: 'insert', partialText: 'en vivo' }))?.partialText, 'en vivo');
+    const ready = toSelectionWidgetModel(active({ partialText: 'viejo', explanationText: 'completa' }));
+    assert.equal(ready?.partialText, '', 'un texto en vivo viejo no se mezcla con la respuesta lista');
+    assert.equal(ready?.explanationText, 'completa');
+  });
+});
