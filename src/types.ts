@@ -6,6 +6,7 @@ import type { DiagnosticsSummary } from './error-signals';
 import type { ParsedImport } from './file-dependencies';
 import type { SuggestionCodeApplication } from './code-application';
 import type { SuggestionGuide } from './suggestion-guide';
+import type { SuggestionStreamEvent } from './suggestion-stream';
 
 export type ScanMode = 'auto' | 'local' | 'codespace' | 'all';
 
@@ -275,6 +276,17 @@ export type ActiveSuggestionModel = {
    * acciones ni se ofrece aplicar (suggestionPhase y responseAllowsApply, src/suggestion-phase.ts).
    */
   tutorUnavailable?: boolean;
+  /**
+   * 0.0.39: la explicacion del tutor que va llegando en vivo (solo prosa, sin codigo), mientras
+   * loading o pendingMode. La ventana anclada a la seleccion la muestra en vez de «Cuando llegue la
+   * respuesta...». No se guarda en el historial ni cuenta para las metricas.
+   */
+  partialText?: string;
+  /**
+   * 0.0.39: la explicacion completa de la respuesta final (las secciones de prosa, sin codigo ni
+   * «Aplicar:»). La ventana la conserva al terminar y pone debajo el codigo y las acciones.
+   */
+  explanationText?: string;
 };
 
 export type VscodeReplacementOption = {
@@ -331,6 +343,11 @@ export type BackendSuggestionRequestScope = 'file_summary' | 'cursor';
 export type BackendSuggestionInFlight = {
   key: string;
   request: Promise<BackendSuggestionResult>;
+  /**
+   * 0.0.39: la explicacion en vivo de este pedido, para todos los que lo esperan (el pedido se
+   * comparte): createStreamFanout de suggestion-stream.ts.
+   */
+  subscribe?: (listener: (event: SuggestionStreamEvent) => void) => () => void;
 };
 
 export type BackendSuggestionResult = {
