@@ -74,6 +74,17 @@ export type SelectionWidgetModel = {
    * guia, con su motivo y su causa. Antes la ventana lo escondia y solo quedaba el motivo.
    */
   guide?: SuggestionGuide | null;
+  /**
+   * 0.0.39: la explicacion que el tutor lleva escrita (en vivo, solo prosa), mientras carga o
+   * prepara el codigo. Se muestra en vez de «Cuando llegue la respuesta aparecen aqui el codigo y
+   * las acciones», con la nota de que el codigo llega al final.
+   */
+  partialText?: string;
+  /**
+   * 0.0.39: la explicacion completa de la respuesta (lista): la ventana la conserva al terminar y
+   * pone debajo el codigo y las acciones. Sin ella (pista local, respuesta de antes), el titular.
+   */
+  explanationText?: string;
 };
 
 /** Comandos que puede abrir un enlace de la ventana (y ninguno mas). */
@@ -123,6 +134,101 @@ export function sanitizeTutorMarkdown(text: string) {
     .replace(/\r\n?/g, '\n')
     .replace(/command:/gi, 'command​:')
     .trim();
+}
+
+/** Lo que dice la ventana mientras llega la explicacion en vivo (0.0.39). */
+export const LIVE_NOTE = 'El tutor está escribiendo: aquí va su explicación; el código y las acciones aparecen al terminar.';
+
+/** Los encabezados de seccion del formato del tutor («1) Resumen:», «2) Sugerencias del codigo:»...). */
+const SECTION_HEADING = /^\s*(?:#+\s*)?(?:\*\*)?\s*\d{1,2}\s*[).:-]\s*(?:\*\*)?\s*(resumen|sugerencias?(?:\s+del\s+(?:c[oó]digo|archivo))?|riesgos?|dudas?(?:\s+o\s+riesgos?)?|enlaces?\s+relevantes?)\s*:?\s*(?:\*\*)?\s*$/i;
+
+/**
+ * La explicacion viene del modelo y se pinta en un MarkdownString con comandos habilitados: ningun
+ * enlace, imagen, definicion de enlace ni autoenlace queda activo (el texto se ve, el enlace no).
+ * sanitizeTutorMarkdown ya corta «command:», pero un destino con entidades («command&#58;») se
+ * decodifica al pintar.
+ */
+function neutralizeLinks(text: string) {
+  // Dentro de `codigo` el Markdown no arma enlaces y una barra invertida se veria: no se toca.
+  return text.split(/(`[^`\n]*`)/).map((part, index) => (index % 2 === 1
+    ? part
+    : part
+      .replace(/!\[/g, '[')
+      .replace(/\]\(/g, ']\\(')
+      .replace(/^(\s*)\[([^\]\n]*)\]:/gm, '$1\\[$2]:')
+      .replace(/</g, '\\<'))).join('');
+}
+
+/**
+ * La explicacion del tutor (en vivo o la de la respuesta final) lista para la ventana (0.0.39):
+ * sanitizada (sanitizeTutorMarkdown: sin enlaces command:), sin imagenes remotas, cortada en un
+ * bloque de codigo si llegara uno (el backend ya no los manda en vivo), con los encabezados
+ * «1) Resumen:» en negrita y sin sangrias de 4 espacios (no se vuelven bloque de codigo).
+ */
+export function formatTutorExplanation(text: string) {
+  const kept: string[] = [];
+  for (const line of sanitizeTutorMarkdown(text).split('\n')) {
+    if (/```|~~~/.test(line)) {
+      break;
+    }
+    const heading = SECTION_HEADING.exec(line);
+    if (heading) {
+      const name = heading[1].trim();
+      kept.push(`**${name.charAt(0).toUpperCase()}${name.slice(1)}**`);
+      continue;
+    }
+    kept.push(neutralizeLinks(line).replace(/^[ \t]{4,}/, '  '));
+  }
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * Scroll de la ventana (0.0.39). La ventana es un hilo de comentarios de VS Code: el cuerpo tiene
+ * `max-height: 20em` con su propia barra (ajuste comments.maxHeight, activo por defecto), asi que
+ * una explicacion larga hace scroll dentro de la ventana sin hacer nada. Pero cada vez que el
+ * cuerpo cambia VS Code lo vacia y lo vuelve a armar, y el scroll vuelve arriba. Por eso:
+ *   - en vivo, la explicacion crece hasta lo que cabe sin scroll (LIVE_VISIBLE_LINES lineas
+ *     estimadas); despues la ventana deja de cambiar (lo que se ve se queda, el estudiante puede
+ *     desplazarse sin saltos) y el resto llega con el final;
+ *   - lista, va la explicacion completa y debajo el codigo y las acciones, con scroll si hace
+ *     falta; si es larga, una linea arriba avisa que el codigo y las acciones estan al final (los
+ *     botones Insertar / Modificar / Eliminar del titulo de la ventana se ven siempre).
+ * Con comments.maxHeight en false la ventana crece entera y el que se desplaza es el editor.
+ */
+export const LIVE_VISIBLE_LINES = 8;
+/** Caracteres por linea que se estiman para la ventana (el ancho del editor varia; se estima corto). */
+const CHARS_PER_VISUAL_LINE = 70;
+export const LIVE_MORE_NOTE = '… el tutor sigue escribiendo: el resto de la explicación aparece al terminar, junto con el código.';
+const LONG_READY_NOTE = {
+  code: '↓ El código y las acciones están al final de la ventana (desplázate dentro de ella).',
+  actions: '↓ Las acciones están al final de la ventana (desplázate dentro de ella).',
+};
+
+function visualLines(line: string) {
+  return Math.max(1, Math.ceil(line.length / CHARS_PER_VISUAL_LINE));
+}
+
+/**
+ * Lo que se muestra en vivo: la explicacion (ya formateada) hasta LIVE_VISIBLE_LINES lineas
+ * estimadas, por lineas enteras. truncated: quedo mas por mostrar (va con el final). Mientras
+ * crece, cada texto empieza con el anterior; ya cortado, no cambia mas.
+ */
+export function liveExplanationExcerpt(formatted: string): { text: string; truncated: boolean } {
+  const lines = formatted.split('\n');
+  let used = 0;
+  const kept: string[] = [];
+  for (const line of lines) {
+    used += visualLines(line);
+    if (used > LIVE_VISIBLE_LINES) {
+      return { text: kept.join('\n').trim(), truncated: true };
+    }
+    kept.push(line);
+  }
+  return { text: formatted, truncated: false };
+}
+
+function explanationIsLong(formatted: string) {
+  return formatted.split('\n').reduce((sum, line) => sum + visualLines(line), 0) > LIVE_VISIBLE_LINES;
 }
 
 /** La ventana ofrece acciones de aplicar para este modelo (la misma regla que isSuggestionApplyOffered). */
@@ -236,7 +342,21 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
   lines.push(`**${selectionWidgetTitle(model)}** (${range}) · ${sourceLabel(model, phase)}`);
   lines.push('');
 
-  if (model.headline && phase !== 'blocked' && phase !== 'tutor_unavailable') {
+  // 0.0.39: con la explicacion en vivo (cargando o preparando codigo) va ella, no el titular (la
+  // pista local o la sugerencia anterior); lista, la explicacion completa en vez del titular.
+  const live = (phase === 'loading' || phase === 'pending')
+    ? liveExplanationExcerpt(formatTutorExplanation(model.partialText || ''))
+    : { text: '', truncated: false };
+  const liveText = live.text ? (live.truncated ? `${live.text}\n\n_${LIVE_MORE_NOTE}_` : live.text) : '';
+  const explanation = phase === 'ready' ? formatTutorExplanation(model.explanationText || '') : '';
+  if (explanation) {
+    if (explanationIsLong(explanation)) {
+      lines.push(`_${selectionWidgetCode(model).kind === 'none' ? LONG_READY_NOTE.actions : LONG_READY_NOTE.code}_`);
+      lines.push('');
+    }
+    lines.push(explanation);
+    lines.push('');
+  } else if (model.headline && !liveText && phase !== 'blocked' && phase !== 'tutor_unavailable') {
     lines.push(escapeMarkdown(model.headline));
     lines.push('');
   }
@@ -248,6 +368,12 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
 
   switch (phase) {
     case 'loading':
+      if (liveText) {
+        lines.push(`_${model.slow ? `${LIVE_NOTE} ${SLOW_NOTE}` : LIVE_NOTE}_`);
+        lines.push('');
+        lines.push(liveText);
+        return lines.join('\n');
+      }
       lines.push(`_${model.slow ? SLOW_NOTE : 'Cuando llegue la respuesta aparecen aquí el código y las acciones.'}_`);
       return lines.join('\n');
     case 'pending': {
@@ -258,6 +384,12 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
         ? `Preparando la versión mejorada de ${target}…`
         : 'Preparando el código para continuar debajo de la selección…';
       lines.push(`$(sync~spin) _${model.slow ? `${waiting} ${SLOW_NOTE}` : waiting}_`);
+      if (liveText) {
+        lines.push('');
+        lines.push(`_${LIVE_NOTE}_`);
+        lines.push('');
+        lines.push(liveText);
+      }
       return lines.join('\n');
     }
     case 'blocked':

@@ -10,7 +10,7 @@ import { resolveActiveSuggestionSettings, resolveTriggerSettings } from './setti
 import { getBackendSuggestionText, getWorkspaceProjectIndex } from './suggestion-backend';
 import { getBackendSuggestionScopeLabel } from './suggestion-format';
 import { publishActiveEditorRack } from './suggestion-metrics';
-import { armSlowNotice, publishSuggestionModel, recordSuggestionMetric } from './suggestion-publish';
+import { armSlowNotice, publishSuggestionModel, recordSuggestionMetric, startLivePainter } from './suggestion-publish';
 import { createEmptyBackendSuggestionResult, delay, formatBackendSuggestionError, settleBackendSuggestionResult, truncateInline, withActiveSuggestionDeadline } from './suggestion-results';
 import { activeSuggestionModel, autoRevealedSuggestionUri, lastRequestedModel, pendingBlocking, pendingFileOpenUri, rackSyncErrorNotified, setAutoRevealedSuggestionUri, setLastKnownRepoFullName, setLastRequestedModel, setPendingBlocking, setPendingFileOpenUri, setRackSyncErrorNotified, setSuggestionTimer, suggestionExposure, suggestionTimer } from './suggestion-state';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, BackendSuggestionRequestContext, BackendSuggestionResult, SuggestionTrigger, WorkspaceProjectIndex } from './types';
@@ -172,6 +172,8 @@ export const refreshActiveSuggestion = async (reason = 'auto') => {
     publishActiveRackSnapshot(snapshot, model, projectIndex, `${reason}:indexed-local`);
   }
 
+  // 0.0.39: la explicacion en vivo del foco va a la sugerencia que se esta mostrando (loading).
+  const livePainter = settings.useBackend && backendScope === 'cursor' ? startLivePainter(model, snapshot) : null;
   if (settings.useBackend) {
     try {
       const selectedFocus = hasActiveSelection(snapshot);
@@ -187,7 +189,7 @@ export const refreshActiveSuggestion = async (reason = 'auto') => {
 
       if (backendScope === 'cursor') {
         const cursorRequest = withActiveSuggestionDeadline(
-          getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext),
+          getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext, livePainter?.onEvent),
           fallbackDelayMs,
         );
         const cursorSettled = await settleBackendSuggestionResult(cursorRequest);
@@ -239,6 +241,7 @@ export const refreshActiveSuggestion = async (reason = 'auto') => {
         throw new BackendAnsweredWithoutSuggestion();
       }
     } catch (error) {
+      livePainter?.dispose();
       const backendErrorMessage = formatBackendSuggestionError(error);
       const remainingMs = fallbackDelayMs - (Date.now() - backendStartedAt);
       // El tutor ya contesto (sin nada utilizable): la pista local sale de una vez, sin
@@ -254,6 +257,7 @@ export const refreshActiveSuggestion = async (reason = 'auto') => {
         source: 'local-fallback',
         backendError: truncateInline(backendErrorMessage, 180),
         loading: false,
+        partialText: undefined,
       };
       output.appendLine(
         `[Suggestions] Backend no disponible (${reason}, ${getBackendSuggestionScopeLabel(backendScope)}): ${backendErrorMessage}`,
@@ -261,6 +265,8 @@ export const refreshActiveSuggestion = async (reason = 'auto') => {
     }
   }
 
+  // Llego la respuesta (o el respaldo): lo que quede en vivo ya no se pinta.
+  livePainter?.dispose();
   if (!isSnapshotStillActive(snapshot, backendScope)) {
     return activeSuggestionModel;
   }

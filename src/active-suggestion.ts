@@ -6,7 +6,9 @@ import { ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import { resolveBackendSettings } from './settings';
 import { DROPS_MOST_WARNING, extractSuggestionCode, prepareSuggestionCode, replacementDropsMostOfSelection, resolveSuggestionModes, toSuggestionCodeFields } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
-import { parseBackendSuggestionSections, stripCutNoteAfterFence } from './suggestion-format';
+import { explanationFromTutorText, parseBackendSuggestionSections, stripCutNoteAfterFence } from './suggestion-format';
+import { SUGGEST_TAB_STREAM_ACCEPT } from './suggestion-stream';
+import type { SuggestionStreamEvent } from './suggestion-stream';
 import { responseAllowsApply } from './suggestion-phase';
 import { createEmptyBackendSuggestionResult, normalizeBackendSuggestionResult, truncateInline, uniqueCompactStrings } from './suggestion-results';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, BackendSuggestionSections, SuggestionTrigger, WorkspaceProjectIndex } from './types';
@@ -20,6 +22,11 @@ export async function fetchBackendSuggestionText(
   projectIndex: WorkspaceProjectIndex | null = null,
   scope: BackendSuggestionRequestScope,
   requestContext: BackendSuggestionRequestContext,
+  /**
+   * 0.0.39: la explicacion en vivo. Con el aviso se pide la respuesta por partes (NDJSON); el valor
+   * devuelto es el mismo de siempre. Un backend anterior responde JSON y no llega ningun aviso.
+   */
+  onStreamEvent?: (event: SuggestionStreamEvent) => void,
 ): Promise<BackendSuggestionResult> {
   const backend = resolveBackendSettings();
   if (!backend.baseUrl) {
@@ -32,7 +39,9 @@ export async function fetchBackendSuggestionText(
     `${backend.baseUrl}/suggest-tab`,
     {
       method: 'POST',
-      headers: buildSessionHeaders(backend, true),
+      headers: onStreamEvent
+        ? { ...buildSessionHeaders(backend, true), Accept: SUGGEST_TAB_STREAM_ACCEPT }
+        : buildSessionHeaders(backend, true),
       body: JSON.stringify({
         tab_content: buildBackendSuggestionContent(snapshot, projectIndex, scope, requestContext.trigger),
         question: buildBackendSuggestionQuestion(snapshot, scope, requestContext.trigger, requestContext.requestedAction),
@@ -64,6 +73,7 @@ export async function fetchBackendSuggestionText(
       }),
     },
     settings.backendTimeoutMs,
+    onStreamEvent ? { onStreamEvent } : {},
   );
 
   return normalizeBackendSuggestionResult(response, Date.now() - startedAt);
@@ -283,6 +293,9 @@ export function buildBackendActiveSuggestionModel(
       ...prepared.notes,
     ].filter(Boolean).join(' '),
     ...(modes.guide ? { guide: modes.guide } : {}),
+    // 0.0.39: la explicacion completa del foco (sin codigo ni «Aplicar:»): la ventana la conserva al
+    // terminar, con lo que se leyo en vivo, y pone debajo el codigo y las acciones.
+    ...(scope === 'cursor' && focusDisplayText ? { explanationText: explanationFromTutorText(focusDisplayText) } : {}),
     // Respuesta sin modelo para el foco: antes la ventana decia ademas «El tutor respondio sin
     // codigo para esto», como si hubiera respondido (piloto del 25/10/2026).
     ...(primaryResult === focusResult && focusResult.degraded ? { tutorUnavailable: true } : {}),

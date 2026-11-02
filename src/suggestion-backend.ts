@@ -2,13 +2,16 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import { fetchBackendSuggestionText } from './active-suggestion';
 import { ACTIVE_SUGGESTION_INDEX_TTL_MS } from './constants';
+import { hasActiveSelection } from './editor-snapshot';
 import { output } from './extension-state';
 import { resolveActiveSuggestionSettings, resolveBackendSettings } from './settings';
 import { extractSuggestionCode } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { normalizeCourseCode } from './suggestion-results';
+import { createStreamFanout } from './suggestion-stream';
+import type { SuggestionStreamEvent } from './suggestion-stream';
 import { backendSuggestionCache, backendSuggestionInFlight, setWorkspaceProjectIndexCache, setWorkspaceProjectIndexGeneration, setWorkspaceProjectIndexInFlight, workspaceProjectIndexCache, workspaceProjectIndexGeneration, workspaceProjectIndexInFlight } from './suggestion-state';
-import type { ActiveEditorSnapshot, ActiveSuggestionSettings, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, SuggestionTrigger, WorkspaceProjectIndex } from './types';
+import type { ActiveEditorSnapshot, ActiveSuggestionSettings, BackendSuggestionInFlight, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, SuggestionTrigger, WorkspaceProjectIndex } from './types';
 import { stableStringHash } from './values';
 import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity } from './workspace-index';
 
@@ -51,6 +54,8 @@ export const getBackendSuggestionText = async (
   projectIndex: WorkspaceProjectIndex | null,
   scope: BackendSuggestionRequestScope,
   requestContext: BackendSuggestionRequestContext,
+  /** 0.0.39: la explicacion en vivo de este pedido (la reciben todos los que lo esperan). */
+  onStreamEvent?: (event: SuggestionStreamEvent) => void,
 ): Promise<BackendSuggestionResult> => {
   const cacheKey = buildBackendSuggestionTextCacheKey(snapshot, projectIndex, scope, requestContext.trigger, requestContext.requestedAction);
   // Un pedido explicito del estudiante («Otra sugerencia», «Proponer una mejora»,
@@ -65,16 +70,31 @@ export const getBackendSuggestionText = async (
   const inFlightKey = `${scope}:${cacheKey}`;
   let inFlight = backendSuggestionInFlight.get(inFlightKey);
   if (!inFlight) {
-    const request = fetchBackendSuggestionText(settings, snapshot, projectIndex, scope, requestContext);
-    inFlight = { key: cacheKey, request };
-    backendSuggestionInFlight.set(inFlightKey, inFlight);
-    request.then(
-      () => backendSuggestionInFlight.delete(inFlightKey),
-      () => backendSuggestionInFlight.delete(inFlightKey),
-    );
+    // 0.0.39: el pedido se comparte; su explicacion en vivo tambien (createStreamFanout). Solo se
+    // pide en vivo lo que muestra la ventana anclada a la seleccion: el foco con una seleccion
+    // (el resumen del archivo y el cursor sin seleccion no se ven ahi).
+    const fanout = scope === 'cursor' && settings.selectionWidget && hasActiveSelection(snapshot) ? createStreamFanout() : null;
+    const request = fetchBackendSuggestionText(settings, snapshot, projectIndex, scope, requestContext, fanout ? (event) => fanout.emit(event) : undefined);
+    const entry: BackendSuggestionInFlight = { key: cacheKey, request, ...(fanout ? { subscribe: fanout.subscribe } : {}) };
+    inFlight = entry;
+    backendSuggestionInFlight.set(inFlightKey, entry);
+    const settle = () => {
+      fanout?.close();
+      // Solo si sigue siendo este pedido (clearBackendSuggestionCaches pudo dejar otro).
+      if (backendSuggestionInFlight.get(inFlightKey) === entry) {
+        backendSuggestionInFlight.delete(inFlightKey);
+      }
+    };
+    request.then(settle, settle);
   }
 
-  const result = await inFlight.request;
+  const unsubscribe = onStreamEvent && inFlight.subscribe ? inFlight.subscribe(onStreamEvent) : null;
+  let result: BackendSuggestionResult;
+  try {
+    result = await inFlight.request;
+  } finally {
+    unsubscribe?.();
+  }
   // Sin guardar: la respuesta sin modelo («El tutor no esta disponible») y un pedido de
   // codigo que volvio sin codigo; asi el siguiente intento le pregunta otra vez al tutor.
   const codeRequestWithoutCode = !!requestContext.requestedAction && !extractSuggestionCode(result.outputText);

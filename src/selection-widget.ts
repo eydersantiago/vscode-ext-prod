@@ -55,7 +55,7 @@ function threadLabel(model: SelectionWidgetModel) {
   const phase = suggestionPhase(model);
   switch (phase) {
     case 'loading':
-      return 'ADACEEN · cargando';
+      return model.partialText ? 'ADACEEN · el tutor escribe' : 'ADACEEN · cargando';
     case 'pending':
       return 'ADACEEN · preparando código';
     case 'blocked':
@@ -75,7 +75,7 @@ function commentLabel(model: SelectionWidgetModel) {
   switch (phase) {
     case 'loading':
     case 'pending':
-      return 'cargando';
+      return model.partialText ? 'en vivo' : 'cargando';
     case 'blocked':
       return 'mensaje del tutor';
     case 'tutor_unavailable':
@@ -95,6 +95,13 @@ function commentLabel(model: SelectionWidgetModel) {
 export class AdaceenSelectionWidget implements vscode.Disposable {
   private readonly controller: vscode.CommentController;
   private thread: vscode.CommentThread | null = null;
+  /**
+   * El comentario que se muestra. 0.0.39: al repintar en el mismo sitio se cambia este mismo objeto
+   * (VS Code identifica el comentario por el objeto): el comentario se actualiza en su lugar en vez
+   * de quitarse y crearse otro. VS Code igual vuelve a pintar el cuerpo (y su scroll vuelve arriba):
+   * por eso la explicacion en vivo deja de cambiar cuando llena lo visible (selection-widget-text.ts).
+   */
+  private comment: vscode.Comment | null = null;
   private currentKey = '';
   private readonly visibilityEmitter = new vscode.EventEmitter<void>();
   /**
@@ -121,6 +128,16 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
 
   get visible(): boolean {
     return !!this.thread;
+  }
+
+  /** 0.0.39: la ventana esta abierta sobre estas lineas (base 1) de este documento. */
+  showsAnchor(uriString: string, startLine: number, endLine: number): boolean {
+    const range = this.thread?.range;
+    return !!this.thread
+      && !!range
+      && this.thread.uri.toString() === uriString
+      && range.start.line === Math.max(0, startLine - 1)
+      && range.end.line === Math.max(0, endLine - 1);
   }
 
   /**
@@ -161,25 +178,28 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       Math.max(0, model.startLine - 1), 0,
       Math.max(0, model.endLine - 1), 0,
     );
-    const comment: vscode.Comment = {
-      author: { name: 'ADACEEN' },
-      body: buildSelectionWidgetMarkdown(model),
-      mode: vscode.CommentMode.Preview,
-      contextValue,
-      label: commentLabel(model),
-    };
-
     const sameAnchor = this.thread
       && this.thread.uri.toString() === model.uriString
       && this.thread.range?.start.line === range.start.line
       && this.thread.range?.end.line === range.end.line;
 
-    if (sameAnchor && this.thread) {
-      // Mismo sitio, contenido nuevo: se actualiza en el sitio para no cerrar y abrir.
-      this.thread.comments = [comment];
+    if (sameAnchor && this.thread && this.comment) {
+      // Mismo sitio, contenido nuevo: se actualiza en el sitio para no cerrar y abrir (0.0.39: el
+      // mismo comentario con el cuerpo nuevo).
+      this.comment.body = buildSelectionWidgetMarkdown(model);
+      this.comment.contextValue = contextValue;
+      this.comment.label = commentLabel(model);
+      this.thread.comments = [this.comment];
       this.thread.label = threadLabel(model);
       this.thread.contextValue = contextValue;
     } else {
+      const comment: vscode.Comment = {
+        author: { name: 'ADACEEN' },
+        body: buildSelectionWidgetMarkdown(model),
+        mode: vscode.CommentMode.Preview,
+        contextValue,
+        label: commentLabel(model),
+      };
       const previousUri = this.uriString;
       this.disposeThread();
       const thread = this.controller.createCommentThread(uri, range, [comment]);
@@ -188,6 +208,7 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       thread.label = threadLabel(model);
       thread.contextValue = contextValue;
       this.thread = thread;
+      this.comment = comment;
       if (previousUri !== uri.toString()) {
         // Se abrio (o paso a otro documento): el CodeLens y la pista se recalculan.
         this.visibilityEmitter.fire();
@@ -209,6 +230,7 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
       this.thread.dispose();
       this.thread = null;
     }
+    this.comment = null;
     this.currentKey = '';
     return had;
   }

@@ -30,6 +30,66 @@ export function stripCutNoteAfterFence(output: string) {
   return note ? text.slice(0, after) + text.slice(after + note[0].length) : text;
 }
 
+// --- Explicacion del tutor (0.0.39) ------------------------------------------------------------
+
+const FENCE_AT_START = /^\s*(?:```|~~~)/;
+const FENCE_ANYWHERE = /```|~~~/;
+const APPLY_LINE = /^[ \t>*-]*(?:\d+\s*[).:-]?\s*)?(?:\*\*)?(?:acci[oó]n\s*:?\s*)?`?aplicar\s*:/i;
+const ACTION_HEADING = /^[ \t>*-]*(?:#+\s*)?(?:\*\*)?\s*(?:\d+\s*[).:-]?\s*)?acci[oó]n\s*:?\s*(?:\*\*)?\s*(?:`?(?:insert|replace|delete)`?\s*)?$/i;
+const LIST_MARKER = /^\s*(?:[-*+]\s+|\d{1,3}[.)]\s+|>\s*)/;
+const CODE_STATEMENT_START = /^\s*(?:#\s*(?:include|define|ifndef|ifdef|endif|pragma)\b|import\s+[\w.*{]|using\s+namespace\b|package\s+[\w.]+;|from\s+\w[\w.]*\s+import\b)/;
+const PYTHON_BLOCK = /^\s*(?:def|class|for|while|if|elif|else|try|except|finally|with)\b[^\n]*:\s*$/;
+const INDENTED_CODE = /^(?: {4,}|\t)(?![-*+]\s|\d{1,3}[.)]\s)\S/;
+
+/** La linea parece una instruccion de codigo escrita fuera de un bloque (la misma regla que el backend). */
+export function looksLikeCodeLine(line: string) {
+  if (INDENTED_CODE.test(String(line || '')) || PYTHON_BLOCK.test(String(line || ''))) {
+    return true;
+  }
+  const outside = String(line || '').replace(LIST_MARKER, '').replace(/`[^`\n]*`/g, '').trim();
+  if (!outside) {
+    return false;
+  }
+  return /[;{}]\s*$/.test(outside) || CODE_STATEMENT_START.test(outside) || /^[{}]+$/.test(outside);
+}
+
+/**
+ * La explicacion (prosa) de una respuesta del tutor, sin codigo: sin los bloques, sin la linea
+ * «Aplicar:» ni el encabezado «Accion», y sin lineas que parecen codigo escrito fuera de un bloque.
+ * live: el texto en vivo, que termina en el primer bloque (lo de despues llega en el final) y solo
+ * hasta la ultima linea completa; el backend ya lo filtra, esto es una segunda barrera.
+ */
+export function explanationFromTutorText(output: string, options: { live?: boolean } = {}) {
+  let text = String(output || '').replace(/\r\n?/g, '\n');
+  if (options.live && !text.endsWith('\n')) {
+    const lastNewline = text.lastIndexOf('\n');
+    text = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : '';
+  }
+  const kept: string[] = [];
+  let insideFence = false;
+  for (const line of text.split('\n')) {
+    if (options.live ? FENCE_ANYWHERE.test(line) : FENCE_AT_START.test(line)) {
+      if (options.live) {
+        break;
+      }
+      insideFence = !insideFence;
+      continue;
+    }
+    if (insideFence) {
+      continue;
+    }
+    if (!line.trim()) {
+      kept.push('');
+      continue;
+    }
+    if (APPLY_LINE.test(line) || ACTION_HEADING.test(line) || looksLikeCodeLine(line)) {
+      continue;
+    }
+    kept.push(line.replace(/\s+$/, ''));
+  }
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 /**
  * Una linea entera en cursiva de Markdown (`_texto_` o `*texto*`) como texto: el backend pone sus
  * notas asi fuera del bloque, y la ventana escapa el Markdown (se veian los guiones bajos).

@@ -51,5 +51,7 @@ export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): Sel
     proposalWarning: model.proposalWarning || '',
     tutorUnavailable: !!model.tutorUnavailable,
     guide: model.guide || null,
+    partialText: model.loading || model.pendingMode ? model.partialText || '' : '',
+    explanationText: model.explanationText || '',
   };
 }

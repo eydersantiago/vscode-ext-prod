@@ -14,7 +14,7 @@ import { getBackendSuggestionText, getWorkspaceProjectIndex } from './suggestion
 import { codeRequestNoteFor, suggestionReadyForMode } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { buildAppliedSuggestionModel, planSuggestionEdit } from './suggestion-edit';
-import { armSlowNotice, publishSuggestionModel, recordIgnoredSuggestion, recordSuggestionMetric } from './suggestion-publish';
+import { armSlowNotice, publishSuggestionModel, recordIgnoredSuggestion, recordSuggestionMetric, startLivePainter } from './suggestion-publish';
 import { createEmptyBackendSuggestionResult, formatBackendSuggestionError, truncateInline, withActiveSuggestionDeadline } from './suggestion-results';
 import { suppressAutoRefreshForActiveApply } from './suggestion-schedule';
 import { activeSuggestionModel, applyInProgress, codeRequestInFlightKey, dismissedSuggestionMetricId, selectionWidget, setApplyInProgress, setCodeRequestInFlightKey, setDismissedSuggestionMetricId, setLastRequestedModel, setSuppressSuggestionRefreshUntil, suggestionExposure } from './suggestion-state';
@@ -83,7 +83,7 @@ const requestCodeForModeNow = async (model: ActiveSuggestionModel, mode: EditorC
   }
   const documentVersion = editor.document.version;
 
-  const pending: ActiveSuggestionModel = { ...model, pendingMode: mode, slow: false, codeRequestNote: '', snapshotKey: snapshot.cacheKey };
+  const pending: ActiveSuggestionModel = { ...model, pendingMode: mode, slow: false, codeRequestNote: '', snapshotKey: snapshot.cacheKey, partialText: undefined };
   publishSuggestionModel(pending, true);
   armSlowNotice(pending);
   recordSuggestionMetric(model, 'vscode_suggestion_manual_refresh', mode, { requestedAction: mode, origin });
@@ -91,9 +91,11 @@ const requestCodeForModeNow = async (model: ActiveSuggestionModel, mode: EditorC
   const keepWithNote = (note: string) => {
     const current = activeSuggestionModel;
     if (current && current.metricId === pending.metricId && current.pendingMode === mode) {
-      publishSuggestionModel({ ...model, pendingMode: undefined, slow: false, codeRequestNote: note, snapshotKey: snapshot.cacheKey }, true);
+      publishSuggestionModel({ ...model, pendingMode: undefined, slow: false, codeRequestNote: note, snapshotKey: snapshot.cacheKey, partialText: undefined }, true);
     }
   };
+  // 0.0.39: mientras se prepara el codigo, la explicacion en vivo va en la ventana.
+  const livePainter = startLivePainter(pending, snapshot);
   try {
     const projectIndex = await getWorkspaceProjectIndex();
     const requestContext: BackendSuggestionRequestContext = {
@@ -102,9 +104,10 @@ const requestCodeForModeNow = async (model: ActiveSuggestionModel, mode: EditorC
       requestedAction: mode,
     };
     const result = await withActiveSuggestionDeadline(
-      getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext),
+      getBackendSuggestionText(settings, snapshot, projectIndex, 'cursor', requestContext, livePainter.onEvent),
       Math.min(settings.backendTimeoutMs, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS),
     );
+    livePainter.dispose();
     const current = activeSuggestionModel;
     const stillPending = !!current && current.metricId === pending.metricId && current.pendingMode === mode;
     const next = buildBackendActiveSuggestionModel(
@@ -161,6 +164,7 @@ const requestCodeForModeNow = async (model: ActiveSuggestionModel, mode: EditorC
     }, true, { latencyMs: result.latencyMs });
     output.appendLine(`[Suggestions] ${shown.filePath} | codigo pedido=${mode} | ${suggestionReadyForMode(shown, mode) ? 'con codigo' : 'sin codigo'}${shown.blocked ? ' | bloqueada por politica' : ''}`);
   } catch (error) {
+    livePainter.dispose();
     const message = formatBackendSuggestionError(error);
     output.appendLine(`[Suggestions] No llego el codigo pedido (${mode}): ${message}`);
     keepWithNote(`No llegó el código del tutor (${truncateInline(message, 120)}). Intenta de nuevo en un momento.`);

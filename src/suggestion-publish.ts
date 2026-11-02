@@ -3,6 +3,7 @@
 import * as vscode from 'vscode';
 import { SLOW_NOTICE_MS } from './constants';
 import { workspaceRelativePath } from './dependency-scan';
+import { isSnapshotStillActive } from './editor-snapshot';
 import { extensionContext, latestSuggestionHistory, output, quizView, setLatestSuggestionHistory, telemetry } from './extension-state';
 import { buildDependencyViewState, buildFileViewState } from './file-view-model';
 import type { FileViewActiveFile } from './file-view-model';
@@ -15,9 +16,10 @@ import { recordVscodeSuggestionMetric, toQuizHistoryItems } from './suggestion-m
 import type { SuggestionMetricFields } from './suggestion-metrics';
 import { isSuggestionCodeActionRequestFocused } from './suggestion-providers';
 import { inferActiveLanguage, pathBaseName } from './suggestion-results';
+import { createLivePainter } from './suggestion-stream';
 import { activeSuggestionModel, autoOpenedSelectionActionKey, dismissedSuggestionMetricId, recordedSuggestionMetricKeys, selectionInlinePanelTimer, selectionWidget, selectionWidgetPresence, setActiveSuggestionModel, setAutoOpenedSelectionActionKey, setDismissedSuggestionMetricId, setQuickFixAutoOpenedAt, setSelectionInlinePanelTimer, setSlowNoticeTimer, slowNoticeTimer, suggestionCodeActionProvider, suggestionCodeLensProvider, suggestionDecorationType, suggestionExposure, suggestionInlayHintProvider, suggestionStatusBar } from './suggestion-state';
 import { inlineSurfaceModel } from './suggestion-surfaces';
-import type { ActiveSuggestionModel } from './types';
+import type { ActiveEditorSnapshot, ActiveSuggestionModel } from './types';
 import { buildProgressPill } from './workshop-progress';
 
 export const recordIgnoredSuggestion = (model: ActiveSuggestionModel, durationMs: number, reason: 'replaced' | 'dismissed' | 'closed') => {
@@ -220,6 +222,31 @@ export const publishSuggestionModel = (model: ActiveSuggestionModel | null, enab
       });
   }
 };
+
+/**
+ * 0.0.39: la explicacion en vivo de un pedido. Guarda el texto en el modelo activo y repinta solo
+ * la ventana anclada a la seleccion (sin publishSuggestionModel: ni barra, ni CodeLens, ni vista,
+ * ni metricas, ni historial por cada parcial). createLivePainter decide si el parcial todavia es
+ * de la sugerencia que espera y limita la frecuencia.
+ */
+export const startLivePainter = (target: ActiveSuggestionModel, snapshot: ActiveEditorSnapshot) => createLivePainter<ActiveSuggestionModel>({
+  current: () => activeSuggestionModel,
+  target,
+  // La misma seleccion y la ventana abierta sobre ella: si el estudiante se movio (la ventana se
+  // cerro y la sugerencia nueva todavia no sale por la espera) o la cerro con la X, no se reabre.
+  canPaint: (model) => {
+    const widgetModel = toSelectionWidgetModel(model);
+    return !!widgetModel
+      && model.metricId !== dismissedSuggestionMetricId
+      && resolveActiveSuggestionSettings().selectionWidget
+      && isSnapshotStillActive(snapshot, 'cursor')
+      && selectionWidget.showsAnchor(widgetModel.uriString, widgetModel.startLine, widgetModel.endLine);
+  },
+  paint: (model) => {
+    setActiveSuggestionModel(model);
+    selectionWidget.show(toSelectionWidgetModel(model));
+  },
+});
 
 export const recordSuggestionMetric = (
   model: ActiveSuggestionModel | null,

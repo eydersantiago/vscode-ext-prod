@@ -6,6 +6,8 @@ import { editorConnection } from './connection-state';
 import { asRecord, toOptionalString } from './settings';
 import { actionTypeToApplyMode } from './suggestion-edit';
 import { isAbortLikeError } from './suggestion-results';
+import { readBackendJsonResponse } from './suggestion-stream';
+import type { BackendResponseLike, SuggestionStreamEvent } from './suggestion-stream';
 import type { BackendSettings, PendingCodeAction, PendingScanRequest, ScanPayload, ScannedDocument } from './types';
 import { scoreDocumentName } from './workspace-scan';
 
@@ -31,10 +33,34 @@ export function reportRejectedSession(sentHeaders: unknown, responseHeaders: unk
   }
 }
 
+/** Lo que hacen todas las llamadas con un cuerpo de error (status no 2xx): el mismo mensaje de siempre. */
+function errorFromResponse(status: number, data: unknown, text: string) {
+  const structuredError = toOptionalString(asRecord(data).error);
+  const rawError = toOptionalString(text);
+  const looksLikeHtml = /^<!doctype html>|<html[\s>]/i.test(rawError || '');
+  if (status === 524 || /524:\s*a timeout occurred|error code 524/i.test(rawError || '')) {
+    return new HttpError('Backend no respondio a tiempo por Cloudflare 524. Se usara fallback local.', status);
+  }
+  if (looksLikeHtml) {
+    return new HttpError(`Backend devolvio HTML en lugar de JSON (HTTP ${status}).`, status);
+  }
+  return new HttpError(structuredError || rawError || `HTTP ${status}`, status);
+}
+
+export type FetchJsonOptions = {
+  /**
+   * Respuesta en vivo (0.0.39, /suggest-tab): si el backend responde NDJSON, cada parcial o
+   * reinicio llega aqui y el valor devuelto es el cuerpo del final (el mismo JSON de siempre).
+   * Un backend anterior responde JSON: se lee como siempre y no llega nada.
+   */
+  onStreamEvent?: (event: SuggestionStreamEvent) => void;
+};
+
 export async function fetchJsonWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  options: FetchJsonOptions = {},
 ): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -44,28 +70,13 @@ export async function fetchJsonWithTimeout(
       signal: controller.signal,
     });
     reportRejectedSession(init.headers, response.headers);
-    const text = await response.text();
-    let data: unknown = {};
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = {};
-      }
+    // 0.0.39: NDJSON (respuesta en vivo) o el JSON de siempre. El plazo (timeoutMs) cuenta hasta el
+    // final: abortar corta tambien la lectura del cuerpo.
+    const read = await readBackendJsonResponse(response as unknown as BackendResponseLike, options.onStreamEvent);
+    if (read.status < 200 || read.status >= 300) {
+      throw errorFromResponse(read.status, read.data, read.text);
     }
-    if (!response.ok) {
-      const structuredError = toOptionalString(asRecord(data).error);
-      const rawError = toOptionalString(text);
-      const looksLikeHtml = /^<!doctype html>|<html[\s>]/i.test(rawError || '');
-      if (response.status === 524 || /524:\s*a timeout occurred|error code 524/i.test(rawError || '')) {
-        throw new HttpError('Backend no respondio a tiempo por Cloudflare 524. Se usara fallback local.', response.status);
-      }
-      if (looksLikeHtml) {
-        throw new HttpError(`Backend devolvio HTML en lugar de JSON (HTTP ${response.status}).`, response.status);
-      }
-      throw new HttpError(structuredError || rawError || `HTTP ${response.status}`, response.status);
-    }
-    return data;
+    return read.data;
   } catch (error) {
     if (isAbortLikeError(error)) {
       throw new Error(`Backend no respondio en ${Math.round(timeoutMs / 1000)}s; se mantiene fallback local.`);
