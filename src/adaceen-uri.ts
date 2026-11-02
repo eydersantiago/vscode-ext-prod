@@ -1,4 +1,5 @@
-import { normalizePairingCode, sameBackendUrl } from './editor-session';
+import { normalizePairingCode } from './editor-session-input';
+import { sameBackendUrl } from './editor-session-records';
 
 /**
  * Enlaces del navegador a VS Code de escritorio (Mac del laboratorio),

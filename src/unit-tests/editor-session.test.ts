@@ -2,34 +2,14 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import type { PairingEditorHost } from '../backend-url';
 import {
-  classifyConnectInput,
-  CONNECT_CODE_CHOICE,
-  CONNECT_CODE_PROMPT,
-  connectChoices,
-  connectFailureActions,
-  connectInputProblem,
-  describeClaimError,
-  describeSessionStatus,
-  SESSION_STATUS_UNCONNECTED_TEXT,
-  EditorClaimKind,
-  EditorClaimResult,
-  EditorSessionLabel,
   EditorSessionManager,
   EditorSessionManagerDeps,
-  EditorSessionRecord,
-  interpretClaimResponse,
-  interpretSessionCheck,
-  isDifferentUser,
-  normalizePairingCode,
-  parseEditorSessionFile,
-  parseStoredEditorSession,
-  requestEditorClaim,
-  resolveEditorSession,
-  sameBackendUrl,
-  serializeStoredEditorSession,
-  SessionCheck,
-  sessionLostWarning,
 } from '../editor-session';
+import { classifyConnectInput, CONNECT_CODE_CHOICE, CONNECT_CODE_PROMPT, connectChoices, connectFailureActions, connectInputProblem, normalizePairingCode, sessionLostWarning } from '../editor-session-input';
+import { describeSessionStatus, SESSION_STATUS_UNCONNECTED_TEXT, isDifferentUser, resolveEditorSession, parseEditorSessionFile, parseStoredEditorSession, sameBackendUrl, serializeStoredEditorSession } from '../editor-session-records';
+import type { EditorSessionLabel, EditorSessionRecord } from '../editor-session-records';
+import { describeClaimError, interpretClaimResponse, interpretSessionCheck, requestEditorClaim } from '../editor-session-claim';
+import type { EditorClaimKind, EditorClaimResult, SessionCheck } from '../editor-session-claim';
 
 const NOW = Date.parse('2026-09-25T12:00:00.000Z');
 const BACKEND = 'https://app-adaceen-api-eyder05232002.azurewebsites.net';

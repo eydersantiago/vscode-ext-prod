@@ -2,29 +2,19 @@ import * as vscode from 'vscode';
 import type { PairingEditorHost } from './backend-url';
 import { buildIdentityHeaders } from './client-identity';
 import {
-  classifyConnectInput,
-  CONNECT_CODE_CHOICE,
-  CONNECT_CODE_PROMPT,
-  connectChoices,
-  ConnectChoiceId,
-  connectFailureActions,
-  connectInputProblem,
   ConnectOutcome,
-  describeSessionStatus,
-  EDITOR_SESSION_FILE_MAX_BYTES,
   EDITOR_SESSION_SECRET_KEY,
   EDITOR_UNLINKED_STORAGE_KEY,
-  EditorSessionLabel,
   EditorSessionManager,
   GITHUB_AUTH_PROVIDER,
   GITHUB_SCOPES,
-  HttpFetch,
-  isDifferentUser,
-  requestEditorClaim,
-  requestSessionCheck,
-  ResolvedEditorSession,
-  sessionLostWarning,
 } from './editor-session';
+import { classifyConnectInput, CONNECT_CODE_CHOICE, CONNECT_CODE_PROMPT, connectChoices, connectFailureActions, connectInputProblem, sessionLostWarning } from './editor-session-input';
+import type { ConnectChoiceId } from './editor-session-input';
+import { describeSessionStatus, isDifferentUser, EDITOR_SESSION_FILE_MAX_BYTES } from './editor-session-records';
+import type { EditorSessionLabel, ResolvedEditorSession } from './editor-session-records';
+import { requestEditorClaim, requestSessionCheck } from './editor-session-claim';
+import type { HttpFetch } from './editor-session-claim';
 import {
   AdaceenUriRequest,
   gitInstallHint,
