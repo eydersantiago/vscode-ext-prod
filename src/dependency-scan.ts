@@ -4,7 +4,9 @@
 // indice no tiene (tope de 90 archivos y solo algunas extensiones: un .tpp o un .hh no estan).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_INDEX_MAX_FILES } from './constants';
-import { dependencyFamily, dependencyIndexFields, isThirdPartyPath, resolveFileDependencies } from './file-dependencies';
+import { dependencyIndexFields, resolveFileDependencies } from './file-dependencies';
+import { dependencyFamily } from './dependency-parse';
+import { isThirdPartyPath } from './dependency-project-files';
 import type { DependencyFamily, DependencyIndexFile, FileDependencies } from './file-dependencies';
 import { readWorkspaceText } from './source-text';
 import type { OpenTextDocumentLike } from './source-text';

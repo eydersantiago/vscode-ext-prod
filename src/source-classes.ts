@@ -4,7 +4,8 @@
 // atributos y metodos, y de quien heredan. Lee el texto sin comentarios ni cadenas (maskSource
 // de file-dependencies.ts) y no compila nada: C/C++ (tambien los `Clase::metodo` del .cpp),
 // Java, C#, Python y JavaScript/TypeScript. Se prueba con node:test.
-import { dependencyFamily, maskSource } from './file-dependencies';
+import { dependencyFamily } from './dependency-parse';
+import { maskSource } from './dependency-source-mask';
 import type { DependencyFamily } from './file-dependencies';
 
 export type SourceClass = {

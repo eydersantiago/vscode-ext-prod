@@ -15,7 +15,8 @@ import { isInWorkspaceFolder, readIndexedSource, workspaceRelativePath } from '.
 import type { BuildFileCache } from './dependency-scan';
 import { compareDiagram, EMPTY_DIAGRAM_NOTE, NO_DIAGRAM_NOTE } from './diagram-model';
 import type { DiagramTargetView } from './diagram-model';
-import { isThirdPartyPath, resolveProjectDependencyGraph } from './file-dependencies';
+import { resolveProjectDependencyGraph } from './dependency-graph';
+import { isThirdPartyPath } from './dependency-project-files';
 import type { DependencyIndexFile, ProjectDependencyGraph } from './file-dependencies';
 import { isSecretPath } from './scan-privacy';
 import { resolveScanOptions } from './settings';

@@ -4,7 +4,9 @@ import { parsePlantUmlClassDiagram } from '../class-diagram';
 import { buildDependencyGraphView, compareDiagram, diagramTelemetryMetadata, hasDiagramMember } from '../diagram-model';
 import { clipToBox, layeredLayout } from '../diagram-layout';
 import { escapeXml, renderClassDiagramSvg, renderDependencyGraphSvg } from '../diagram-svg';
-import { dependencyFamily, dependencyIndexFields, parseImports, resolveFileDependencies, resolveProjectDependencyGraph } from '../file-dependencies';
+import { dependencyIndexFields, resolveFileDependencies } from '../file-dependencies';
+import { resolveProjectDependencyGraph } from '../dependency-graph';
+import { dependencyFamily, parseImports } from '../dependency-parse';
 import { extractSourceClasses, mergeSourceClasses } from '../source-classes';
 import { BANCO_PUML } from './diagram-fixtures';
 

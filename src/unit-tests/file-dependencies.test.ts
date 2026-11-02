@@ -1,15 +1,12 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
-  collectNamespaces,
-  collectTypeReferences,
   declaredNames,
-  dependencyFamily,
   formatDependenciesForPrompt,
-  maskSource,
-  parseImports,
   resolveFileDependencies,
 } from '../file-dependencies';
+import { dependencyFamily, parseImports } from '../dependency-parse';
+import { collectNamespaces, collectTypeReferences, maskSource } from '../dependency-source-mask';
 import type { DependencyIndexFile } from '../file-dependencies';
 
 // Cuadro «Dependencias» de la vista «Este archivo» (0.0.36, pedido del 25/10/2026).
