@@ -1,5 +1,5 @@
 // ADACEEN (VS Code): dependencias del archivo activo con la API de vscode (0.0.36).
-// La lectura y la resolucion estan en file-dependencies.ts (puro, con pruebas); aqui se junta
+// La lectura y la resolucion estan en file-dependencies.ts y dependency-*.ts (puros, con pruebas); aqui se junta
 // el documento del editor, el indice del proyecto y una busqueda en el disco de lo que el
 // indice no tiene (tope de 90 archivos y solo algunas extensiones: un .tpp o un .hh no estan).
 import * as vscode from 'vscode';

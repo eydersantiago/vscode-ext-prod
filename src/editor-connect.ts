@@ -44,7 +44,7 @@ import {
  *   - lectura y vigilancia de ~/.adaceen/editor-session.json (tunel).
  *
  * El orden de resolucion, los canjes y la reaccion a sesiones invalidas estan
- * en editor-session.ts (sin vscode, con pruebas unitarias).
+ * en editor-session*.ts (records, claim y el manager; sin vscode, con pruebas unitarias).
  */
 
 export type EditorConnectionOptions = {
