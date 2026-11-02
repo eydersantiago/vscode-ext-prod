@@ -6,25 +6,13 @@ import {
   clickConfirmsChange,
   CodeApplicationAttempt,
   CodeApplicationGuardDeps,
-  describeQueuedTarget,
-  describeWaitTime,
   guardCodeApplication,
-  insertAnchorMatches,
-  isExplicitClickOrigin,
-  isFreshOverlayClick,
   isOfflineApplicationAllowed,
   measureCodeChange,
-  OVERLAY_CLICK_MAX_AGE_MS,
   parseApplyCheckResponse,
-  pickTextMatch,
-  QUICK_FIX_AUTO_OPEN_WINDOW_MS,
-  queuedActionSummary,
-  queuedCodeActionAgeMs,
-  queuedCodeActionNeedsPrompt,
-  QueuedTargetCheck,
-  queuedTargetVerified,
-  quickFixOrigin,
 } from '../code-application-guard';
+import { describeQueuedTarget, describeWaitTime, insertAnchorMatches, isExplicitClickOrigin, isFreshOverlayClick, OVERLAY_CLICK_MAX_AGE_MS, pickTextMatch, QUICK_FIX_AUTO_OPEN_WINDOW_MS, queuedActionSummary, queuedCodeActionAgeMs, queuedCodeActionNeedsPrompt, queuedTargetVerified, quickFixOrigin } from '../code-application-origin';
+import type { QueuedTargetCheck } from '../code-application-origin';
 import type { TelemetryEventInput } from '../telemetry';
 
 function harness(options: {

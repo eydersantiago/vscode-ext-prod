@@ -3,8 +3,10 @@
 // confirmacion con reintentos y nunca «fallido» despues de editar (code-action-queue.ts).
 import * as vscode from 'vscode';
 import { buildSessionHeaders, claimNextCodeAction, completeCodeAction, failCodeAction, fetchJsonWithTimeout } from './backend-http';
-import { describeQueuedTarget, guardCodeApplication, insertAnchorMatches, isFreshOverlayClick, queuedActionSummary, queuedCodeActionAgeMs, queuedCodeActionNeedsPrompt, queuedTargetVerified } from './code-application-guard';
-import type { ApplyCheckRequest, CodeApplicationGuardDeps, CodeApplicationVerdict, QueuedTargetCheck } from './code-application-guard';
+import { guardCodeApplication } from './code-application-guard';
+import { describeQueuedTarget, insertAnchorMatches, isFreshOverlayClick, queuedActionSummary, queuedCodeActionAgeMs, queuedCodeActionNeedsPrompt, queuedTargetVerified } from './code-application-origin';
+import type { ApplyCheckRequest, CodeApplicationGuardDeps, CodeApplicationVerdict } from './code-application-guard';
+import type { QueuedTargetCheck } from './code-application-origin';
 import { editorConnection } from './connection-state';
 import { APPLY_CHECK_TIMEOUT_MS, DEFAULT_CODE_ACTION_CONFIRM_LABEL } from './constants';
 import { detectBranchName } from './git-repo';

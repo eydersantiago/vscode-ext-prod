@@ -2,7 +2,7 @@
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { codeApplicationNote } from './code-application';
-import { quickFixOrigin } from './code-application-guard';
+import { quickFixOrigin } from './code-application-origin';
 import { buildSelectionRangeKey } from './editor-snapshot';
 import { buildSuggestionHoverMarkdown } from './suggestion-decorations';
 import { getSelectedFullLineRange, suggestionApplyModeLabel } from './suggestion-edit';

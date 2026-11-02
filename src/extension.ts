@@ -7,7 +7,8 @@ import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, fe
 import { describeBackendUrlSource, detectEditorHost, pairingEditorHost } from './backend-url';
 import { currentClientId, initClientIdentity } from './client-identity';
 import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './code-actions';
-import { guardCodeApplication, isExplicitClickOrigin } from './code-application-guard';
+import { guardCodeApplication } from './code-application-guard';
+import { isExplicitClickOrigin } from './code-application-origin';
 import { setEditorConnection } from './connection-state';
 import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_CURSOR_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, WORKER_TICK_MS } from './constants';
 import { courseMaterialListUrl, normalizeCourseMaterial } from './course-material';

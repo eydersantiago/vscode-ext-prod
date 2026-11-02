@@ -1,7 +1,7 @@
 // ADACEEN (VS Code): de la sugerencia al cambio en el editor: completado sugerido, modo de aplicacion y plan de edicion.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
-import { pickTextMatch } from './code-application-guard';
+import { pickTextMatch } from './code-application-origin';
 import { deepestIndentBelow, indentOf, indentUnitFromOptions, insertTargetIndent, opensBlock, placeInsertedCode, reindentCode, stripLineGutters } from './code-reindent';
 import { actionModeFromText, analyzedBlockMatches, normalizeActionProbe } from './suggestion-code';
 import { truncateInline, uniqueCompactStrings } from './suggestion-results';
