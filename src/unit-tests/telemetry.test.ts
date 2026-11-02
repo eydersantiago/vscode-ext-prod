@@ -2,12 +2,12 @@ import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
   buildTelemetryEvent,
-  SuggestionExposureTracker,
   TELEMETRY_SCHEMA_VERSION,
   TelemetryClient,
   TelemetryEventPayload,
   toLegacyTelemetryEvent,
 } from '../telemetry';
+import { SuggestionExposureTracker } from '../suggestion-exposure';
 
 const CONTRACT_KEYS = new Set([
   'source', 'category', 'eventType', 'pageContext', 'repoFullName', 'branch', 'filePath', 'language',

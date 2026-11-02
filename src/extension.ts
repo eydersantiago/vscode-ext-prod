@@ -41,7 +41,8 @@ import { AdaceenSuggestionCodeActionProvider, AdaceenSuggestionCodeLensProvider,
 import { createEmptyBackendSuggestionResult, delay, formatBackendSuggestionError, inferActiveLanguage, normalizeCourseCode, normalizeRagSources, pathBaseName, settleBackendSuggestionResult, truncateInline, withActiveSuggestionDeadline } from './suggestion-results';
 import { inlineSurfaceModel, selectionWidgetPresence as selectionWidgetPresenceFor } from './suggestion-surfaces';
 import type { SelectionWidgetPresence } from './suggestion-surfaces';
-import { SuggestionExposureTracker, TelemetryClient } from './telemetry';
+import { TelemetryClient } from './telemetry';
+import { SuggestionExposureTracker } from './suggestion-exposure';
 import type { TelemetryEventInput } from './telemetry';
 import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionInFlight, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, CursorIdleAnchor, ScanCommandArgs, ScanPayload, SuggestionApplyMode, SuggestionTrigger, WorkspaceProjectIndex } from './types';
 import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity, stableStringHash } from './workspace-index';
