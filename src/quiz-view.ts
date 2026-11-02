@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { CLIENT_ID_HEADER, getOrCreateClientId, rejectedSessionId } from './client-identity';
+import { randomId, PENDING_POLL_MS, ACCEPT_COUNT_KEY, GENERATE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS } from './quiz-view-types';
+import type { ViewState, QuizViewOptions, QuizHistoryItem, QuizAcceptedChange, PublicQuiz } from './quiz-view-types';
 
 /**
  * Panel "Quiz y seguimiento".
@@ -19,79 +21,6 @@ import { CLIENT_ID_HEADER, getOrCreateClientId, rejectedSessionId } from './clie
  * script redibuja solo el contenido, asi que nada se cierra ni salta al
  * recibir datos nuevos.
  */
-
-export type QuizRequestContext = {
-  baseUrl: string;
-  headers: Record<string, string>;
-};
-
-export type QuizHistoryItem = {
-  id: string;
-  fileName: string;
-  meta: string;
-  summary: string;
-};
-
-export type QuizAcceptedChange = {
-  filePath: string;
-  language: string;
-  applyMode: 'insert' | 'replace' | 'delete';
-  originalCode: string;
-  newCode: string;
-  suggestionText: string;
-  ragCourseCode: string;
-  repoFullName: string;
-};
-
-type PublicQuiz = {
-  id: string;
-  trigger: 'after_accept' | 'teacher_launch';
-  launchId: string | null;
-  status: 'pending' | 'followup' | 'done' | 'skipped' | 'expired';
-  topic: string;
-  filePath: string;
-  language: string;
-  question: string;
-  options: string[];
-  createdAt: string;
-  result: { correct: boolean; chosenIndex: number; correctIndex: number; explanation: string } | null;
-  followUpQuestion: string | null;
-  followUp: { answer: string; score: number | null; feedback: string } | null;
-};
-
-type ViewPhase = 'idle' | 'loading' | 'quiz' | 'error';
-
-type ViewState = {
-  phase: ViewPhase;
-  message: string;
-  quiz: PublicQuiz | null;
-  busy: boolean;
-  history: QuizHistoryItem[];
-};
-
-type QuizViewOptions = {
-  memento: vscode.Memento;
-  output: vscode.OutputChannel;
-  getRequestContext: () => QuizRequestContext | null;
-  openHistoryEntry: (id: string) => void;
-  openAllHistory: () => void;
-  /** El backend respondio x-adaceen-session: invalid a esta sesion (src/editor-session.ts). */
-  onSessionInvalid?: (sessionId: string) => void;
-};
-
-const ACCEPT_COUNT_KEY = 'adaceen.quiz.acceptCount';
-const PENDING_POLL_MS = 30000;
-const GENERATE_TIMEOUT_MS = 150000;
-const DEFAULT_TIMEOUT_MS = 60000;
-
-function randomId(length: number) {
-  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let out = '';
-  for (let i = 0; i < length; i += 1) {
-    out += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return out;
-}
 
 export class AdaceenQuizViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = 'adaceen.quizView';

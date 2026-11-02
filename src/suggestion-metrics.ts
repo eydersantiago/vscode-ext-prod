@@ -5,7 +5,7 @@ import { primarySuggestionText } from './selection-widget-model';
 import { buildSessionHeaders, fetchJsonWithTimeout } from './backend-http';
 import { ACTIVE_SUGGESTION_HISTORY_PANEL_LIMIT, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import { detectBranchName } from './git-repo';
-import type { QuizHistoryItem } from './quiz-view';
+import type { QuizHistoryItem } from './quiz-view-types';
 import { isCodespaceRuntime, resolveBackendSettings } from './settings';
 import { suggestionReadyForMode } from './suggestion-code';
 import { inferSuggestionApplyMode, suggestionApplyModeLabel } from './suggestion-edit';
