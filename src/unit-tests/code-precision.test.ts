@@ -5,13 +5,11 @@ import {
   ELISION_EXPANDED_NOTE,
   ELISION_GUIDE_REASON,
   UNBALANCED_REASON,
-  bracketBalance,
-  expandElisions,
   extractSuggestionCode,
-  isElisionLine,
   prepareSuggestionCode,
   resolveSuggestionModes,
 } from '../suggestion-code';
+import { bracketBalance, expandElisions, isElisionLine } from '../suggestion-code-precision';
 
 // Revision de precision del 21/10/2026 (0.0.35): sangria, margen numerado, resumenes "..." y
 // llaves sin cerrar en el codigo que propone el tutor.

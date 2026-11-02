@@ -8,12 +8,12 @@ import {
   extractSuggestionCode,
   isPlaceholderCode,
   producedMode,
-  isSignificantCodeLine,
   replacementDropsMostOfSelection,
   resolveSuggestionModes,
   retainedSelectionFraction,
   suggestionReadyForMode,
 } from '../suggestion-code';
+import { isSignificantCodeLine } from '../suggestion-code-precision';
 
 // Reunion del 20/10/2026: la sugerencia solo agregaba «// TODO: ...» y «Modificar
 // seleccion» cambiaba el bloque por un fragmento escrito para insertar.

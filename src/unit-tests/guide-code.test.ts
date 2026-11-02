@@ -11,14 +11,12 @@ import {
   UNBALANCED_REASON,
   codeCutNote,
   extractSuggestionCode,
-  isElisionLine,
-  isPolicyCutLine,
   policyCutReason,
   prepareSuggestionCode,
   resolveSuggestionModes,
-  stripPolicyCutLines,
   toSuggestionCodeFields,
 } from '../suggestion-code';
+import { isElisionLine, isPolicyCutLine, stripPolicyCutLines } from '../suggestion-code-precision';
 import { GUIDE_CODE_LABEL } from '../suggestion-guide';
 import type { SuggestionGuide } from '../suggestion-guide';
 import { resolveDisplayedCode } from '../suggestion-phase';
