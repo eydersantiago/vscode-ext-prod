@@ -2,7 +2,8 @@
 // Las funciones auxiliares se movieron sin cambios a modulos de src/ (settings, workspace-scan, backend-http,
 // git-repo, editor-snapshot, active-suggestion, suggestion-*, code-actions, status-bar...).
 import * as vscode from 'vscode';
-import { buildBackendActiveSuggestionModel, buildLocalActiveSuggestion, fetchBackendSuggestionText, isSuggestionApplyOffered } from './active-suggestion';
+import { buildBackendActiveSuggestionModel, fetchBackendSuggestionText, isSuggestionApplyOffered } from './active-suggestion';
+import { buildLocalActiveSuggestion } from './local-suggestion';
 import { buildSessionHeaders, claimNextScanRequest, classifyScannedDocuments, fetchJsonWithTimeout, sendScanFailure, sendScanResult } from './backend-http';
 import { describeBackendUrlSource, detectEditorHost, pairingEditorHost } from './backend-url';
 import { currentClientId, initClientIdentity } from './client-identity';
