@@ -1,14 +1,12 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
-  cleanClassName,
   extractMermaidClassDiagram,
-  parseDiagramMember,
-  parseDiagramRelation,
   parseMermaidClassDiagram,
   parsePlantUmlClassDiagram,
   pickDiagramFile,
 } from '../class-diagram';
+import { cleanClassName, parseDiagramMember, parseDiagramRelation } from '../class-diagram-lines';
 import { BANCO_PUML } from './diagram-fixtures';
 
 // «Ver diagrama» (0.0.38): el diagrama de clases del taller, como lo trae el repositorio.
