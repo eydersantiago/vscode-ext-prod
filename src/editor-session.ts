@@ -40,6 +40,15 @@ import { normalizePairingCode } from './editor-session-input';
 import { cleanBackendUrl, describeSessionDocumentProblem, describeSessionOrigin, isSafeSessionId, isSessionExpired, parseEditorSessionFile, parseStoredEditorSession, resolveEditorSession, sameBackendUrl, serializeStoredEditorSession } from './editor-session-records';
 import type { EditorSessionLabel, EditorSessionRecord, ResolvedEditorSession } from './editor-session-records';
 
+// La API de antes de partir el archivo se sigue exportando desde aqui: el backend (PDC) importa
+// este modulo por ruta en sus pruebas de contrato, y otros modulos pueden seguir usandolo igual.
+export { EDITOR_SESSION_FILE_MAX_BYTES, EDITOR_SESSION_FILE_VERSION, SESSION_STATUS_UNCONNECTED_TEXT, describeSessionDocumentProblem, describeSessionOrigin, describeSessionStatus, isDifferentUser, isLegacySessionUuid, isSafeSessionId, isSessionExpired, normalizeBackendUrl, parseEditorSessionFile, parseStoredEditorSession, resolveEditorSession, sameBackendUrl, serializeStoredEditorSession } from './editor-session-records';
+export type { EditorSessionCandidates, EditorSessionLabel, EditorSessionRecord, EditorSessionSource, ParsedSessionDocument, ResolveEditorSessionOptions, ResolvedEditorSession, SessionDocumentProblem } from './editor-session-records';
+export { EDITOR_CLAIM_PATHS, SESSION_CHECK_PATH, describeClaimError, interpretClaimResponse, interpretSessionCheck, requestEditorClaim, requestSessionCheck } from './editor-session-claim';
+export type { EditorClaimError, EditorClaimKind, EditorClaimResult, HttpFetch, SessionCheck } from './editor-session-claim';
+export { CONNECT_CODE_CHOICE, CONNECT_CODE_PROMPT, PAIRING_CODE_ALPHABET, SESSION_LOST_ACTION, classifyConnectInput, connectChoices, connectFailureActions, connectInputProblem, normalizePairingCode, sessionLostWarning } from './editor-session-input';
+export type { ConnectChoice, ConnectChoiceId, ConnectInput } from './editor-session-input';
+
 export const EDITOR_SESSION_SECRET_KEY = 'adaceen.editorSession';
 export const GITHUB_AUTH_PROVIDER = 'github';
 export const GITHUB_SCOPES = ['read:user'];
