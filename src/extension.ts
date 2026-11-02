@@ -11,10 +11,10 @@ import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './
 import { guardCodeApplication } from './code-application-guard';
 import { isExplicitClickOrigin } from './code-application-origin';
 import { setEditorConnection } from './connection-state';
-import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_CURSOR_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, WORKER_TICK_MS } from './constants';
+import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_CURSOR_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, MATERIAL_TTL_MS, SLOW_NOTICE_MS, WORKER_TICK_MS } from './constants';
 import { courseMaterialListUrl, normalizeCourseMaterial } from './course-material';
 import { EditorConnection } from './editor-connect';
-import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnchor, hasActiveSelection, isCursorIdleAnchorStillActive, isSnapshotStillActive, isSuggestionModelDocumentVisible, isSupportedActiveDocument } from './editor-snapshot';
+import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnchor, hasActiveSelection, isCursorIdleAnchorStillActive, isSnapshotStillActive, isSuggestionModelDocumentVisible, isSupportedActiveDocument, resolveBackendScopeForSnapshot, resolveEditorForSuggestion, revealEditorLine } from './editor-snapshot';
 import { ERROR_TEXT_MAX_CHARS, ErrorSignalTracker } from './error-signals';
 import type { BlockingSignal, ErrorSignal } from './error-signals';
 import { BuildFileCache, computeActiveFileDependencies, DependencyProbeCache, indexKeyOf, workspaceRelativePath } from './dependency-scan';
@@ -27,10 +27,10 @@ import { detectBranchName, detectRepoFullName, parseRepoFromGitConfig, readGitCo
 import { applyEditToText, PROPOSAL_SCHEME, ProposalContentProvider } from './proposal-diff';
 import { AdaceenQuizViewProvider } from './quiz-view';
 import { AdaceenSelectionWidget, SELECTION_WIDGET_ORIGIN } from './selection-widget';
-import { asRecord, backendUrlSetByWorkspace, getEnv, isCodespaceRuntime, refreshLocalBackendDetection, resolveActiveSuggestionSettings, resolveBackendSettings, resolveCurrentBackendBaseUrl, resolveScanOptions, resolveTriggerSettings, toOptionalString } from './settings';
+import { asRecord, backendUrlSetByWorkspace, errorSignalSettingsFromConfig, getEnv, isCodespaceRuntime, refreshLocalBackendDetection, resolveActiveSuggestionSettings, resolveBackendSettings, resolveCurrentBackendBaseUrl, resolveScanOptions, resolveTriggerSettings, toOptionalString } from './settings';
 import { UNKNOWN_BACKEND_ORIGIN, fetchBackendOrigin, updateBackendOriginStatusBar } from './status-bar';
 import { applySuggestionDecoration, clearSuggestionDecorations, updateSuggestionStatusBar } from './suggestion-decorations';
-import { extractSuggestionCode, producedMode, suggestionReadyForMode } from './suggestion-code';
+import { codeRequestNoteFor, extractSuggestionCode, producedMode, suggestionReadyForMode } from './suggestion-code';
 import type { EditorCodeAction } from './suggestion-code';
 import { buildAppliedSuggestionModel, planSuggestionEdit, resolveWorkspaceFileUri } from './suggestion-edit';
 import { buildRagSourceMarkdown, buildRagSourceTargetUrl, getBackendSuggestionScopeLabel, parseBackendSuggestionSections } from './suggestion-format';
@@ -38,19 +38,20 @@ import { formatSuggestionHistoryMarkdown, readSuggestionHistory, rememberSuggest
 import { primarySuggestionText, toSelectionWidgetModel } from './selection-widget-model';
 import { editorPageContext, publishActiveEditorRack, recordVscodeSuggestionMetric, toQuizHistoryItems } from './suggestion-metrics';
 import type { SuggestionMetricFields } from './suggestion-metrics';
-import { AdaceenSuggestionCodeActionProvider, AdaceenSuggestionCodeLensProvider, AdaceenSuggestionInlayHintProvider, isSuggestionCodeActionRequestFocused } from './suggestion-providers';
+import { AdaceenSuggestionCodeActionProvider, AdaceenSuggestionCodeLensProvider, AdaceenSuggestionInlayHintProvider, isSuggestionCodeActionRequestFocused, textDocumentSelector } from './suggestion-providers';
 import { createEmptyBackendSuggestionResult, delay, formatBackendSuggestionError, inferActiveLanguage, normalizeCourseCode, normalizeRagSources, pathBaseName, settleBackendSuggestionResult, truncateInline, withActiveSuggestionDeadline } from './suggestion-results';
 import { inlineSurfaceModel, selectionWidgetPresence as selectionWidgetPresenceFor } from './suggestion-surfaces';
 import type { SelectionWidgetPresence } from './suggestion-surfaces';
 import { TelemetryClient } from './telemetry';
 import { SuggestionExposureTracker } from './suggestion-exposure';
 import type { TelemetryEventInput } from './telemetry';
-import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionInFlight, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, BackendSuggestionScope, CursorIdleAnchor, ScanCommandArgs, ScanPayload, SuggestionApplyMode, SuggestionTrigger, WorkspaceProjectIndex } from './types';
-import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity, stableStringHash } from './workspace-index';
+import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionInFlight, BackendSuggestionRequestContext, BackendSuggestionRequestScope, BackendSuggestionResult, CursorIdleAnchor, ScanCommandArgs, ScanPayload, SuggestionApplyMode, SuggestionTrigger, WorkspaceProjectIndex } from './types';
+import { buildWorkspaceProjectIndexForSuggestions, getWorkspaceProjectIndexIdentity } from './workspace-index';
 import { askScanPermission, performWorkspaceScan, renderScanOutput } from './workspace-scan';
 import { buildProgressPill } from './workshop-progress';
 import { fetchMyWorkshopProgress, registerWorkshopProgressTriggers } from './workshop-progress-client';
 import { WorkshopProgressPoller } from './workshop-progress-poller';
+import { buildBackendSuggestionTextCacheKey } from './suggestion-backend';
 
 /** /suggest-tab respondio, pero sin texto ni codigo que mostrar. */
 class BackendAnsweredWithoutSuggestion extends Error {
@@ -564,13 +565,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  const revealEditorLine = (editor: vscode.TextEditor, line: number) => {
-    const target = Math.max(0, Math.min(editor.document.lineCount - 1, line - 1));
-    const position = new vscode.Position(target, editor.document.lineAt(target).firstNonWhitespaceCharacterIndex);
-    editor.selection = new vscode.Selection(position, position);
-    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-  };
-
   /**
    * Clic en el cuadro «Dependencias»: abre el archivo del proyecto o va a la linea del import.
    * El clic trae el archivo y la version del cuadro que se vio, y el id del elemento: si el
@@ -621,7 +615,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Aviso de espera larga (0.0.34): a los 20 s sin respuesta la ventana y la barra lo dicen.
   let slowNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-  const SLOW_NOTICE_MS = 20_000;
   const armSlowNotice = (model: ActiveSuggestionModel) => {
     if (slowNoticeTimer) {
       clearTimeout(slowNoticeTimer);
@@ -719,27 +712,6 @@ export async function activate(context: vscode.ExtensionContext) {
     backendSuggestionInFlight.clear();
   };
 
-  const buildBackendSuggestionTextCacheKey = (
-    snapshot: ActiveEditorSnapshot,
-    projectIndex: WorkspaceProjectIndex | null,
-    scope: BackendSuggestionRequestScope,
-    trigger: SuggestionTrigger,
-    requestedAction?: EditorCodeAction,
-  ) => {
-    const projectKey = projectIndex?.cacheKey || 'sin-mapa';
-    const backend = resolveBackendSettings();
-    const activeRagCourse = normalizeCourseCode(resolveActiveSuggestionSettings().ragCourseCode);
-    const sessionKey = stableStringHash(`${backend.sessionId || 'sin-sesion'}:${activeRagCourse || 'curso-backend'}`);
-    if (scope === 'file_summary') {
-      return `${sessionKey}:${snapshot.fileSummaryCacheKey}:${projectKey}`;
-    }
-    // Un bloqueo siempre llega al backend (su pregunta y su politica son otras), y
-    // un pedido de codigo (0.0.34) no reusa la sugerencia normal del mismo bloque.
-    const triggerKey = trigger === 'blocking' ? ':blocking' : '';
-    const actionKey = requestedAction ? `:pedido-${requestedAction}` : '';
-    return `${sessionKey}:${snapshot.cacheKey}:${projectKey}${triggerKey}${actionKey}`;
-  };
-
   const getBackendSuggestionText = async (
     settings: ActiveSuggestionSettings,
     snapshot: ActiveEditorSnapshot,
@@ -826,17 +798,6 @@ export async function activate(context: vscode.ExtensionContext) {
       workspaceProjectIndexInFlight = request;
     }
     return workspaceProjectIndexInFlight;
-  };
-
-  const resolveBackendScopeForSnapshot = (
-    reason: string,
-    snapshot: ActiveEditorSnapshot,
-    trigger?: SuggestionTrigger,
-  ): BackendSuggestionScope => {
-    if (hasActiveSelection(snapshot)) {
-      return 'cursor';
-    }
-    return reason === 'cursor-idle' || trigger === 'blocking' ? 'cursor' : 'file';
   };
 
   /** Hay un bloqueo detectado en este archivo que todavia no recibio su sugerencia. */
@@ -1253,24 +1214,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }, actionIdleMs);
   };
 
-  const resolveEditorForSuggestion = async (model: ActiveSuggestionModel) => {
-    const active = vscode.window.activeTextEditor;
-    if (active && active.document.uri.toString() === model.uriString) {
-      return active;
-    }
-    // Pulsado desde el panel: el editor sigue abierto a un lado; se le
-    // devuelve el foco (conserva su seleccion) y se aplica ahi.
-    const visible = vscode.window.visibleTextEditors.find((item) => item.document.uri.toString() === model.uriString);
-    if (visible) {
-      return vscode.window.showTextDocument(visible.document, { viewColumn: visible.viewColumn, preserveFocus: false });
-    }
-    try {
-      return await vscode.window.showTextDocument(vscode.Uri.parse(model.uriString), { preview: false });
-    } catch {
-      return undefined;
-    }
-  };
-
   const notifyQuizOfAcceptedChange = (
     model: ActiveSuggestionModel,
     mode: SuggestionApplyMode,
@@ -1291,23 +1234,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   /** Pedido de codigo en curso (sugerencia y accion): un doble clic no manda dos. */
   let codeRequestInFlightKey = '';
-
-  /** Nota bajo el codigo pedido cuando no es para la accion que se pidio (o no hay codigo). */
-  const codeRequestNoteFor = (next: ActiveSuggestionModel, mode: EditorCodeAction) => {
-    // Sin modelo la ventana ya explica que el tutor no esta disponible. Con codigo de guia
-    // (0.0.38: resumen «...», llaves sin cerrar o recortado) la ventana lo muestra con su motivo.
-    if (suggestionReadyForMode(next, mode) || next.tutorUnavailable || next.guide) {
-      return '';
-    }
-    const produced = producedMode(next);
-    if (mode === 'replace' && produced === 'insert') {
-      return 'El tutor propuso código para continuar en vez de una versión del bloque. Puedes insertarlo o pedir «Otra sugerencia».';
-    }
-    if (mode === 'insert' && produced === 'replace') {
-      return 'El tutor propuso una versión del bloque en vez de código para continuar (insertarla lo duplicaría). Revísala con «Ver cambios».';
-    }
-    return 'El tutor respondió sin código para esto. Prueba «Otra sugerencia» o escríbelo con la pista.';
-  };
 
   /**
    * Pide al tutor el codigo de una accion (0.0.34): «Proponer una mejora»
@@ -1642,7 +1568,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  const MATERIAL_TTL_MS = 5 * 60_000;
   const setMaterialState = (next: FileViewMaterialState) => {
     materialState = next;
     refreshFileView();
@@ -2046,7 +1971,6 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   // --- Senales de error y bloqueo (A6.2): activacion por eventos definidos ---
-  const errorSignalSettingsFromConfig = () => ({ blockingMs: resolveTriggerSettings().blockingSeconds * 1000 });
   const errorSignalTracker = new ErrorSignalTracker(errorSignalSettingsFromConfig());
   const lastEditAtByUri = new Map<string, number>();
   let errorSignalTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2171,12 +2095,6 @@ export async function activate(context: vscode.ExtensionContext) {
       errorSignalTimer = setTimeout(evaluateErrorSignals, Math.min(10 * 60_000, Math.max(250, deadline - now + 50)));
     }
   };
-
-  const textDocumentSelector: vscode.DocumentSelector = [
-    { scheme: 'file' },
-    { scheme: 'vscode-remote' },
-    { scheme: 'untitled' },
-  ];
 
   context.subscriptions.push(
     openAssistantDisposable,

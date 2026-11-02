@@ -1,4 +1,4 @@
-// ADACEEN (VS Code): foto del editor activo (texto visible, seleccion, diagnosticos) y anclas de inactividad del cursor.
+// ADACEEN (VS Code): foto del editor activo (texto visible, seleccion, diagnosticos), anclas de inactividad del cursor y el editor de una sugerencia.
 // Movido sin cambios desde src/extension.ts (solo se agrego "export" y los imports).
 import * as vscode from 'vscode';
 import { ACTIVE_SUGGESTION_PROMPT_SELECTION_CHARS, ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
@@ -6,7 +6,7 @@ import { summarizeDiagnostics } from './error-signals';
 import type { DiagnosticLike, DiagnosticsSummary } from './error-signals';
 import { detectRepoFullName } from './git-repo';
 import { inferActiveLanguage, pathBaseName } from './suggestion-results';
-import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionScope, CursorIdleAnchor } from './types';
+import type { ActiveEditorSnapshot, ActiveSuggestionModel, ActiveSuggestionSettings, BackendSuggestionScope, CursorIdleAnchor, SuggestionTrigger } from './types';
 import { stableStringHash } from './workspace-index';
 import { sliceAroundLine } from './prompt-context';
 
@@ -262,3 +262,39 @@ export function isCursorIdleAnchorStillActive(anchor: CursorIdleAnchor | null) {
     && editor.selection.active.character === anchor.column
     && buildSelectionRangeKey(editor) === anchor.selectionRangeKey;
 }
+
+export const revealEditorLine = (editor: vscode.TextEditor, line: number) => {
+  const target = Math.max(0, Math.min(editor.document.lineCount - 1, line - 1));
+  const position = new vscode.Position(target, editor.document.lineAt(target).firstNonWhitespaceCharacterIndex);
+  editor.selection = new vscode.Selection(position, position);
+  editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+};
+
+export const resolveBackendScopeForSnapshot = (
+  reason: string,
+  snapshot: ActiveEditorSnapshot,
+  trigger?: SuggestionTrigger,
+): BackendSuggestionScope => {
+  if (hasActiveSelection(snapshot)) {
+    return 'cursor';
+  }
+  return reason === 'cursor-idle' || trigger === 'blocking' ? 'cursor' : 'file';
+};
+
+export const resolveEditorForSuggestion = async (model: ActiveSuggestionModel) => {
+  const active = vscode.window.activeTextEditor;
+  if (active && active.document.uri.toString() === model.uriString) {
+    return active;
+  }
+  // Pulsado desde el panel: el editor sigue abierto a un lado; se le
+  // devuelve el foco (conserva su seleccion) y se aplica ahi.
+  const visible = vscode.window.visibleTextEditors.find((item) => item.document.uri.toString() === model.uriString);
+  if (visible) {
+    return vscode.window.showTextDocument(visible.document, { viewColumn: visible.viewColumn, preserveFocus: false });
+  }
+  try {
+    return await vscode.window.showTextDocument(vscode.Uri.parse(model.uriString), { preview: false });
+  } catch {
+    return undefined;
+  }
+};

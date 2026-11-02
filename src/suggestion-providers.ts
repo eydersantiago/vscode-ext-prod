@@ -262,3 +262,9 @@ export class AdaceenSuggestionInlayHintProvider implements vscode.InlayHintsProv
     this.changeEmitter.dispose();
   }
 }
+
+export const textDocumentSelector: vscode.DocumentSelector = [
+  { scheme: 'file' },
+  { scheme: 'vscode-remote' },
+  { scheme: 'untitled' },
+];

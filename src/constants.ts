@@ -88,3 +88,7 @@ export const APPLY_CHECK_TIMEOUT_MS = 8000;
 export const BLOCKING_TRIGGER_TTL_MS = 10 * 60_000;
 
 export const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md', 'markdown', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff']);
+
+export const SLOW_NOTICE_MS = 20_000;
+
+export const MATERIAL_TTL_MS = 5 * 60_000;

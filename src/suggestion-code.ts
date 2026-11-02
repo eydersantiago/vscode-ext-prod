@@ -16,7 +16,7 @@ import type { CodeCutPolicy, CodeCutSummary } from './code-application';
 import { stripLineGutters } from './code-reindent';
 import { bracketBalance, expandElisions, isBalanced, isElisionLine, isSignificantCodeLine, stripPolicyCutLines } from './suggestion-code-precision';
 import type { GuideCause, GuideReason, SuggestionGuide } from './suggestion-guide';
-import type { SuggestionApplyMode } from './types';
+import type { ActiveSuggestionModel, SuggestionApplyMode } from './types';
 
 export type EditorCodeAction = 'insert' | 'replace';
 
@@ -401,3 +401,20 @@ export function toSuggestionCodeFields(
   }
   return { completionMode: prepared.code ? completionMode : '', completionText: prepared.code, guide: null };
 }
+
+/** Nota bajo el codigo pedido cuando no es para la accion que se pidio (o no hay codigo). */
+export const codeRequestNoteFor = (next: ActiveSuggestionModel, mode: EditorCodeAction) => {
+  // Sin modelo la ventana ya explica que el tutor no esta disponible. Con codigo de guia
+  // (0.0.38: resumen «...», llaves sin cerrar o recortado) la ventana lo muestra con su motivo.
+  if (suggestionReadyForMode(next, mode) || next.tutorUnavailable || next.guide) {
+    return '';
+  }
+  const produced = producedMode(next);
+  if (mode === 'replace' && produced === 'insert') {
+    return 'El tutor propuso código para continuar en vez de una versión del bloque. Puedes insertarlo o pedir «Otra sugerencia».';
+  }
+  if (mode === 'insert' && produced === 'replace') {
+    return 'El tutor propuso una versión del bloque en vez de código para continuar (insertarla lo duplicaría). Revísala con «Ver cambios».';
+  }
+  return 'El tutor respondió sin código para esto. Prueba «Otra sugerencia» o escríbelo con la pista.';
+};

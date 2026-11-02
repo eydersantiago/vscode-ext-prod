@@ -380,3 +380,5 @@ export function resolveCodeApplicationSettings(): CodeApplicationSettings {
   );
   return { offlineMaxLines };
 }
+
+export const errorSignalSettingsFromConfig = () => ({ blockingMs: resolveTriggerSettings().blockingSeconds * 1000 });
