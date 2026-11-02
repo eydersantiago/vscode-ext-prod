@@ -4,6 +4,24 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.39] - 2026-11-01
+
+Pedido del 1 de noviembre: que la respuesta del tutor se vea mientras se escribe. Va con el backend del mismo día (la variante NDJSON de `/suggest-tab` y los parciales por la cola); con un backend anterior funciona igual que la 0.0.38.
+
+### Agregado
+
+- **La explicación del tutor en vivo en la ventana de la selección.** Mientras el tutor escribe, la ventana («ADACEEN · el tutor escribe») muestra la explicación que va llegando en vez de «Cuando llegue la respuesta aparecen aquí el código y las acciones», con la nota de que el código y las acciones aparecen al terminar. Solo prosa: el código llega al final, ya recortado por el backend (etapa, tope del docente, referencia del examen); en vivo nunca se ve código. También mientras se prepara el código de «Proponer una mejora» o «Proponer código para continuar». Si el backend vuelve a preguntar (reintento de un pedido de código sin código), lo mostrado se borra.
+- **Al terminar, la explicación se queda.** La ventana lista muestra la explicación completa de la respuesta (las secciones de prosa, sin el código ni «Aplicar:») y debajo el código y las acciones; antes mostraba solo un titular de hasta 420 caracteres. Sin explicación (pista local, historial anterior), el titular como antes.
+- **Scroll.** Una explicación larga hace scroll dentro de la ventana (VS Code limita el cuerpo de un hilo de comentarios a 20 em con su propia barra; ajuste `comments.maxHeight`). En vivo la explicación crece hasta lo que cabe sin scroll y el resto llega con el final («el resto de la explicación aparece al terminar»), para que el scroll no vuelva arriba con cada repintado; lista y larga, una línea arriba dice que el código y las acciones están al final. Los botones Insertar / Modificar / Eliminar del título de la ventana se ven siempre.
+
+### Detalles
+
+- `/suggest-tab` se pide con `Accept: application/x-ndjson, application/json;q=0.9`; el lector (`suggestion-stream.ts`, sin `vscode`: host Node y web) junta las líneas cortadas entre trozos, entrega `partial` y `restart` y resuelve con el `final`, que pasa por la misma normalización de siempre. El plazo (`adaceen.suggestions.backendTimeoutMs`) cuenta hasta el final. Un backend anterior o un camino rápido responden JSON: se lee como antes.
+- El pedido en curso se sigue compartiendo y su explicación en vivo llega a todos los que lo esperan; solo se pide en vivo el foco con una selección (lo único que muestra la ventana).
+- Cada parcial repinta solo la ventana (como mucho cada 250 ms), sin la barra, el CodeLens, la vista «Este archivo», las métricas ni el historial. Un pedido cancelado, reemplazado (otra selección) o ya respondido no pinta; si el estudiante cerró la ventana con la X o se movió, no se reabre.
+- La explicación se sanea antes de pintarse: sin enlaces `command:` ni enlaces, imágenes o autoenlaces activos, sin bloques de código.
+- Pruebas nuevas: lector NDJSON por partes, reparto a varios, tope de repintado, pintor que descarta pedidos viejos, ventana en vivo y lista con explicación + código, y la explicación de la respuesta.
+
 ## [0.0.38] - 2026-10-30
 
 Pedidos del 30 de octubre, tras el piloto de la noche: la ventana de la selección de `int main(){ ... }` mostró solo «El tutor resumió parte de tu bloque con «...»...» y «El codigo sugerido pasaba de 5 lineas y se recortó: usalo como guia.», sin ningún código; y la vista «Este archivo» casi no se veía. Va con el backend del mismo día (deja de poner la marca de recorte dentro del código, dice el recorte en `code_application` y agrega `GET /api/workshop-progress/me`); con un backend anterior funciona igual: la marca se quita y el avance no se muestra.
