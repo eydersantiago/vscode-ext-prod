@@ -381,6 +381,12 @@
           "default": true,
           "description": "Al seleccionar codigo, muestra una ventana flotante anclada a la seleccion con la sugerencia, el codigo propuesto y las acciones Insertar / Modificar / Eliminar. Sustituye al hover y al quick fix automaticos."
         },
+        "adaceen.suggestions.selectionHintMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "description": "Cada cuántos minutos ADACEEN recuerda que hay que seleccionar un fragmento de código y elegir un pedido para que el tutor ayude (también al entrar). No se repite si en ese rato ya se pidió ayuda. 0 lo apaga."
+        },
         "adaceen.suggestions.debounceMs": {
           "type": "number",
           "minimum": 250,

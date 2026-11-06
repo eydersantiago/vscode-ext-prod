@@ -15,6 +15,7 @@ import {
 } from '../selection-widget-text';
 import type { SelectionWidgetModel } from '../selection-widget-text';
 import { toSelectionWidgetModel } from '../selection-widget-model';
+import { SELECTION_HINT_DEFAULT_MINUTES, SELECTION_HINT_TEXT, selectionHintDue, selectionHintIntervalMs } from '../selection-hint';
 import { canOfferRecommendedAction, resolveDisplayedCode, suggestionPhase } from '../suggestion-phase';
 import type { ActiveSuggestionModel } from '../types';
 
@@ -164,5 +165,46 @@ describe('package.json (0.0.40)', () => {
   it('«Sugerencia para la selección» esta en la paleta', () => {
     assert.ok(manifest.contributes.commands.some((item) => item.command === 'adaceen.requestSuggestion'));
     assert.ok(!manifest.contributes.menus.commandPalette.some((item) => item.command === 'adaceen.requestSuggestion'));
+  });
+});
+
+describe('recordatorio de como pedir ayuda (0.0.40)', () => {
+  const minute = 60_000;
+  const every30 = selectionHintIntervalMs(30);
+
+  it('sale al entrar y luego cada 30 minutos', () => {
+    assert.equal(every30, 30 * minute);
+    assert.equal(selectionHintDue({ lastShownAt: null, lastRequestAt: null }, 0, every30), true, 'al entrar');
+    assert.equal(selectionHintDue({ lastShownAt: 0, lastRequestAt: null }, 29 * minute, every30), false);
+    assert.equal(selectionHintDue({ lastShownAt: 0, lastRequestAt: null }, 30 * minute, every30), true);
+  });
+
+  it('no se repite si en ese rato el estudiante ya pidio ayuda', () => {
+    assert.equal(selectionHintDue({ lastShownAt: 0, lastRequestAt: 20 * minute }, 31 * minute, every30), false);
+    assert.equal(selectionHintDue({ lastShownAt: 0, lastRequestAt: 20 * minute }, 50 * minute, every30), true);
+  });
+
+  it('0, negativo o invalido lo apaga', () => {
+    for (const value of [0, -5, 'x', null, undefined]) {
+      assert.equal(selectionHintIntervalMs(value), 0, String(value));
+      assert.equal(selectionHintDue({ lastShownAt: null, lastRequestAt: null }, 0, selectionHintIntervalMs(value)), false);
+    }
+  });
+
+  it('dice que hay que seleccionar y nombra los pedidos de la ventana', () => {
+    assert.match(SELECTION_HINT_TEXT, /selecciona un fragmento de tu código/);
+    for (const label of ['Sugerencia ADACEEN', 'Proponer una mejora', 'Proponer código para continuar']) {
+      assert.ok(SELECTION_HINT_TEXT.includes(label), label);
+    }
+  });
+
+  it('el ajuste existe con 30 minutos por defecto', () => {
+    const manifest = JSON.parse(readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+      contributes: { configuration: { properties: Record<string, { default?: unknown; minimum?: number }> } };
+    };
+    const setting = manifest.contributes.configuration.properties['adaceen.suggestions.selectionHintMinutes'];
+    assert.ok(setting);
+    assert.equal(setting.default, SELECTION_HINT_DEFAULT_MINUTES);
+    assert.equal(setting.minimum, 0);
   });
 });

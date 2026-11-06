@@ -28,6 +28,7 @@ Prueba del 5 de noviembre con dos personas: la respuesta era buena, pero tardaba
 
 ### Agregado
 
+- **Recordatorio de cómo pedir ayuda.** Al entrar (a los 5 s) y cada 30 minutos, una notificación dice: «ADACEEN: selecciona un fragmento de tu código y elige «Sugerencia ADACEEN», «Proponer una mejora» o «Proponer código para continuar» para que el tutor te ayude.» (botón «Entendido»). No se repite si en esos 30 minutos el estudiante ya pidió ayuda. Con la ventana sin foco, espera a que vuelva. Ajuste nuevo `adaceen.suggestions.selectionHintMinutes` (30 por defecto; 0 lo apaga). La regla está en `selection-hint.ts`, sin `vscode` y con pruebas.
 - Comandos `adaceen.requestSuggestion` («ADACEEN: Sugerencia para la selección»), `adaceen.selectionWidget.suggest`, `adaceen.selectionWidget.proposeImprovement` y `adaceen.selectionWidget.proposeContinuation`; contexto del hilo `adaceen-suggestion-request`.
 - Pruebas unitarias (`sugerencia-a-pedido.test.ts`). Además, una revisión independiente con un VS Code simulado (31 escenarios: opciones, cada pedido, doble clic, cursor quieto, volver a seleccionar, soltar la selección antes y después de la respuesta, bloqueo, «Otra sugerencia», «Este archivo», telemetría) encontró los cuatro casos de arriba que se quedaban colgados. Quedaron corregidos y comprobados contra la 0.0.38.
 
