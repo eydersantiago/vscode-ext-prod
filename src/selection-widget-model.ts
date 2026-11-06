@@ -45,6 +45,7 @@ export function toSelectionWidgetModel(model: ActiveSuggestionModel | null): Sel
     codeApplication: policy ? { allowed: policy.allowed, reason: policy.reason, reasonCode: policy.reasonCode } : null,
     applicationNote: codeApplicationNote(model),
     pendingMode: model.pendingMode || '',
+    awaitingRequest: !!model.awaitingRequest,
     slow: !!model.slow,
     codeRequestNote: model.codeRequestNote || '',
     requestedAction: model.requestedAction || '',

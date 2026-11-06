@@ -62,10 +62,9 @@ export const ACTIVE_SUGGESTION_PROMPT_INDEX_MAX_FILES = 24;
 
 export const ACTIVE_SUGGESTION_PROMPT_INDEX_PREVIEW_CHARS = 110;
 
-export const ACTIVE_SUGGESTION_CURSOR_IDLE_MS = 3000;
-
 export const ACTIVE_SUGGESTION_ACTION_IDLE_MS = 10000;
 
+/** Pausa de la seleccion tras la que se abre la ventana con los pedidos (0.0.40: sin consultar al tutor). */
 export const ACTIVE_SUGGESTION_SELECTION_IDLE_MS = 1200;
 
 export const ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS = 2200;

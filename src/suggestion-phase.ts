@@ -18,18 +18,22 @@ import type { SuggestionApplyMode, SuggestionSource } from './types';
  * Lo que la sugerencia muestra ahora:
  *   loading            se esta consultando al tutor
  *   pending            se pidio al tutor el codigo de una accion (mejora o continuar)
+ *   awaiting_request   hay una seleccion y todavia no se le pidio nada al tutor (0.0.40): la
+ *                      ventana ofrece «Sugerencia ADACEEN» y los pedidos de codigo
  *   blocked            la politica del docente bloqueo la respuesta (solo su mensaje)
  *   tutor_unavailable  el backend respondio sin modelo (GPU apagada o sin worker)
  *   local_fallback     el tutor no respondio a tiempo: pista local, sin codigo
  *   ready              respuesta del tutor (o pista local) lista
  * Que la sugerencia ya se aplico no es una fase: lo dice `applied`, que cada vista mira primero.
  */
-export type SuggestionPhase = 'loading' | 'pending' | 'blocked' | 'tutor_unavailable' | 'local_fallback' | 'ready';
+export type SuggestionPhase = 'loading' | 'pending' | 'awaiting_request' | 'blocked' | 'tutor_unavailable' | 'local_fallback' | 'ready';
 
 /** Lo que hace falta para saber la fase: lo tienen el modelo de la sugerencia y el de la ventana. */
 export type SuggestionPhaseInput = {
   loading?: boolean;
   pendingMode?: SuggestionApplyMode | '';
+  /** 0.0.40: seleccion lista, sin pedido al tutor todavia (ni texto ni codigo del tutor). */
+  awaitingRequest?: boolean;
   blocked?: boolean;
   tutorUnavailable?: boolean;
   source: SuggestionSource;
@@ -42,6 +46,10 @@ export function suggestionPhase(model: SuggestionPhaseInput): SuggestionPhase {
   // Solo se pide codigo para mejorar o continuar; eliminar no espera al tutor.
   if (model.pendingMode === 'replace' || model.pendingMode === 'insert') {
     return 'pending';
+  }
+  // Antes que bloqueada o sin modelo: todavia no hubo respuesta que pudiera serlo.
+  if (model.awaitingRequest) {
+    return 'awaiting_request';
   }
   if (model.blocked) {
     return 'blocked';

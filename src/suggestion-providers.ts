@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { codeApplicationNote } from './code-application';
 import { quickFixOrigin } from './code-application-guard';
 import { buildSelectionRangeKey } from './editor-snapshot';
+import { SUGGEST_LABEL } from './selection-widget-text';
 import { buildSuggestionHoverMarkdown } from './suggestion-decorations';
 import { getSelectedFullLineRange, suggestionApplyModeLabel } from './suggestion-edit';
 import { canOfferRecommendedAction } from './suggestion-phase';
@@ -41,11 +42,20 @@ export class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvide
       return [];
     }
 
+    const lineIndex = Math.max(0, (Number(this.model.line) || 1) - 2);
+    const range = new vscode.Range(lineIndex, 0, lineIndex, 0);
+    if (this.model.awaitingRequest) {
+      // 0.0.40: sin pedido todavia no hay pista que resumir (el texto del modelo es el local): el
+      // CodeLens es el mismo pedido de la ventana, por si los comentarios estan ocultos.
+      return [new vscode.CodeLens(range, {
+        title: `$(lightbulb) ADACEEN: ${SUGGEST_LABEL}`,
+        command: 'adaceen.requestSuggestion',
+        arguments: ['codelens'],
+      })];
+    }
     const headline = this.model.loading
       ? 'Cargando sugerencias...'
       : this.model.suggestions[0] || this.model.fileOverview || this.model.title;
-    const lineIndex = Math.max(0, (Number(this.model.line) || 1) - 2);
-    const range = new vscode.Range(lineIndex, 0, lineIndex, 0);
     const lenses = [
       new vscode.CodeLens(
         range,

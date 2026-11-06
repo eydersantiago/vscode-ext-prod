@@ -4,6 +4,26 @@ All notable changes to the "adaceen" extension will be documented in this file.
 
 Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
 
+## [0.0.40] - 2026-11-05
+
+Prueba del 5 de noviembre con dos personas: la respuesta era buena, pero tardaba ~1 minuto en llegar la pista y otro minuto el código. Una petición sola en la L4 tarda ~20 s (prueba de carga del 28/10). La diferencia era cola: la extensión le pedía al tutor respuestas que nadie había pedido. Sale de producción (0.0.38); la 0.0.39 es la rama `wip/streaming`, sin desplegar. No necesita cambios en el backend.
+
+### Cambiado
+
+- **El tutor responde solo cuando el estudiante lo pide.** Antes, cada pausa del cursor de 3 s mandaba dos `POST /suggest-tab` (la línea y `file_summary`), cada pausa de la selección de 1,2 s mandaba otro, y revelar las acciones (a los 10 s) también podía pedirla. Nada los cancelaba en el servidor: aunque VS Code descartara la respuesta, la GPU la generaba completa (hasta 1000–1200 tokens). Con dos personas moviéndose por el archivo, los 4 cupos de la L4 se llenaban de respuestas que nadie leía, y la pedida quedaba detrás. Ahora:
+  - Al seleccionar código (pausa de 1,2 s), la ventana flotante se abre **sin consultar al tutor**, con «Sugerencia ADACEEN», «Proponer una mejora» y «Proponer código para continuar» (también como botones del título del hilo), más «Resumen y material». Fase nueva `awaiting_request` (`suggestion-phase.ts`); el texto local del modelo no se presenta como pista del tutor.
+  - «Sugerencia ADACEEN» (comando `adaceen.requestSuggestion`, también desde el CodeLens y el hover) pide la pista con `trigger: "selection"`, el mismo de antes: el backend la trata igual (caché, política y etapa). «Otra sugerencia» sigue siendo `manual` y es la que sube la etapa. Los pedidos de código no cambian.
+  - El cursor quieto sin selección ya no consulta al tutor, y revelar las acciones ya no pide una respuesta que falte.
+  - La sugerencia del foco ya no pide además el resumen del archivo ni espera a la más lenta de las dos. El resumen lo pide la vista «Este archivo» al abrirse, como ya hacía.
+  - Si se vuelve a seleccionar el mismo bloque sin cambios, se muestra la respuesta que ya llegó (la de la ventana, el código pedido o la pista en la caché local) en vez de las opciones, y sin pasar por la GPU.
+  - Siguen siendo automáticos el aviso de bloqueo (un error que dura 90 s; ahora sin `file_summary`) y el resumen al abrir «Este archivo».
+- Con las opciones a la vista, «Eliminar selección» no se ofrece (no hay respuesta que lo recomiende) y las opciones no entran al historial de recomendaciones.
+
+### Agregado
+
+- Comandos `adaceen.requestSuggestion` («ADACEEN: Sugerencia para la selección»), `adaceen.selectionWidget.suggest`, `adaceen.selectionWidget.proposeImprovement` y `adaceen.selectionWidget.proposeContinuation`; contexto del hilo `adaceen-suggestion-request`.
+- Pruebas unitarias (`sugerencia-a-pedido.test.ts`).
+
 ## [0.0.38] - 2026-10-30
 
 Pedidos del 30 de octubre, tras el piloto de la noche: la ventana de la selección de `int main(){ ... }` mostró solo «El tutor resumió parte de tu bloque con «...»...» y «El codigo sugerido pasaba de 5 lineas y se recortó: usalo como guia.», sin ningún código; y la vista «Este archivo» casi no se veía. Va con el backend del mismo día (deja de poner la marca de recorte dentro del código, dice el recorte en `code_application` y agrega `GET /api/workshop-progress/me`); con un backend anterior funciona igual: la marca se quita y el avance no se muestra.

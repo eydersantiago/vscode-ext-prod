@@ -4,9 +4,9 @@ import {
   buildSelectionWidgetText,
   SELECTION_WIDGET_COMMANDS,
   selectionWidgetCode,
-  selectionWidgetShowsTitleActions,
+  selectionWidgetTitleActions,
 } from './selection-widget-text';
-import type { SelectionWidgetModel } from './selection-widget-text';
+import type { SelectionWidgetModel, SelectionWidgetTitleActions } from './selection-widget-text';
 import { assertNeverPhase, suggestionPhase } from './suggestion-phase';
 
 export {
@@ -19,8 +19,10 @@ export type { SelectionWidgetMode, SelectionWidgetModel } from './selection-widg
 /**
  * Ventana flotante anclada a la seleccion.
  *
- * Cuando el estudiante selecciona codigo y llega una sugerencia, se muestra
- * un unico widget pegado a esas lineas con:
+ * Cuando el estudiante selecciona codigo se muestra un unico widget pegado a
+ * esas lineas. Desde la 0.0.40 se abre primero con los pedidos («Sugerencia
+ * ADACEEN», «Proponer una mejora», «Proponer codigo para continuar») sin
+ * consultar al tutor; cuando llega la respuesta del pedido elegido muestra:
  *   - la recomendacion en una frase,
  *   - el codigo que el tutor escribio para una accion (0.0.34: nunca un
  *     «TODO» inventado),
@@ -39,9 +41,17 @@ export type { SelectionWidgetMode, SelectionWidgetModel } from './selection-widg
 
 export const SELECTION_WIDGET_CONTROLLER_ID = 'adaceen.selection';
 /** Hilo con acciones de aplicar (los botones del titulo dependen de este valor en package.json). */
-const THREAD_CONTEXT = 'adaceen-suggestion';
+const THREAD_CONTEXT_APPLY = 'adaceen-suggestion';
 /** Hilo solo de lectura: cargando, respuesta bloqueada, pista local o aplicacion no permitida. */
 const THREAD_CONTEXT_READONLY = 'adaceen-suggestion-readonly';
+/** 0.0.40: hilo con los pedidos (Sugerencia ADACEEN, Proponer una mejora, Proponer codigo). */
+const THREAD_CONTEXT_REQUEST = 'adaceen-suggestion-request';
+
+const THREAD_CONTEXT: Record<SelectionWidgetTitleActions, string> = {
+  apply: THREAD_CONTEXT_APPLY,
+  request: THREAD_CONTEXT_REQUEST,
+  readonly: THREAD_CONTEXT_READONLY,
+};
 
 export function buildSelectionWidgetMarkdown(model: SelectionWidgetModel) {
   const md = new vscode.MarkdownString('', true);
@@ -58,6 +68,8 @@ function threadLabel(model: SelectionWidgetModel) {
       return 'ADACEEN · cargando';
     case 'pending':
       return 'ADACEEN · preparando código';
+    case 'awaiting_request':
+      return 'ADACEEN · elige una ayuda';
     case 'blocked':
       return 'ADACEEN · tutor';
     case 'tutor_unavailable':
@@ -76,6 +88,8 @@ function commentLabel(model: SelectionWidgetModel) {
     case 'loading':
     case 'pending':
       return 'cargando';
+    case 'awaiting_request':
+      return 'sin consultar al tutor';
     case 'blocked':
       return 'mensaje del tutor';
     case 'tutor_unavailable':
@@ -135,7 +149,7 @@ export class AdaceenSelectionWidget implements vscode.Disposable {
 
     // La clave es lo que se pinta (texto, etiquetas y botones del titulo): un campo nuevo del
     // modelo que cambie la ventana la repinta sin tener que acordarse de agregarlo aqui.
-    const contextValue = selectionWidgetShowsTitleActions(model) ? THREAD_CONTEXT : THREAD_CONTEXT_READONLY;
+    const contextValue = THREAD_CONTEXT[selectionWidgetTitleActions(model)];
     const key = [
       model.uriString,
       model.startLine,

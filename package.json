@@ -2,7 +2,7 @@
   "name": "adaceen",
   "displayName": "ADACEEN",
   "description": "Lee archivos del workspace y prepara contexto para análisis en VS Code y Codespaces",
-  "version": "0.0.38",
+  "version": "0.0.40",
   "publisher": "adaceen",
   "license": "MIT",
   "repository": {
@@ -130,6 +130,10 @@
         "category": "ADACEEN"
       },
       {
+        "command": "adaceen.requestSuggestion",
+        "title": "ADACEEN: Sugerencia para la selección"
+      },
+      {
         "command": "adaceen.selectionWidget.insert",
         "title": "Insertar debajo",
         "category": "ADACEEN",
@@ -146,6 +150,24 @@
         "title": "Eliminar selección",
         "category": "ADACEEN",
         "icon": "$(trash)"
+      },
+      {
+        "command": "adaceen.selectionWidget.suggest",
+        "title": "Sugerencia ADACEEN",
+        "category": "ADACEEN",
+        "icon": "$(lightbulb)"
+      },
+      {
+        "command": "adaceen.selectionWidget.proposeImprovement",
+        "title": "Proponer una mejora",
+        "category": "ADACEEN",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "adaceen.selectionWidget.proposeContinuation",
+        "title": "Proponer código para continuar",
+        "category": "ADACEEN",
+        "icon": "$(add)"
       },
       {
         "command": "adaceen.selectionWidget.close",
@@ -192,6 +214,18 @@
           "when": "false"
         },
         {
+          "command": "adaceen.selectionWidget.suggest",
+          "when": "false"
+        },
+        {
+          "command": "adaceen.selectionWidget.proposeImprovement",
+          "when": "false"
+        },
+        {
+          "command": "adaceen.selectionWidget.proposeContinuation",
+          "when": "false"
+        },
+        {
           "command": "adaceen.selectionWidget.close",
           "when": "false"
         },
@@ -215,6 +249,21 @@
           "command": "adaceen.selectionWidget.delete",
           "group": "inline@3",
           "when": "commentController == adaceen.selection && commentThread == adaceen-suggestion"
+        },
+        {
+          "command": "adaceen.selectionWidget.suggest",
+          "group": "inline@1",
+          "when": "commentController == adaceen.selection && commentThread == adaceen-suggestion-request"
+        },
+        {
+          "command": "adaceen.selectionWidget.proposeImprovement",
+          "group": "inline@2",
+          "when": "commentController == adaceen.selection && commentThread == adaceen-suggestion-request"
+        },
+        {
+          "command": "adaceen.selectionWidget.proposeContinuation",
+          "group": "inline@3",
+          "when": "commentController == adaceen.selection && commentThread == adaceen-suggestion-request"
         },
         {
           "command": "adaceen.selectionWidget.close",

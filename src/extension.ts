@@ -9,7 +9,7 @@ import { currentClientId, initClientIdentity } from './client-identity';
 import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './code-actions';
 import { guardCodeApplication, isExplicitClickOrigin } from './code-application-guard';
 import { setEditorConnection } from './connection-state';
-import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_CURSOR_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, WORKER_TICK_MS } from './constants';
+import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, WORKER_TICK_MS } from './constants';
 import { courseMaterialListUrl, normalizeCourseMaterial } from './course-material';
 import { EditorConnection } from './editor-connect';
 import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnchor, hasActiveSelection, isCursorIdleAnchorStillActive, isSnapshotStillActive, isSuggestionModelDocumentVisible, isSupportedActiveDocument } from './editor-snapshot';
@@ -32,6 +32,7 @@ import { extractSuggestionCode, producedMode, suggestionReadyForMode } from './s
 import type { EditorCodeAction } from './suggestion-code';
 import { buildAppliedSuggestionModel, planSuggestionEdit, resolveWorkspaceFileUri } from './suggestion-edit';
 import { buildRagSourceMarkdown, buildRagSourceTargetUrl, getBackendSuggestionScopeLabel, parseBackendSuggestionSections } from './suggestion-format';
+import { suggestionPhase } from './suggestion-phase';
 import { formatSuggestionHistoryMarkdown, readSuggestionHistory, rememberSuggestionHistory, writeSuggestionHistory } from './suggestion-history';
 import { primarySuggestionText, toSelectionWidgetModel } from './selection-widget-model';
 import { editorPageContext, publishActiveEditorRack, recordVscodeSuggestionMetric, toQuizHistoryItems } from './suggestion-metrics';
@@ -671,7 +672,8 @@ export async function activate(context: vscode.ExtensionContext) {
     refreshInlineSuggestionSurfaces();
     maybeOpenSelectionInlinePanel(model);
     refreshFileView();
-    if (model && !model.loading && !model.pendingMode && !model.applied) {
+    // Las opciones de una seleccion (0.0.40) no son una recomendacion: no van al historial.
+    if (model && !model.loading && !model.pendingMode && !model.applied && !model.awaitingRequest) {
       void rememberSuggestionHistory(context.workspaceState, model)
         .then((history) => {
           latestSuggestionHistory = history;
@@ -987,8 +989,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
     if (settings.useBackend) {
       try {
-        const selectedFocus = hasActiveSelection(snapshot);
-        const fileSummaryRequest = selectedFocus
+        // 0.0.40: la sugerencia del foco ya no pide tambien el resumen del archivo (antes salian las
+        // dos y se esperaba a la mas lenta). El resumen lo pide la vista «Este archivo» al abrirse.
+        const fileSummaryRequest = backendScope === 'cursor'
           ? null
           : withActiveSuggestionDeadline(
             getBackendSuggestionText(settings, snapshot, projectIndex, 'file_summary', requestContext),
@@ -1083,7 +1086,12 @@ export async function activate(context: vscode.ExtensionContext) {
       && (activeSuggestionModel.selectionRangeKey
         ? activeSuggestionModel.selectionRangeKey === snapshot.selectionRangeKey
         : activeSuggestionModel.line === snapshot.line && activeSuggestionModel.column === snapshot.column);
-    const finalModel = keepVisibleActions && isSuggestionApplyOffered(model) ? { ...model, actionsVisible: true } : model;
+    const visibleModel = keepVisibleActions && isSuggestionApplyOffered(model) ? { ...model, actionsVisible: true } : model;
+    // 0.0.40: la foto del editor de la respuesta del foco. Si el estudiante vuelve a seleccionar el
+    // mismo bloque sin cambios, showSelectionRequestOptions muestra esta y no vuelve a las opciones.
+    const finalModel = backendScope === 'cursor' && !visibleModel.snapshotKey
+      ? { ...visibleModel, snapshotKey: snapshot.cacheKey }
+      : visibleModel;
     const shownLatencyMs = Date.now() - backendStartedAt;
     publishSuggestionModel(finalModel, true);
     if (!finalModel.blocked) {
@@ -1120,6 +1128,75 @@ export async function activate(context: vscode.ExtensionContext) {
       `[Suggestions] ${finalModel.filePath} | scope=${backendScope} | trigger=${trigger} | fuente=${finalModel.source} | linea=${finalModel.line}${finalModel.decisionId ? ` | decision=${finalModel.decisionId}` : ''}${finalModel.blocked ? ' | bloqueada por politica' : ''}`,
     );
     return finalModel;
+  };
+
+  /**
+   * 0.0.40 (prueba del 5-11-2026: ~1 min por respuesta). Antes cada pausa del cursor (3 s) le pedia
+   * al tutor la sugerencia de esa linea y el resumen del archivo, y cada pausa de la seleccion
+   * (1,2 s) otra. Nada las cancelaba en el servidor: la GPU generaba respuestas que nadie leia y la
+   * que el estudiante si esperaba quedaba detras. Ahora seleccionar solo abre la ventana con los
+   * pedidos («Sugerencia ADACEEN», «Proponer una mejora», «Proponer código para continuar») y el
+   * tutor trabaja cuando el estudiante elige uno.
+   *
+   * Si ya hay una respuesta para esta misma seleccion sin cambios en el codigo (la de la ventana,
+   * un codigo pedido o la pista en la cache local), se muestra esa, sin volver a las opciones.
+   */
+  const showSelectionRequestOptions = async () => {
+    const settings = resolveActiveSuggestionSettings();
+    if (!settings.enabled) {
+      publishSuggestionModel(null, false);
+      return null;
+    }
+    if (!settings.useBackend) {
+      // Sin tutor no hay GPU que cuidar: la pista local de siempre.
+      return refreshActiveSuggestion('cursor-idle');
+    }
+    const snapshot = await buildActiveEditorSnapshot(settings);
+    if (!snapshot || !hasActiveSelection(snapshot) || !isSnapshotStillActive(snapshot, 'cursor')) {
+      return null;
+    }
+    const sameSnapshot = (model: ActiveSuggestionModel | null): model is ActiveSuggestionModel =>
+      !!model && !model.applied && model.uriString === snapshot.uriString && model.selectionRangeKey === snapshot.selectionRangeKey;
+    const active = activeSuggestionModel;
+    if (sameSnapshot(active)) {
+      // Ya se esta consultando al tutor por esta seleccion: se espera esa respuesta.
+      if (active.loading || active.pendingMode) {
+        return active;
+      }
+      // La respuesta de esta misma foto del editor (la ventana se habia cerrado al soltar la
+      // seleccion: se vuelve a pintar). Una pista local o «tutor no disponible» si vuelven a las
+      // opciones, para poder pedir otra vez.
+      const phase = suggestionPhase(active);
+      if (active.snapshotKey === snapshot.cacheKey && (phase === 'ready' || phase === 'blocked') && active.source === 'backend') {
+        publishSuggestionModel(active, true);
+        return active;
+      }
+    }
+    // Codigo pedido antes para esta misma foto del editor (refreshActiveSuggestion hace lo mismo).
+    if (sameSnapshot(lastRequestedModel) && lastRequestedModel.snapshotKey === snapshot.cacheKey) {
+      publishSuggestionModel(lastRequestedModel, true);
+      return lastRequestedModel;
+    }
+    const projectIndex = await getWorkspaceProjectIndex();
+    if (!isSnapshotStillActive(snapshot, 'cursor')) {
+      return activeSuggestionModel;
+    }
+    const trigger = resolveSuggestionTrigger('selection-request', snapshot);
+    // La pista de esta seleccion ya llego antes: sale de la cache local, sin pasar por la GPU.
+    if (backendSuggestionCache.cursor.has(buildBackendSuggestionTextCacheKey(snapshot, projectIndex, 'cursor', trigger))) {
+      return refreshActiveSuggestion('selection-request');
+    }
+    const model: ActiveSuggestionModel = {
+      ...buildLocalActiveSuggestion(snapshot, projectIndex),
+      triggerKind: 'cursor',
+      actionsVisible: false,
+      loading: false,
+      awaitingRequest: true,
+      trigger,
+    };
+    publishSuggestionModel(model, true);
+    publishActiveRackSnapshot(snapshot, model, projectIndex, 'selection:awaiting');
+    return model;
   };
 
   const scheduleActiveSuggestionRefresh = (reason = 'auto') => {
@@ -1161,7 +1238,9 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    let model = activeSuggestionModel;
+    const model = activeSuggestionModel;
+    // 0.0.40: solo se revelan las acciones de una respuesta que ya esta para este mismo foco. Antes,
+    // si no la habia, se le pedia al tutor (otra consulta automatica a la GPU).
     if (
       !model ||
       model.uriString !== anchor.uriString ||
@@ -1170,10 +1249,6 @@ export async function activate(context: vscode.ExtensionContext) {
         ? model.selectionRangeKey !== anchor.selectionRangeKey
         : model.line !== anchor.line + 1 || model.column !== anchor.column + 1)
     ) {
-      model = await refreshActiveSuggestion('cursor-idle');
-    }
-
-    if (!model || !isCursorIdleAnchorStillActive(anchor)) {
       return;
     }
     if (!isSuggestionApplyOffered(model)) {
@@ -1227,22 +1302,29 @@ export async function activate(context: vscode.ExtensionContext) {
       return;
     }
     const hasSelection = !!vscode.window.activeTextEditor && !vscode.window.activeTextEditor.selection.isEmpty;
-    const suggestionIdleMs = hasSelection ? ACTIVE_SUGGESTION_SELECTION_IDLE_MS : ACTIVE_SUGGESTION_CURSOR_IDLE_MS;
     const actionIdleMs = hasSelection ? ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS : ACTIVE_SUGGESTION_ACTION_IDLE_MS;
 
-    if (activeSuggestionModel && activeSuggestionModel.uriString !== anchor.uriString) {
+    // Las opciones de una seleccion que ya no esta (se quito o cambio) no se quedan colgadas: su
+    // CodeLens «Sugerencia ADACEEN» pediria ayuda para un bloque que el estudiante ya solto.
+    const staleOptions = !!activeSuggestionModel?.awaitingRequest
+      && (activeSuggestionModel.uriString !== anchor.uriString || activeSuggestionModel.selectionRangeKey !== anchor.selectionRangeKey);
+    if (staleOptions || (activeSuggestionModel && activeSuggestionModel.uriString !== anchor.uriString)) {
       publishSuggestionModel(null, true);
     } else {
       hideSuggestionActions();
     }
 
-    cursorIdleSuggestionTimer = setTimeout(() => {
-      cursorIdleSuggestionTimer = null;
-      if (!isCursorIdleAnchorStillActive(anchor)) {
-        return;
-      }
-      void refreshActiveSuggestion('cursor-idle');
-    }, suggestionIdleMs);
+    // 0.0.40: el cursor quieto ya no consulta al tutor (antes: la linea y el resumen del archivo cada
+    // 3 s). Con seleccion, la ventana se abre con los pedidos y el tutor responde al que se elija.
+    if (hasSelection) {
+      cursorIdleSuggestionTimer = setTimeout(() => {
+        cursorIdleSuggestionTimer = null;
+        if (!isCursorIdleAnchorStillActive(anchor)) {
+          return;
+        }
+        void showSelectionRequestOptions();
+      }, ACTIVE_SUGGESTION_SELECTION_IDLE_MS);
+    }
 
     cursorActionTimer = setTimeout(() => {
       cursorActionTimer = null;
@@ -1461,6 +1543,12 @@ export async function activate(context: vscode.ExtensionContext) {
       return; // se esta preparando el codigo de una accion: un clic mas no hace nada
     }
     const mode = modeOverride || model.applyMode || 'insert';
+    if (model.awaitingRequest && mode === 'delete') {
+      // 0.0.40: sin respuesta del tutor no hay nada que recomiende borrar (la accion del modelo
+      // seria la de la pista local).
+      vscode.window.showInformationMessage('ADACEEN: primero pide una sugerencia o código para esta selección.');
+      return;
+    }
     if (mode !== 'delete' && !suggestionReadyForMode(model, mode)) {
       // 0.0.34: el codigo de la sugerencia no es para esta accion (o no hay codigo): se pide
       // al tutor y se muestra antes de aplicar nada. Sin esperar aqui: mientras llega, el
@@ -1570,6 +1658,10 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('adaceen.selectionWidget.insert', () => applySuggestionCompletion('insert', SELECTION_WIDGET_ORIGIN)),
     vscode.commands.registerCommand('adaceen.selectionWidget.replace', () => applySuggestionCompletion('replace', SELECTION_WIDGET_ORIGIN)),
     vscode.commands.registerCommand('adaceen.selectionWidget.delete', () => applySuggestionCompletion('delete', SELECTION_WIDGET_ORIGIN)),
+    // 0.0.40: botones de la ventana antes de consultar al tutor (titulo del hilo «elige una ayuda»).
+    vscode.commands.registerCommand('adaceen.selectionWidget.suggest', () => requestSelectionSuggestion()),
+    vscode.commands.registerCommand('adaceen.selectionWidget.proposeImprovement', () => applySuggestionCompletion('replace', SELECTION_WIDGET_ORIGIN)),
+    vscode.commands.registerCommand('adaceen.selectionWidget.proposeContinuation', () => applySuggestionCompletion('insert', SELECTION_WIDGET_ORIGIN)),
     vscode.commands.registerCommand('adaceen.selectionWidget.close', () => {
       // Cerrar la ventana sin aplicar cuenta como sugerencia descartada.
       const model = activeSuggestionModel;
@@ -1867,6 +1959,23 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', model.applyMode);
   });
+
+  /**
+   * 0.0.40: «Sugerencia ADACEEN» (ventana flotante, su titulo, el CodeLens o el hover): la pista de
+   * la seleccion, que antes salia sola al seleccionar. Va con el trigger "selection" de entonces: el
+   * backend la trata igual (cache, politica, etapa). «Otra sugerencia» sigue siendo "manual" y es la
+   * que sube la etapa.
+   */
+  async function requestSelectionSuggestion() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.selection.isEmpty) {
+      void vscode.window.showInformationMessage('ADACEEN: selecciona el bloque de código y elige «Sugerencia ADACEEN».');
+      return null;
+    }
+    return refreshActiveSuggestion('selection-request');
+  }
+
+  const requestSuggestionDisposable = vscode.commands.registerCommand('adaceen.requestSuggestion', () => requestSelectionSuggestion());
 
   const refreshSuggestionsDisposable = vscode.commands.registerCommand('adaceen.refreshSuggestions', async () => {
     // «Otra sugerencia» actualiza la ventana flotante en su sitio (antes abria tambien el quiz).
@@ -2178,6 +2287,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     openAssistantDisposable,
     refreshSuggestionsDisposable,
+    requestSuggestionDisposable,
     openSuggestionHistoryDisposable,
     clearSuggestionHistoryDisposable,
     openSuggestionHistoryEntryDisposable,
@@ -2224,7 +2334,8 @@ export async function activate(context: vscode.ExtensionContext) {
       scheduleCursorIdleSuggestionRefresh();
       evaluateErrorSignals();
       if (fileView?.visible) {
-        // Un poco despues: la sugerencia normal del archivo suele traer el resumen igual.
+        // Un poco despues, por si el estudiante solo esta pasando por las pestañas (desde la 0.0.40
+        // la sugerencia del foco ya no trae el resumen: lo pide solo esta vista).
         setTimeout(() => {
           if (vscode.window.activeTextEditor?.document.uri.toString() === activeUri) {
             void requestFileSummary(false);
