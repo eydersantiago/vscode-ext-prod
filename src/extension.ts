@@ -9,7 +9,7 @@ import { currentClientId, initClientIdentity } from './client-identity';
 import { createCodeApplicationGuardDeps, processNextCodeActionForRepo } from './code-actions';
 import { guardCodeApplication, isExplicitClickOrigin } from './code-application-guard';
 import { setEditorConnection } from './connection-state';
-import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, WORKER_TICK_MS } from './constants';
+import { ACTIVE_SUGGESTION_ACTION_IDLE_MS, LOCAL_HINT_CURSOR_IDLE_MS, ACTIVE_SUGGESTION_FALLBACK_DELAY_MS, ACTIVE_SUGGESTION_INDEX_TTL_MS, ACTIVE_SUGGESTION_POST_APPLY_GRACE_MS, ACTIVE_SUGGESTION_SELECTION_ACTION_IDLE_MS, ACTIVE_SUGGESTION_SELECTION_IDLE_MS, BLOCKING_TRIGGER_TTL_MS, WORKER_TICK_MS } from './constants';
 import { courseMaterialListUrl, normalizeCourseMaterial } from './course-material';
 import { EditorConnection } from './editor-connect';
 import { buildActiveEditorSnapshot, collectDocumentDiagnostics, getCursorIdleAnchor, hasActiveSelection, isCursorIdleAnchorStillActive, isSnapshotStillActive, isSuggestionModelDocumentVisible, isSupportedActiveDocument } from './editor-snapshot';
@@ -862,6 +862,11 @@ export async function activate(context: vscode.ExtensionContext) {
     if (reason === 'open-panel') {
       return 'panel';
     }
+    // 0.0.40: «Sugerencia ADACEEN» se pide sobre la seleccion: un bloqueo pendiente del archivo no
+    // la convierte en una pregunta por el error (la respuesta seria para otra linea).
+    if (reason === 'selection-request' && hasActiveSelection(snapshot)) {
+      return 'selection';
+    }
     if (reason === 'blocking' || hasPendingBlocking(snapshot.uriString)) {
       return 'blocking';
     }
@@ -956,6 +961,21 @@ export async function activate(context: vscode.ExtensionContext) {
     if (model.loading) {
       armSlowNotice(model);
     }
+    // 0.0.40: ya no hay una consulta automatica cada 3 s que reemplace esta espera. Si el foco
+    // cambio, el «consultando al tutor» de esta consulta se retira (la respuesta igual entra a la
+    // cache local y sale al volver a seleccionar). La respuesta de un bloqueo sin seleccion es sobre
+    // el error: se muestra aunque el cursor se haya movido dentro del mismo archivo.
+    let loadingMetricId = model.metricId;
+    const stillActive = () => isSnapshotStillActive(snapshot, backendScope)
+      || (trigger === 'blocking' && !hasActiveSelection(snapshot) && isSnapshotStillActive(snapshot, 'file')
+        && !!vscode.window.activeTextEditor?.selection.isEmpty);
+    const abandon = () => {
+      const current = activeSuggestionModel;
+      if (current?.loading && current.metricId === loadingMetricId && current.uriString === snapshot.uriString) {
+        publishSuggestionModel(null, true);
+      }
+      return activeSuggestionModel;
+    };
     publishActiveRackSnapshot(snapshot, model, null, `${reason}:local`);
     if (settings.autoRevealPanel && backendScope === 'file' && autoRevealedSuggestionUri !== snapshot.uriString) {
       void fileView?.reveal(true);
@@ -965,8 +985,8 @@ export async function activate(context: vscode.ExtensionContext) {
     let projectIndex: WorkspaceProjectIndex | null = null;
     if (settings.useBackend) {
       projectIndex = await getWorkspaceProjectIndex();
-      if (!isSnapshotStillActive(snapshot, backendScope)) {
-        return activeSuggestionModel;
+      if (!stillActive()) {
+        return abandon();
       }
       const previousLoading = activeSuggestionModel;
       model = {
@@ -981,6 +1001,7 @@ export async function activate(context: vscode.ExtensionContext) {
         model = { ...model, slow: true };
       }
       publishSuggestionModel(model, true);
+      loadingMetricId = model.metricId;
       if (!model.slow) {
         armSlowNotice(model);
       }
@@ -1062,8 +1083,8 @@ export async function activate(context: vscode.ExtensionContext) {
         if (remainingMs > 0 && !(error instanceof BackendAnsweredWithoutSuggestion)) {
           await delay(remainingMs);
         }
-        if (!isSnapshotStillActive(snapshot, backendScope)) {
-          return activeSuggestionModel;
+        if (!stillActive()) {
+          return abandon();
         }
         model = {
           ...model,
@@ -1077,8 +1098,8 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }
 
-    if (!isSnapshotStillActive(snapshot, backendScope)) {
-      return activeSuggestionModel;
+    if (!stillActive()) {
+      return abandon();
     }
     const keepVisibleActions = backendScope === 'cursor'
       && !!activeSuggestionModel?.actionsVisible
@@ -1086,7 +1107,11 @@ export async function activate(context: vscode.ExtensionContext) {
       && (activeSuggestionModel.selectionRangeKey
         ? activeSuggestionModel.selectionRangeKey === snapshot.selectionRangeKey
         : activeSuggestionModel.line === snapshot.line && activeSuggestionModel.column === snapshot.column);
-    const visibleModel = keepVisibleActions && isSuggestionApplyOffered(model) ? { ...model, actionsVisible: true } : model;
+    // 0.0.40: una respuesta pedida con «Sugerencia ADACEEN» trae sus acciones a la vista (el
+    // temporizador que las revelaba ya paso, sobre las opciones).
+    const showActions = (keepVisibleActions || reason === 'selection-request') && isSuggestionApplyOffered(model);
+    const revealOnArrival = showActions && !keepVisibleActions;
+    const visibleModel = showActions ? { ...model, actionsVisible: true } : model;
     // 0.0.40: la foto del editor de la respuesta del foco. Si el estudiante vuelve a seleccionar el
     // mismo bloque sin cambios, showSelectionRequestOptions muestra esta y no vuelve a las opciones.
     const finalModel = backendScope === 'cursor' && !visibleModel.snapshotKey
@@ -1105,6 +1130,10 @@ export async function activate(context: vscode.ExtensionContext) {
       backendLatencyMs,
       visibleErrorLine: snapshot.diagnostics.firstError?.line ?? null,
     }, true, { latencyMs: shownLatencyMs });
+    if (revealOnArrival) {
+      // Lo mismo que contaba revealSuggestionActions cuando la respuesta llegaba sola.
+      recordSuggestionMetric(finalModel, 'vscode_suggestion_actions_revealed', finalModel.applyMode, { reason }, true);
+    }
     if (finalModel.blocked) {
       recordSuggestionMetric(
         finalModel,
@@ -1251,7 +1280,8 @@ export async function activate(context: vscode.ExtensionContext) {
     ) {
       return;
     }
-    if (!isSuggestionApplyOffered(model)) {
+    if (model.awaitingRequest || !isSuggestionApplyOffered(model)) {
+      // Las opciones (0.0.40) no son una respuesta: nada que revelar ni que contar.
       // Respuesta bloqueada, sin modelo, pista local o sin permiso para aplicar: no hay acciones
       // que revelar (ni vscode_suggestion_actions_revealed que contar).
       return;
@@ -1306,9 +1336,13 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Las opciones de una seleccion que ya no esta (se quito o cambio) no se quedan colgadas: su
     // CodeLens «Sugerencia ADACEEN» pediria ayuda para un bloque que el estudiante ya solto.
-    const staleOptions = !!activeSuggestionModel?.awaitingRequest
-      && (activeSuggestionModel.uriString !== anchor.uriString || activeSuggestionModel.selectionRangeKey !== anchor.selectionRangeKey);
-    if (staleOptions || (activeSuggestionModel && activeSuggestionModel.uriString !== anchor.uriString)) {
+    // Tampoco la espera ni la respuesta de una seleccion que ya no esta (antes las reemplazaba la
+    // consulta automatica del cursor). Al volver a seleccionarla salen de la cache local o de
+    // lastRequestedModel, sin GPU.
+    const active = activeSuggestionModel;
+    const staleSelection = !!active && !active.applied && active.selectionLineCount > 0
+      && (active.uriString !== anchor.uriString || active.selectionRangeKey !== anchor.selectionRangeKey);
+    if (staleSelection || (active && active.uriString !== anchor.uriString)) {
       publishSuggestionModel(null, true);
     } else {
       hideSuggestionActions();
@@ -1316,7 +1350,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // 0.0.40: el cursor quieto ya no consulta al tutor (antes: la linea y el resumen del archivo cada
     // 3 s). Con seleccion, la ventana se abre con los pedidos y el tutor responde al que se elija.
-    if (hasSelection) {
+    // Sin tutor (useBackend apagado) no hay GPU que cuidar: la pista local de siempre.
+    if (!settings.useBackend) {
+      cursorIdleSuggestionTimer = setTimeout(() => {
+        cursorIdleSuggestionTimer = null;
+        if (isCursorIdleAnchorStillActive(anchor)) {
+          void refreshActiveSuggestion('cursor-idle');
+        }
+      }, hasSelection ? ACTIVE_SUGGESTION_SELECTION_IDLE_MS : LOCAL_HINT_CURSOR_IDLE_MS);
+    } else if (hasSelection) {
       cursorIdleSuggestionTimer = setTimeout(() => {
         cursorIdleSuggestionTimer = null;
         if (!isCursorIdleAnchorStillActive(anchor)) {

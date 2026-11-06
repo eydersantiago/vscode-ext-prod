@@ -46,12 +46,11 @@ export class AdaceenSuggestionCodeLensProvider implements vscode.CodeLensProvide
     const range = new vscode.Range(lineIndex, 0, lineIndex, 0);
     if (this.model.awaitingRequest) {
       // 0.0.40: sin pedido todavia no hay pista que resumir (el texto del modelo es el local): el
-      // CodeLens es el mismo pedido de la ventana, por si los comentarios estan ocultos.
-      return [new vscode.CodeLens(range, {
-        title: `$(lightbulb) ADACEEN: ${SUGGEST_LABEL}`,
-        command: 'adaceen.requestSuggestion',
-        arguments: ['codelens'],
-      })];
+      // CodeLens es el mismo pedido de la ventana, por si los comentarios estan ocultos. Con un
+      // pedido de codigo en camino, solo la espera.
+      return [new vscode.CodeLens(range, this.model.pendingMode
+        ? { title: '$(sync~spin) ADACEEN: preparando código…', command: 'adaceen.openFileView' }
+        : { title: `$(lightbulb) ADACEEN: ${SUGGEST_LABEL}`, command: 'adaceen.requestSuggestion', arguments: ['codelens'] })];
     }
     const headline = this.model.loading
       ? 'Cargando sugerencias...'

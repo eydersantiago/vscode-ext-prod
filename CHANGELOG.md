@@ -17,12 +17,19 @@ Prueba del 5 de noviembre con dos personas: la respuesta era buena, pero tardaba
   - La sugerencia del foco ya no pide además el resumen del archivo ni espera a la más lenta de las dos. El resumen lo pide la vista «Este archivo» al abrirse, como ya hacía.
   - Si se vuelve a seleccionar el mismo bloque sin cambios, se muestra la respuesta que ya llegó (la de la ventana, el código pedido o la pista en la caché local) en vez de las opciones, y sin pasar por la GPU.
   - Siguen siendo automáticos el aviso de bloqueo (un error que dura 90 s; ahora sin `file_summary`) y el resumen al abrir «Este archivo».
-- Con las opciones a la vista, «Eliminar selección» no se ofrece (no hay respuesta que lo recomiende) y las opciones no entran al historial de recomendaciones.
+- Con las opciones a la vista, «Eliminar selección» no se ofrece (no hay respuesta que lo recomiende) y las opciones no entran al historial de recomendaciones ni cuentan `vscode_suggestion_actions_revealed`.
+- **Sin la consulta automática, nada se queda colgado.** Antes la consulta del cursor (3 s) reemplazaba cualquier espera o respuesta vieja; ahora:
+  - Al soltar o cambiar la selección se retira lo que era de la anterior: opciones, «consultando al tutor» o respuesta. La respuesta igual entra a la caché local y vuelve, sin GPU, al seleccionar otra vez el mismo bloque.
+  - Si el estudiante se mueve mientras llega una respuesta, su «consultando al tutor» se retira (antes podía quedarse con «El tutor está tardando…» para siempre).
+  - La respuesta de un bloqueo sin selección se muestra aunque el cursor se haya movido en el mismo archivo. Antes se descartaba y la barra de estado quedaba en «cargando».
+- «Sugerencia ADACEEN» va siempre con `trigger: "selection"`, aunque el archivo tenga un bloqueo pendiente (si no, preguntaba por el error y no por el bloque).
+- Una respuesta pedida con «Sugerencia ADACEEN» llega con sus acciones a la vista («Aceptar ayuda» en el CodeLens y el arreglo rápido si los comentarios están ocultos) y cuenta `vscode_suggestion_actions_revealed` (`reason: selection-request`), como cuando llegaba sola.
+- Con `adaceen.suggestions.useBackend` apagado, la pista local sale como antes (cursor quieto 3 s): no hay GPU que cuidar.
 
 ### Agregado
 
 - Comandos `adaceen.requestSuggestion` («ADACEEN: Sugerencia para la selección»), `adaceen.selectionWidget.suggest`, `adaceen.selectionWidget.proposeImprovement` y `adaceen.selectionWidget.proposeContinuation`; contexto del hilo `adaceen-suggestion-request`.
-- Pruebas unitarias (`sugerencia-a-pedido.test.ts`).
+- Pruebas unitarias (`sugerencia-a-pedido.test.ts`). Además, una revisión independiente con un VS Code simulado (31 escenarios: opciones, cada pedido, doble clic, cursor quieto, volver a seleccionar, soltar la selección antes y después de la respuesta, bloqueo, «Otra sugerencia», «Este archivo», telemetría) encontró los cuatro casos de arriba que se quedaban colgados. Quedaron corregidos y comprobados contra la 0.0.38.
 
 ## [0.0.38] - 2026-10-30
 
