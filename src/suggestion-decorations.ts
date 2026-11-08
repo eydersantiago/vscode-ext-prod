@@ -5,7 +5,7 @@ import { codeApplicationNote } from './code-application';
 import { primarySuggestionText } from './selection-widget-model';
 import { ACTIVE_SUGGESTION_SELECTION_MAX_LINES } from './constants';
 import { buildSelectionRangeKey } from './editor-snapshot';
-import { sanitizeTutorMarkdown, UNAVAILABLE_TEXT } from './selection-widget-text';
+import { sanitizeTutorMarkdown, selectionWidgetRequestLinks, UNAVAILABLE_TEXT } from './selection-widget-text';
 import { suggestionApplyModeLabel } from './suggestion-edit';
 import { buildCommandUri } from './suggestion-format';
 import { assertNeverPhase, canOfferRecommendedAction, suggestionPhase } from './suggestion-phase';
@@ -67,6 +67,8 @@ export function buildInlineSuggestionLabel(model: ActiveSuggestionModel) {
     case 'loading':
     case 'pending':
       return 'ADACEEN: cargando pista';
+    case 'awaiting_request':
+      return 'ADACEEN: selección lista · pide una sugerencia o código';
     case 'blocked':
       return `ADACEEN tutor: ${truncateInline(primarySuggestionText(model), 82)}`;
     case 'tutor_unavailable':
@@ -89,6 +91,7 @@ export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
   markdown.isTrusted = {
     enabledCommands: [
       'adaceen.openFileView',
+      'adaceen.requestSuggestion',
       'adaceen.applySuggestionCompletion',
       'adaceen.openRagSource',
     ],
@@ -108,6 +111,12 @@ export function buildSuggestionHoverMarkdown(model: ActiveSuggestionModel) {
   if (phase === 'blocked') {
     // Mensaje controlado del tutor: se muestra tal cual (Markdown) y sin enlace de aplicar.
     markdown.appendMarkdown(`${sanitizeTutorMarkdown(model.tutorMessage || primarySuggestionText(model))}\n\n`);
+    markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
+  } else if (phase === 'awaiting_request') {
+    // 0.0.40: sin pedido todavia: los mismos pedidos que la ventana flotante (con los comentarios
+    // ocultos, el hover es donde se ven).
+    markdown.appendMarkdown(`${escapeMarkdown(model.codeRequestNote || 'Elige qué ayuda quieres. El tutor responde solo cuando lo pides.')}\n\n`);
+    markdown.appendMarkdown(`${selectionWidgetRequestLinks('hover').join(' · ')}\n\n`);
     markdown.appendMarkdown(`[Resumen y material](${openPanelUri})`);
   } else if (phase === 'tutor_unavailable') {
     // Sin modelo: ni accion recomendada ni «aceptar ayuda» (la ventana flotante dice lo mismo).

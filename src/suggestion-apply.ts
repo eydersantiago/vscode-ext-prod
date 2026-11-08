@@ -16,8 +16,9 @@ import type { EditorCodeAction } from './suggestion-code';
 import { buildAppliedSuggestionModel, planSuggestionEdit } from './suggestion-edit';
 import { armSlowNotice, publishSuggestionModel, recordIgnoredSuggestion, recordSuggestionMetric } from './suggestion-publish';
 import { createEmptyBackendSuggestionResult, formatBackendSuggestionError, truncateInline, withActiveSuggestionDeadline } from './suggestion-results';
+import { requestSelectionSuggestion } from './suggestion-refresh';
 import { suppressAutoRefreshForActiveApply } from './suggestion-schedule';
-import { activeSuggestionModel, applyInProgress, codeRequestInFlightKey, dismissedSuggestionMetricId, selectionWidget, setApplyInProgress, setCodeRequestInFlightKey, setDismissedSuggestionMetricId, setLastRequestedModel, setSuppressSuggestionRefreshUntil, suggestionExposure } from './suggestion-state';
+import { activeSuggestionModel, applyInProgress, codeRequestInFlightKey, dismissedSuggestionMetricId, selectionHint, selectionWidget, setApplyInProgress, setCodeRequestInFlightKey, setDismissedSuggestionMetricId, setLastRequestedModel, setSuppressSuggestionRefreshUntil, suggestionExposure } from './suggestion-state';
 import type { ActiveSuggestionModel, BackendSuggestionRequestContext, SuggestionApplyMode } from './types';
 
 const notifyQuizOfAcceptedChange = (
@@ -82,6 +83,7 @@ const requestCodeForModeNow = async (model: ActiveSuggestionModel, mode: EditorC
     return;
   }
   const documentVersion = editor.document.version;
+  selectionHint.lastRequestAt = Date.now();
 
   const pending: ActiveSuggestionModel = { ...model, pendingMode: mode, slow: false, codeRequestNote: '', snapshotKey: snapshot.cacheKey };
   publishSuggestionModel(pending, true);
@@ -193,6 +195,12 @@ const applySuggestionCompletionNow = async (modeOverride: SuggestionApplyMode | 
     return; // se esta preparando el codigo de una accion: un clic mas no hace nada
   }
   const mode = modeOverride || model.applyMode || 'insert';
+  if (model.awaitingRequest && mode === 'delete') {
+    // 0.0.40: sin respuesta del tutor no hay nada que recomiende borrar (la accion del modelo
+    // seria la de la pista local).
+    vscode.window.showInformationMessage('ADACEEN: primero pide una sugerencia o código para esta selección.');
+    return;
+  }
   if (mode !== 'delete' && !suggestionReadyForMode(model, mode)) {
     // 0.0.34: el codigo de la sugerencia no es para esta accion (o no hay codigo): se pide
     // al tutor y se muestra antes de aplicar nada. Sin esperar aqui: mientras llega, el
@@ -303,6 +311,10 @@ export function registerSelectionWidgetCommands(context: vscode.ExtensionContext
     vscode.commands.registerCommand('adaceen.selectionWidget.insert', () => applySuggestionCompletion('insert', SELECTION_WIDGET_ORIGIN)),
     vscode.commands.registerCommand('adaceen.selectionWidget.replace', () => applySuggestionCompletion('replace', SELECTION_WIDGET_ORIGIN)),
     vscode.commands.registerCommand('adaceen.selectionWidget.delete', () => applySuggestionCompletion('delete', SELECTION_WIDGET_ORIGIN)),
+    // 0.0.40: botones de la ventana antes de consultar al tutor (titulo del hilo «elige una ayuda»).
+    vscode.commands.registerCommand('adaceen.selectionWidget.suggest', () => requestSelectionSuggestion()),
+    vscode.commands.registerCommand('adaceen.selectionWidget.proposeImprovement', () => applySuggestionCompletion('replace', SELECTION_WIDGET_ORIGIN)),
+    vscode.commands.registerCommand('adaceen.selectionWidget.proposeContinuation', () => applySuggestionCompletion('insert', SELECTION_WIDGET_ORIGIN)),
     vscode.commands.registerCommand('adaceen.selectionWidget.close', () => {
       // Cerrar la ventana sin aplicar cuenta como sugerencia descartada.
       const model = activeSuggestionModel;

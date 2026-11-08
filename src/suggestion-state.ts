@@ -6,6 +6,7 @@ import { resolveActiveSuggestionSettings } from './settings';
 import { updateSuggestionStatusBar } from './suggestion-decorations';
 import { SuggestionExposureTracker } from './suggestion-exposure';
 import { AdaceenSuggestionCodeActionProvider, AdaceenSuggestionCodeLensProvider, AdaceenSuggestionInlayHintProvider } from './suggestion-providers';
+import type { SelectionHintState } from './selection-hint';
 import { selectionWidgetPresence as selectionWidgetPresenceFor } from './suggestion-surfaces';
 import type { SelectionWidgetPresence } from './suggestion-surfaces';
 import type { ActiveSuggestionModel, BackendSuggestionInFlight, BackendSuggestionRequestScope, BackendSuggestionResult, WorkspaceProjectIndex } from './types';
@@ -25,6 +26,7 @@ export let backendSuggestionCache: Record<BackendSuggestionRequestScope, Map<str
 export let backendSuggestionInFlight: Map<string, BackendSuggestionInFlight>;
 export let activeSuggestionModel: ActiveSuggestionModel | null;
 export let lastRequestedModel: ActiveSuggestionModel | null;
+export let selectionHint: SelectionHintState;
 export let suggestionTimer: ReturnType<typeof setTimeout> | null;
 export let cursorIdleSuggestionTimer: ReturnType<typeof setTimeout> | null;
 export let cursorActionTimer: ReturnType<typeof setTimeout> | null;
@@ -193,6 +195,8 @@ export function initSuggestionState() {
   // Ultimo codigo pedido por el estudiante (0.0.34): se vuelve a mostrar si regresa a la
   // misma seleccion sin cambios (p. ej. despues de «Ver cambios»).
   lastRequestedModel = null;
+  // Recordatorio de como pedir ayuda (0.0.40, selection-hint.ts).
+  selectionHint = { lastShownAt: null, lastRequestAt: null };
   suggestionTimer = null;
   cursorIdleSuggestionTimer = null;
   cursorActionTimer = null;

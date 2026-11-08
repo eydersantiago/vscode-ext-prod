@@ -209,7 +209,8 @@ export const publishSuggestionModel = (model: ActiveSuggestionModel | null, enab
   refreshInlineSuggestionSurfaces();
   maybeOpenSelectionInlinePanel(model);
   refreshFileView();
-  if (model && !model.loading && !model.pendingMode && !model.applied) {
+  // Las opciones de una seleccion (0.0.40) no son una recomendacion: no van al historial.
+  if (model && !model.loading && !model.pendingMode && !model.applied && !model.awaitingRequest) {
     void rememberSuggestionHistory(extensionContext.workspaceState, model)
       .then((history) => {
         setLatestSuggestionHistory(history);

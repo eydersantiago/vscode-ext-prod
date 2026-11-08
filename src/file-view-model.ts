@@ -259,6 +259,8 @@ function suggestionStatus(model: ActiveSuggestionModel) {
     case 'loading':
     case 'pending':
       return model.slow ? 'el tutor está tardando' : 'consultando al tutor';
+    case 'awaiting_request':
+      return 'sin consultar al tutor';
     case 'blocked':
       return 'mensaje del tutor';
     case 'tutor_unavailable':
@@ -271,6 +273,9 @@ function suggestionStatus(model: ActiveSuggestionModel) {
       return assertNeverPhase(phase);
   }
 }
+
+/** 0.0.40: lo que dice la vista mientras la seleccion espera un pedido. */
+export const FILE_VIEW_AWAITING_HEADLINE = 'Elige en la ventana de la selección: «Sugerencia ADACEEN», «Proponer una mejora» o «Proponer código para continuar».';
 
 /** Lineas de la guia en la vista (la ventana flotante muestra el bloque completo). */
 const GUIDE_MAX_LINES = 40;
@@ -327,7 +332,12 @@ export function buildFileViewState(
     ? ''
     : tutorSummary || fromModel ? 'tutor' : 'local';
   const tips = (tutorSummary?.tips.length ? tutorSummary.tips : (fileModel?.fileSuggestions || [])).slice(0, 3);
-  const headline = fileModel ? (fileModel.lineSummary || fileModel.lineSuggestions[0] || fileModel.suggestions[0] || '') : '';
+  // 0.0.40: sin pedido todavia, el texto del modelo es la pista local; la vista dice que elegir.
+  const headline = !fileModel
+    ? ''
+    : fileModel.awaitingRequest
+      ? FILE_VIEW_AWAITING_HEADLINE
+      : (fileModel.lineSummary || fileModel.lineSuggestions[0] || fileModel.suggestions[0] || '');
   return {
     hasFile: !!file,
     fileName: file?.fileName || '',

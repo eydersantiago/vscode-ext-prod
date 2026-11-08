@@ -252,6 +252,13 @@ export type ActiveSuggestionModel = {
   requestedAction?: 'insert' | 'replace';
   /** Se esta pidiendo al tutor el codigo de esta accion (la ventana flotante muestra la espera). */
   pendingMode?: SuggestionApplyMode;
+  /**
+   * 0.0.40: seleccion lista y todavia sin pedido al tutor. La ventana flotante ofrece
+   * «Sugerencia ADACEEN», «Proponer una mejora» y «Proponer código para continuar»; el modelo
+   * del backend solo se consulta cuando el estudiante elige una. El texto local del modelo no se
+   * muestra como pista.
+   */
+  awaitingRequest?: boolean;
   /** La respuesta del tutor tarda mas de lo normal (GPU lenta o encendiendose). */
   slow?: boolean;
   /** Nota del ultimo pedido de codigo: llego sin codigo o fallo. */

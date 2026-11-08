@@ -10,6 +10,10 @@
 //     de aplicar un fragmento escrito para otra cosa (o un «TODO» inventado).
 //   - «Ver panel» llevaba al quiz; ahora es «Resumen y material» (vista «Este
 //     archivo» con el resumen y el material del curso).
+//
+// 0.0.40 (prueba del 5/11/2026: la respuesta tardaba ~1 min): al seleccionar ya no se consulta al
+// tutor. La ventana se abre con «Sugerencia ADACEEN», «Proponer una mejora» y «Proponer código
+// para continuar», y el tutor responde solo a la que el estudiante elija.
 
 import type { CodeApplicationPolicy } from './code-application';
 import { GUIDE_CODE_LABEL } from './suggestion-guide';
@@ -59,6 +63,8 @@ export type SelectionWidgetModel = {
   applicationNote?: string;
   /** Se esta pidiendo al tutor el codigo de esta accion. */
   pendingMode?: SelectionWidgetMode | '';
+  /** 0.0.40: seleccion lista, sin pedido al tutor todavia: la ventana ofrece las opciones. */
+  awaitingRequest?: boolean;
   /** La respuesta tarda mas de lo normal (GPU lenta o encendiendose). */
   slow?: boolean;
   /** El ultimo pedido de codigo llego sin codigo o fallo. */
@@ -78,6 +84,7 @@ export type SelectionWidgetModel = {
 
 /** Comandos que puede abrir un enlace de la ventana (y ninguno mas). */
 export const SELECTION_WIDGET_COMMANDS = [
+  'adaceen.requestSuggestion',
   'adaceen.applySuggestionCompletion',
   'adaceen.showProposalDiff',
   'adaceen.refreshSuggestions',
@@ -94,10 +101,15 @@ export const APPLY_LABEL: Record<SelectionWidgetMode, string> = {
   delete: 'Eliminar selección',
 };
 
-const PROPOSE_LABEL: Record<'insert' | 'replace', string> = {
+export const PROPOSE_LABEL: Record<'insert' | 'replace', string> = {
   replace: 'Proponer una mejora',
   insert: 'Proponer código para continuar',
 };
+
+/** 0.0.40: el pedido de la pista (antes salia solo al seleccionar). */
+export const SUGGEST_LABEL = 'Sugerencia ADACEEN';
+
+const AWAITING_NOTE = 'Elige qué ayuda quieres. El tutor responde solo cuando lo pides.';
 
 const SLOW_NOTE = 'El tutor está tardando más de lo normal (la GPU puede estar lenta o encendiéndose). La respuesta aparece aquí sola.';
 
@@ -135,6 +147,22 @@ export function selectionWidgetShowsTitleActions(model: SelectionWidgetModel) {
   return suggestionPhase(model) === 'ready' && selectionWidgetOffersApply(model);
 }
 
+/**
+ * Que botones lleva el titulo de la ventana (package.json, menu comments/commentThread/title):
+ *   request   0.0.40, sin pedido todavia: Sugerencia ADACEEN, Proponer una mejora y Proponer
+ *             codigo para continuar
+ *   apply     respuesta lista que se puede aplicar: Insertar, Modificar y Eliminar
+ *   readonly  el resto (cargando, bloqueada, sin modelo, pista local): solo cerrar
+ */
+export type SelectionWidgetTitleActions = 'request' | 'apply' | 'readonly';
+
+export function selectionWidgetTitleActions(model: SelectionWidgetModel): SelectionWidgetTitleActions {
+  if (suggestionPhase(model) === 'awaiting_request') {
+    return 'request';
+  }
+  return selectionWidgetShowsTitleActions(model) ? 'apply' : 'readonly';
+}
+
 /** Lo que la ventana muestra del codigo del tutor (0.0.38): la misma regla que la vista «Este archivo». */
 export function selectionWidgetCode(model: SelectionWidgetModel): DisplayedCode {
   return resolveDisplayedCode(model);
@@ -166,6 +194,8 @@ function sourceLabel(model: SelectionWidgetModel, phase: SuggestionPhase) {
     case 'loading':
     case 'pending':
       return '$(sync~spin) consultando al tutor';
+    case 'awaiting_request':
+      return 'ADACEEN';
     case 'tutor_unavailable':
       return 'tutor no disponible';
     case 'local_fallback':
@@ -188,6 +218,8 @@ export function selectionWidgetTitle(model: SelectionWidgetModel) {
       return model.pendingMode === 'replace' ? 'Preparando una versión mejorada' : 'Preparando código para continuar';
     case 'blocked':
       return 'Mensaje del tutor';
+    case 'awaiting_request':
+      return 'Ayuda para la selección';
     case 'ready':
       if (model.requestedAction === 'replace' && model.completionMode === 'replace') {
         return 'Versión mejorada de la selección';
@@ -203,6 +235,18 @@ export function selectionWidgetTitle(model: SelectionWidgetModel) {
     default:
       return assertNeverPhase(phase);
   }
+}
+
+/**
+ * 0.0.40: los pedidos que ofrece la ventana antes de consultar al tutor, en orden: la pista y los
+ * dos pedidos de codigo. Eliminar no va: sin una respuesta no hay nada que recomendar borrar.
+ */
+export function selectionWidgetRequestLinks(origin = SELECTION_WIDGET_ORIGIN) {
+  return [
+    `**[$(lightbulb) ${SUGGEST_LABEL}](${commandUri('adaceen.requestSuggestion', [origin])})**`,
+    `[$(sparkle) ${PROPOSE_LABEL.replace}](${commandUri('adaceen.applySuggestionCompletion', ['replace', origin])})`,
+    `[$(add) ${PROPOSE_LABEL.insert}](${commandUri('adaceen.applySuggestionCompletion', ['insert', origin])})`,
+  ];
 }
 
 /** Enlaces de accion, en orden: aplicar (y ver cambios), proponer, eliminar. */
@@ -236,7 +280,8 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
   lines.push(`**${selectionWidgetTitle(model)}** (${range}) · ${sourceLabel(model, phase)}`);
   lines.push('');
 
-  if (model.headline && phase !== 'blocked' && phase !== 'tutor_unavailable') {
+  // Sin pedido todavia el texto del modelo es la pista local: no se presenta como si fuera del tutor.
+  if (model.headline && phase !== 'blocked' && phase !== 'tutor_unavailable' && phase !== 'awaiting_request') {
     lines.push(escapeMarkdown(model.headline));
     lines.push('');
   }
@@ -260,6 +305,13 @@ export function buildSelectionWidgetText(model: SelectionWidgetModel) {
       lines.push(`$(sync~spin) _${model.slow ? `${waiting} ${SLOW_NOTE}` : waiting}_`);
       return lines.join('\n');
     }
+    case 'awaiting_request':
+      // Si un pedido de codigo volvio sin codigo (o fallo), su nota va arriba de las opciones.
+      lines.push(`_${escapeMarkdown(model.codeRequestNote || AWAITING_NOTE)}_`);
+      lines.push('');
+      lines.push(selectionWidgetRequestLinks().join(' · '));
+      lines.push(`[$(book) Resumen y material](${commandUri('adaceen.openFileView')})`);
+      return lines.join('\n');
     case 'blocked':
       // Mensaje controlado del tutor (ya viene en Markdown) y ninguna accion de aplicar.
       lines.push(sanitizeTutorMarkdown(model.tutorMessage || '') || '_El tutor no propone código para este bloque._');

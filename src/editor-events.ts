@@ -19,6 +19,7 @@ import { lastActiveDocumentUri, selectionInlinePanelTimer, selectionWidget, setL
 export type EditorEventDeps = {
   openAssistantDisposable: vscode.Disposable;
   refreshSuggestionsDisposable: vscode.Disposable;
+  requestSuggestionDisposable: vscode.Disposable;
   openSuggestionHistoryDisposable: vscode.Disposable;
   clearSuggestionHistoryDisposable: vscode.Disposable;
   openSuggestionHistoryEntryDisposable: vscode.Disposable;
@@ -36,6 +37,7 @@ export function registerEditorEvents(context: vscode.ExtensionContext, deps: Edi
   const {
     openAssistantDisposable,
     refreshSuggestionsDisposable,
+    requestSuggestionDisposable,
     openSuggestionHistoryDisposable,
     clearSuggestionHistoryDisposable,
     openSuggestionHistoryEntryDisposable,
@@ -51,6 +53,7 @@ export function registerEditorEvents(context: vscode.ExtensionContext, deps: Edi
   context.subscriptions.push(
     openAssistantDisposable,
     refreshSuggestionsDisposable,
+    requestSuggestionDisposable,
     openSuggestionHistoryDisposable,
     clearSuggestionHistoryDisposable,
     openSuggestionHistoryEntryDisposable,
@@ -97,7 +100,8 @@ export function registerEditorEvents(context: vscode.ExtensionContext, deps: Edi
       scheduleCursorIdleSuggestionRefresh();
       evaluateErrorSignals();
       if (fileView?.visible) {
-        // Un poco despues: la sugerencia normal del archivo suele traer el resumen igual.
+        // Un poco despues, por si el estudiante solo esta pasando por las pestañas (desde la 0.0.40
+        // la sugerencia del foco ya no trae el resumen: lo pide solo esta vista).
         setTimeout(() => {
           if (vscode.window.activeTextEditor?.document.uri.toString() === activeUri) {
             void requestFileSummary(false);

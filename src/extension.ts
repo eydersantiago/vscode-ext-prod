@@ -13,6 +13,7 @@ import { registerFileView } from './file-view-commands';
 import { registerWorkshopProgress } from './file-view-controller';
 import { initDependencyIndexState, initFileViewState, workshopProgress } from './file-view-state';
 import { registerScanWorker } from './scan-worker';
+import { registerSelectionHint } from './selection-hint-reminder';
 import { refreshLocalBackendDetection } from './settings';
 import { registerSelectionWidgetCommands } from './suggestion-apply';
 import { registerSelectionWidgetVisibility } from './suggestion-publish';
@@ -55,6 +56,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const {
     openAssistantDisposable,
     refreshSuggestionsDisposable,
+    requestSuggestionDisposable,
     openSuggestionHistoryDisposable,
     clearSuggestionHistoryDisposable,
     openSuggestionHistoryEntryDisposable,
@@ -68,6 +70,7 @@ export async function activate(context: vscode.ExtensionContext) {
   registerEditorEvents(context, {
     openAssistantDisposable,
     refreshSuggestionsDisposable,
+    requestSuggestionDisposable,
     openSuggestionHistoryDisposable,
     clearSuggestionHistoryDisposable,
     openSuggestionHistoryEntryDisposable,
@@ -89,6 +92,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }),
   }));
+  registerSelectionHint(context);
   scheduleCursorIdleSuggestionRefresh();
   evaluateErrorSignals();
   void runWorkerCycle();

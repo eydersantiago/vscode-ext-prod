@@ -11,10 +11,10 @@ import { buildRagSourceMarkdown, buildRagSourceTargetUrl } from './suggestion-fo
 import { formatSuggestionHistoryMarkdown, readSuggestionHistory, writeSuggestionHistory } from './suggestion-history';
 import { toQuizHistoryItems } from './suggestion-metrics';
 import { recordSuggestionMetric } from './suggestion-publish';
-import { refreshActiveSuggestion } from './suggestion-refresh';
+import { refreshActiveSuggestion, requestSelectionSuggestion } from './suggestion-refresh';
 import { normalizeRagSources } from './suggestion-results';
 import { scheduleCursorIdleSuggestionRefresh } from './suggestion-schedule';
-import { activeSuggestionModel } from './suggestion-state';
+import { activeSuggestionModel, selectionHint } from './suggestion-state';
 import type { ScanCommandArgs, SuggestionApplyMode } from './types';
 import { performWorkspaceScan, renderScanOutput } from './workspace-scan';
 
@@ -28,8 +28,11 @@ export function registerExtensionCommands(context: vscode.ExtensionContext) {
     recordSuggestionMetric(model, 'vscode_suggestion_panel_opened', model.applyMode);
   });
 
+  const requestSuggestionDisposable = vscode.commands.registerCommand('adaceen.requestSuggestion', () => requestSelectionSuggestion());
+
   const refreshSuggestionsDisposable = vscode.commands.registerCommand('adaceen.refreshSuggestions', async () => {
     // «Otra sugerencia» actualiza la ventana flotante en su sitio (antes abria tambien el quiz).
+    selectionHint.lastRequestAt = Date.now();
     const model = await refreshActiveSuggestion('manual-refresh');
     if (model) {
       recordSuggestionMetric(model, 'vscode_suggestion_manual_refresh', model.applyMode);
@@ -204,6 +207,7 @@ export function registerExtensionCommands(context: vscode.ExtensionContext) {
   return {
     openAssistantDisposable,
     refreshSuggestionsDisposable,
+    requestSuggestionDisposable,
     openSuggestionHistoryDisposable,
     clearSuggestionHistoryDisposable,
     openSuggestionHistoryEntryDisposable,
